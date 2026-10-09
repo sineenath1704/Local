@@ -1,0 +1,28 @@
+{
+  "profile": {
+    "location": "บ้านห้วยห้อม แม่ฮ่องสอน",
+    "name": "โฮมสเตย์ป้าสมศรี",
+    "username": "@Pasomsri",
+    "bio": "โฮมสเตย์ป้าสมศรี\nป้าใจดีจ้ามากันเยอะๆนะลูก",
+    "avatarKey": "persona_pa_somsri"
+  },
+  "registeredInfo": {
+    "smceCode": "3-58-03-01/1-0012",
+    "presidentName": "นางสมศรี ห้วยห้อมงาม",
+    "phone": "081-xxx-xxxx",
+    "address": "หมู่ 1 ต.ห้วยห้อม อ.แม่ลาน้อย จ.แม่ฮ่องสอน 58120",
+    "carryingCapacity": "รองรับได้สูงสุด 15 คน / วัน",
+    "pricingCeiling": "โฮมสเตย์ 450 - 500 บาท / คืน (รวมอาหารเช้า)",
+    "category": "โฮมสเตย์วิถีชุมชน & กาแฟอาราบิกาอินทรีย์",
+    "verifiedStatus": true,
+    "registeredDate": "15 พ.ย. 2025"
+  },
+  "ownedVideos": [
+    { "id": "my-vid-1", "videoKey": "huai_hom", "thumbKey": "persona_pa_somsri", "caption": "ดริปกาแฟสดห้วยห้อมยามเช้า ☕️🌄", "views": "1.2K" },
+    { "id": "my-vid-2", "videoKey": "ja_bo", "thumbKey": "persona_art", "caption": "ชมการทอผ้าขนแกะธรรมชาติของชุมชน 🧶", "views": "980" },
+    { "id": "my-vid-3", "videoKey": "huai_hom", "thumbKey": "card_persona_pa_somsri", "caption": "ฝูงแกะเล็มหญ้ากลางหุบเขา 🐑", "views": "1.5K" },
+    { "id": "my-vid-4", "videoKey": "ja_bo", "thumbKey": "card_persona_art", "caption": "วิถีชีวิตโฮมสเตย์ดอยสูง", "views": "870" },
+    { "id": "my-vid-5", "videoKey": "huai_hom", "thumbKey": "persona_art", "caption": "งานคราฟต์ผ้าฝ้ายย้อมคราม", "views": "740" },
+    { "id": "my-vid-6", "videoKey": "ja_bo", "thumbKey": "persona_pa_somsri", "caption": "บรรยากาศยามเย็นอากาศ 16 องศา 🌙", "views": "1.1K" }
+  ]
+}

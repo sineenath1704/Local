@@ -1,0 +1,79 @@
+{
+  "profiles": [
+    {
+      "id": "user-pasomsri",
+      "kind": "community",
+      "name": "โฮมสเตย์ป้าสมศรี",
+      "username": "@Pasomsri",
+      "avatarKey": "card_persona_pa_somsri",
+      "bio": "โฮมสเตย์ป้าสมศรี\nป้าใจดีจ้ามากันเยอะๆนะลูก",
+      "location": "บ้านห้วยห้อม แม่ฮ่องสอน",
+      "followersBase": 911,
+      "community": {
+        "provinceName": "แม่ฮ่องสอน",
+        "districtName": "แม่ลาน้อย",
+        "mapLabel": "บ้านห้วยห้อม อ.แม่ลาน้อย",
+        "registeredInfo": {
+          "smceCode": "3-58-03-01/1-0012",
+          "presidentName": "นางสมศรี ห้วยห้อมงาม",
+          "phone": "081-xxx-xxxx",
+          "address": "หมู่ 1 ต.ห้วยห้อม อ.แม่ลาน้อย จ.แม่ฮ่องสอน 58120",
+          "carryingCapacity": "รองรับได้สูงสุด 15 คน / วัน",
+          "pricingCeiling": "โฮมสเตย์ 450 - 500 บาท / คืน (รวมอาหารเช้า)",
+          "category": "โฮมสเตย์วิถีชุมชน & กาแฟอาราบิกาอินทรีย์",
+          "verifiedStatus": true,
+          "registeredDate": "15 พ.ย. 2025"
+        },
+        "business": {
+          "aboutText": "กลุ่มโฮมสเตย์และวิสาหกิจกาแฟอาราบิกาอินทรีย์บ้านห้วยห้อม ดำเนินงานโดยชุมชนปกาเกอะญอ",
+          "openHours": "เช็คอิน 14:00 • เช็คเอาท์ 11:00",
+          "services": ["ที่พักโฮมสเตย์", "ทัวร์ไร่กาแฟ", "เวิร์กช็อปทอผ้าขนแกะ", "อาหารพื้นถิ่น"],
+          "contactLine": "@pasomsri-homestay"
+        }
+      },
+      "videoKeys": ["huai_hom", "huai_hom", "ja_bo", "huai_hom", "ja_bo", "huai_hom"]
+    },
+    {
+      "id": "user-art",
+      "kind": "tourist",
+      "name": "อาร์ต พาเที่ยวชุมชน",
+      "username": "@อาร์ต_LocalExplorer",
+      "avatarKey": "card_persona_art",
+      "bio": "นักเดินทางสายชุมชน ชอบของกินพื้นถิ่น 🎒\nรีวิวจริง ไม่สปอนเซอร์",
+      "location": "กรุงเทพฯ",
+      "followersBase": 1540,
+      "videoKeys": ["ja_bo", "huai_hom", "ja_bo"]
+    },
+    {
+      "id": "user-khamla",
+      "kind": "community",
+      "name": "คุณยายคำหล้า",
+      "username": "@บ้านปางห้า_คราฟต์",
+      "avatarKey": "card_persona_pa_somsri",
+      "bio": "กลุ่มคราฟต์กระดาษสาบ้านปางห้า\nงานทำมือจากใบไม้จริง 🍃",
+      "location": "บ้านปางห้า เชียงราย",
+      "followersBase": 640,
+      "community": {
+        "provinceName": "เชียงราย",
+        "districtName": "แม่สาย",
+        "mapLabel": "บ้านปางห้า อ.แม่สาย",
+        "registeredInfo": {
+          "smceCode": "3-57-05-02/1-0045",
+          "presidentName": "นางคำหล้า ใจดี",
+          "carryingCapacity": "รองรับได้สูงสุด 20 คน / วัน",
+          "pricingCeiling": "เวิร์กช็อป 150 - 300 บาท / ท่าน",
+          "category": "หัตถกรรมกระดาษสา & ชาอัสสัม",
+          "verifiedStatus": true,
+          "registeredDate": "2 ต.ค. 2025"
+        },
+        "business": {
+          "aboutText": "วิสาหกิจชุมชนคราฟต์กระดาษสาบ้านปางห้า สืบทอดภูมิปัญญาการทำกระดาษสาจากใบไม้",
+          "openHours": "เปิดทุกวัน 08:00 - 17:00",
+          "services": ["เวิร์กช็อปกระดาษสา", "คาเฟ่ชาอัสสัม", "ของที่ระลึกงานคราฟต์"],
+          "contactLine": "@pangha-craft"
+        }
+      },
+      "videoKeys": ["huai_hom", "ja_bo"]
+    }
+  ]
+}

@@ -1,0 +1,86 @@
+[
+  {
+    "id": "post-1",
+    "authorId": "user-pasomsri",
+    "videoKey": "huai_hom",
+    "posterKey": "persona_pa_somsri",
+    "author": {
+      "name": "โฮมสเตย์ป้าสมศรี",
+      "handle": "@โฮมสเตย์ป้าสมศรี",
+      "avatarKey": "card_persona_pa_somsri"
+    },
+    "location": {
+      "village": "บ้านห้วยห้อม",
+      "district": "อ.แม่ลาน้อย",
+      "province": "แม่ฮ่องสอน"
+    },
+    "caption": "เช้านี้ที่ห้วยห้อม ดริปกาแฟสดใต้ร่มไม้ ดูฝูงแกะเล็มหญ้าหน้าหนาว อากาศ 16 องศา ฟินมากกก ☕️🐑",
+    "hashtags": ["#เที่ยวแม่ฮ่องสอน", "#โฮมสเตย์ชุมชน", "#Local"],
+    "booking": {
+      "roomsText": "ว่าง 2 ห้อง",
+      "price": 450
+    },
+    "initialLikes": 1042,
+    "initialComments": 1015,
+    "initialSaves": 1028,
+    "initialShares": 1003,
+    "initialLiked": true,
+    "initialSaved": true
+  },
+  {
+    "id": "post-2",
+    "authorId": "user-art",
+    "videoKey": "ja_bo",
+    "posterKey": "persona_art",
+    "author": {
+      "name": "อาร์ต พาเที่ยวชุมชน",
+      "handle": "@อาร์ต_LocalExplorer",
+      "avatarKey": "card_persona_art"
+    },
+    "location": {
+      "village": "บ้านนาต้นจั่น",
+      "district": "อ.ศรีสัชนาลัย",
+      "province": "สุโขทัย"
+    },
+    "caption": "ชิมข้าวเปิ๊บโบราณ นั่งรถอีแต๊กชมพระอาทิตย์ตกดินกลางทุ่งนา อบอุ่นเหมือนได้กลับบ้านต่างจังหวัด 🌾🌤️",
+    "hashtags": ["#บ้านนาต้นจั่น", "#สุโขทัย", "#วิถีชุมชน", "#Local"],
+    "booking": {
+      "roomsText": "ว่าง 1 หลัง",
+      "price": 550
+    },
+    "initialLikes": 876,
+    "initialComments": 432,
+    "initialSaves": 619,
+    "initialShares": 310,
+    "initialLiked": false,
+    "initialSaved": false
+  },
+  {
+    "id": "post-3",
+    "authorId": "user-khamla",
+    "videoKey": "huai_hom",
+    "posterKey": "persona_pa_somsri",
+    "author": {
+      "name": "คุณยายคำหล้า",
+      "handle": "@บ้านปางห้า_คราฟต์",
+      "avatarKey": "card_persona_pa_somsri"
+    },
+    "location": {
+      "village": "บ้านปางห้า",
+      "district": "อ.แม่สาย",
+      "province": "เชียงราย"
+    },
+    "caption": "ชวนทำเวิร์กช็อปทำกระดาษสาจากใบไม้สด จิบชาอัสสัมหอมกรุ่นท่ามกลางสายหมอกยามเช้า 🍃✨",
+    "hashtags": ["#บ้านปางห้า", "#เชียงราย", "#หัตถกรรมไทย", "#Local"],
+    "booking": {
+      "roomsText": "ว่าง 3 ห้อง",
+      "price": 500
+    },
+    "initialLikes": 1250,
+    "initialComments": 689,
+    "initialSaves": 940,
+    "initialShares": 512,
+    "initialLiked": false,
+    "initialSaved": true
+  }
+]

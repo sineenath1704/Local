@@ -1,0 +1,69 @@
+{
+  "notifications": [
+    {
+      "id": "noti-1",
+      "type": "follow",
+      "actorName": "ธนกร เที่ยวไทย",
+      "avatarKey": "card_persona_art",
+      "text": "เริ่มติดตามคุณ",
+      "timeAgo": "5 นาทีที่ผ่านมา",
+      "unread": true
+    },
+    {
+      "id": "noti-2",
+      "type": "like",
+      "actorName": "มะลิ",
+      "avatarKey": "generic",
+      "text": "ถูกใจคลิปของคุณ",
+      "timeAgo": "1 ชั่วโมงที่ผ่านมา",
+      "unread": true
+    },
+    {
+      "id": "noti-3",
+      "type": "comment",
+      "actorName": "น้ำฝน",
+      "avatarKey": "generic",
+      "text": "แสดงความคิดเห็นในคลิปของคุณ: น่าไปมากเลยค่ะ",
+      "timeAgo": "3 ชั่วโมงที่ผ่านมา",
+      "unread": false
+    },
+    {
+      "id": "noti-4",
+      "type": "system",
+      "actorName": "Local",
+      "avatarKey": "generic",
+      "text": "ยินดีต้อนรับสู่ Local! เริ่มสำรวจชุมชนท่องเที่ยวได้เลย",
+      "timeAgo": "เมื่อวาน",
+      "unread": false
+    }
+  ],
+  "directChats": [
+    {
+      "id": "dm-mali",
+      "friendId": "fr-mali",
+      "messages": [
+        { "id": "m1", "senderId": "fr-mali", "text": "คลิปบ้านห้วยห้อมที่ส่งมาน่าไปมากเลย 😍", "at": 1 },
+        { "id": "m2", "senderId": "me", "text": "ใช่ กะว่าจะไปหน้าหนาวนี้แหละ", "at": 2 }
+      ]
+    },
+    {
+      "id": "dm-tanakorn",
+      "friendId": "fr-tanakorn",
+      "messages": [
+        { "id": "m1", "senderId": "fr-tanakorn", "text": "ทริปเชียงรายไปกันวันไหนดี", "at": 1 }
+      ]
+    }
+  ],
+  "groupChats": [
+    {
+      "id": "grp-trip-north",
+      "name": "ทริปเหนือหน้าหนาว ❄️",
+      "memberIds": ["me", "fr-mali", "fr-tanakorn", "fr-namfon"],
+      "messages": [
+        { "id": "m1", "senderId": "fr-tanakorn", "text": "รวมพลคนอยากไปเหนือ!", "at": 1 },
+        { "id": "m2", "senderId": "fr-mali", "text": "จองตั๋วยัง", "at": 2 },
+        { "id": "m3", "senderId": "me", "text": "เดี๋ยวหาโฮมสเตย์ให้", "at": 3 }
+      ]
+    }
+  ]
+}

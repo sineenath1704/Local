@@ -1,0 +1,9 @@
+{
+  "friends": [
+    { "id": "fr-mali", "name": "มะลิ", "username": "@mali_trips", "avatarKey": "generic" },
+    { "id": "fr-tanakorn", "name": "ธนกร เที่ยวไทย", "username": "@tanakorn.go", "avatarKey": "card_persona_art" },
+    { "id": "fr-namfon", "name": "น้ำฝน", "username": "@namfon", "avatarKey": "generic" },
+    { "id": "fr-chaiwat", "name": "ชัยวัฒน์", "username": "@chaiwat_cm", "avatarKey": "generic" },
+    { "id": "fr-ploy", "name": "พลอย", "username": "@ployploy", "avatarKey": "card_persona_pa_somsri" }
+  ]
+}
