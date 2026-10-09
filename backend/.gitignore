@@ -1,8 +1,11 @@
 node_modules/
 dist/
+.vercel/
 *.log
 
 # Never commit real secrets
 .env
 .env.*
 !.env.example
+
+.vercel

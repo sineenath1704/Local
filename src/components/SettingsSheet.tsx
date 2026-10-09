@@ -15,6 +15,7 @@ import {
   CheckIcon,
 } from "react-native-heroicons/outline";
 import { useSettings, AppLanguage } from "../state/SettingsContext";
+import { useAuth } from "../state/AuthContext";
 
 interface SettingsSheetProps {
   visible: boolean;
@@ -28,7 +29,8 @@ const LANGUAGES: { key: AppLanguage; label: string; flag: string }[] = [
 
 export default function SettingsSheet({ visible, onClose }: SettingsSheetProps) {
   const insets = useSafeAreaInsets();
-  const { language, setLanguage, logout } = useSettings();
+  const { language, setLanguage } = useSettings();
+  const { signOut } = useAuth();
 
   const confirmLogout = () => {
     Alert.alert("ออกจากระบบ", "ต้องการออกจากระบบใช่ไหม?", [
@@ -36,9 +38,9 @@ export default function SettingsSheet({ visible, onClose }: SettingsSheetProps) 
       {
         text: "ออกจากระบบ",
         style: "destructive",
-        onPress: () => {
-          logout();
+        onPress: async () => {
           onClose();
+          await signOut();
         },
       },
     ]);

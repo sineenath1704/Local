@@ -12,12 +12,21 @@ import { Platform } from "react-native";
  * For staging/production, set API_BASE_URL_OVERRIDE to your deployed URL.
  */
 
-// 👉 Set this to force a specific backend URL (leave "" to auto-detect in dev).
+// 👉 Priority 1: env override (set EXPO_PUBLIC_API_BASE_URL in .env).
+//    This is REQUIRED when running on a real device (phone/iPad) because
+//    "localhost" there means the device itself, not your computer.
+//    Use your PC's LAN IP, e.g. http://192.168.3.30:1025
+const ENV_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? "";
+
+// Priority 2: in-code override (optional).
 const API_BASE_URL_OVERRIDE = "";
 
 const DEV_PORT = 1025;
 
 function resolveBaseUrl(): string {
+  if (ENV_BASE_URL.trim() !== "") {
+    return ENV_BASE_URL.trim().replace(/\/+$/, "");
+  }
   if (API_BASE_URL_OVERRIDE.trim() !== "") {
     return API_BASE_URL_OVERRIDE.trim().replace(/\/+$/, "");
   }

@@ -8,7 +8,10 @@ import { InteractionProvider } from "./src/state/InteractionContext";
 import { ChatProvider } from "./src/state/ChatContext";
 import { AiPlannerProvider } from "./src/state/AiPlannerContext";
 import { MyProfileProvider } from "./src/state/MyProfileContext";
-import { SettingsProvider, useSettings } from "./src/state/SettingsContext";
+import { SettingsProvider } from "./src/state/SettingsContext";
+import { AuthProvider, useAuth } from "./src/state/AuthContext";
+import AuthScreen from "./src/Pages/Auth/AuthScreen";
+import { ActivityIndicator } from "react-native";
 import HomeScreen from "./src/Pages/HomeScreen";
 import ProfileLocal from "./src/Pages/ProfileLocal";
 import ChatScreen from "./src/Pages/ChatScreen";
@@ -18,7 +21,6 @@ import MapScreen, { MapSelectionInfo } from "./src/Pages/Map/MapScreen";
 import { PlaceItem } from "./src/data/thailandGeographicData";
 
 function AppContent() {
-  const { loggedOut, resetSession } = useSettings();
   const [activeTab, setActiveTab] = useState<TabKey>("home");
   const [isMapOpen, setIsMapOpen] = useState<boolean>(false);
   const [mapProvinceName, setMapProvinceName] = useState<string>("กรุงเทพมหานคร");
@@ -62,24 +64,6 @@ function AppContent() {
       setProfileFolderId(null);
     }
   };
-
-  // Logged-out placeholder (auth system not built yet)
-  if (loggedOut) {
-    return (
-      <View className="flex-1 bg-[#121212] items-center justify-center px-8">
-        <Text className="text-2xl font-black text-white mb-2">ออกจากระบบแล้ว</Text>
-        <Text className="text-sm text-gray-400 text-center mb-6">
-          ระบบล็อกอินยังอยู่ระหว่างการพัฒนา กดด้านล่างเพื่อกลับเข้าใช้งาน
-        </Text>
-        <View
-          className="bg-[#00D26A] px-8 py-3 rounded-full"
-          onTouchEnd={() => resetSession()}
-        >
-          <Text className="text-black font-bold">กลับเข้าสู่ระบบ</Text>
-        </View>
-      </View>
-    );
-  }
 
   return (
       <View className="flex-1 w-full h-full bg-black">
@@ -159,20 +143,46 @@ function AppContent() {
   );
 }
 
+/** Decides between the auth screen and the main app based on the session. */
+function AuthGate() {
+  const { loading, session, configured } = useAuth();
+
+  // While Supabase isn't configured, let the app run (dev) so you can still
+  // see screens; auth actions will warn until .env is set.
+  if (loading) {
+    return (
+      <View className="flex-1 bg-[#FDFBF7] items-center justify-center">
+        <ActivityIndicator size="large" color="#2D6A4F" />
+      </View>
+    );
+  }
+
+  if (configured && !session) {
+    return <AuthScreen />;
+  }
+
+  // Signed in (or Supabase not configured yet) → the full app, with its providers.
+  return (
+    <SettingsProvider>
+      <InteractionProvider>
+        <MyProfileProvider>
+          <ChatProvider>
+            <AiPlannerProvider>
+              <AppContent />
+            </AiPlannerProvider>
+          </ChatProvider>
+        </MyProfileProvider>
+      </InteractionProvider>
+    </SettingsProvider>
+  );
+}
+
 export default function App() {
   return (
     <SafeAreaProvider>
-      <SettingsProvider>
-        <InteractionProvider>
-          <MyProfileProvider>
-            <ChatProvider>
-              <AiPlannerProvider>
-                <AppContent />
-              </AiPlannerProvider>
-            </ChatProvider>
-          </MyProfileProvider>
-        </InteractionProvider>
-      </SettingsProvider>
+      <AuthProvider>
+        <AuthGate />
+      </AuthProvider>
     </SafeAreaProvider>
   );
 }

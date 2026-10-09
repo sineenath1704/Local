@@ -4,6 +4,7 @@
     "slug": "local",
     "version": "1.0.0",
     "orientation": "portrait",
+    "scheme": "locallocal",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
@@ -28,7 +29,8 @@
         {
           "photosPermission": "แอป Local ขอเข้าถึงคลังรูปภาพเพื่อให้คุณเปลี่ยนรูปโปรไฟล์ได้"
         }
-      ]
+      ],
+      "expo-web-browser"
     ]
   }
 }
