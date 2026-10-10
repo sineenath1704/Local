@@ -8,7 +8,7 @@ import {
   Image,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useAuth } from "../../state/AuthContext";
+import { useAuth, redirectTo } from "../../state/AuthContext";
 
 /**
  * Google sign-in screen. One tap → Supabase OAuth via in-app browser.
@@ -69,6 +69,14 @@ export default function AuthScreen() {
 
         {error && <Text style={styles.error}>{error}</Text>}
 
+        {/* Debug: Redirect URL ที่ต้องนำไป whitelist ใน Supabase */}
+        <View style={styles.debugBox}>
+          <Text style={styles.debugLabel}>Redirect URL (นำไปใส่ใน Supabase):</Text>
+          <Text selectable style={styles.debugValue}>
+            {redirectTo}
+          </Text>
+        </View>
+
         <Text style={styles.terms}>
           การเข้าสู่ระบบถือว่ายอมรับเงื่อนไขการใช้งานและนโยบายความเป็นส่วนตัว
         </Text>
@@ -104,7 +112,16 @@ const styles = StyleSheet.create({
   googleIcon: { width: 20, height: 20, marginRight: 10 },
   googleText: { fontSize: 16, fontWeight: "bold", color: "#1F2937" },
   error: { color: "#DC2626", fontSize: 13, marginTop: 16, textAlign: "center" },
-  terms: { color: "#9CA3AF", fontSize: 11, textAlign: "center", marginTop: 28, lineHeight: 16 },
+  debugBox: {
+    marginTop: 20,
+    backgroundColor: "#F3F4F6",
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  debugLabel: { color: "#6B7280", fontSize: 10, textAlign: "center", marginBottom: 2 },
+  debugValue: { color: "#374151", fontSize: 11, textAlign: "center", fontWeight: "600" },
+  terms: { color: "#9CA3AF", fontSize: 11, textAlign: "center", marginTop: 20, lineHeight: 16 },
   warnBox: { backgroundColor: "#FEF3C7", borderColor: "#FDE68A", borderWidth: 1, borderRadius: 12, padding: 12, marginBottom: 24 },
   warnText: { color: "#92400E", fontSize: 12, lineHeight: 18, textAlign: "center" },
 });

@@ -15,8 +15,9 @@ import ShareSheet from "../components/ShareSheet";
 import UserProfileScreen from "./UserProfileScreen";
 import { MapSelectionInfo } from "./Map/MapScreen";
 import { PlaceItem } from "../data/thailandGeographicData";
-import { HOME_FEED_POSTS, buildPlaceFeedPost } from "../data/homeFeedData";
+import { buildPlaceFeedPost } from "../data/homeFeedData";
 import { getProfileById } from "../data/profilesData";
+import { useFeed } from "../hooks/useFeed";
 
 interface HomeScreenProps {
   onOpenMap?: (provinceName?: string) => void;
@@ -44,15 +45,25 @@ export default function HomeScreen({
 
   const isSmallDevice = screenHeight < 700;
 
+  // Feed from Supabase (falls back to bundled posts if empty/unconfigured)
+  const { posts: supabasePosts } = useFeed();
+
   // Build dynamic feed: when a place is chosen from map, prepend its tailored video post
   const feedPosts = useMemo(() => {
     if (selectedPlace) {
-      return [buildPlaceFeedPost(selectedPlace), ...HOME_FEED_POSTS];
+      return [buildPlaceFeedPost(selectedPlace), ...supabasePosts];
     }
-    return HOME_FEED_POSTS;
-  }, [selectedPlace]);
+    return supabasePosts;
+  }, [selectedPlace, supabasePosts]);
 
-  const [activePostId, setActivePostId] = useState<string>(feedPosts[0].id);
+  const [activePostId, setActivePostId] = useState<string>("");
+
+  // Keep the active post valid as the feed loads/changes.
+  useEffect(() => {
+    if (feedPosts.length > 0 && !feedPosts.some((p) => p.id === activePostId)) {
+      setActivePostId(feedPosts[0].id);
+    }
+  }, [feedPosts, activePostId]);
 
   // Overlay/navigation state driven by card actions
   const [saveVideoId, setSaveVideoId] = useState<string | null>(null);

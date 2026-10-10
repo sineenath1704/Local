@@ -13,6 +13,7 @@ import { AuthProvider, useAuth } from "./src/state/AuthContext";
 import AuthScreen from "./src/Pages/Auth/AuthScreen";
 import { ActivityIndicator } from "react-native";
 import HomeScreen from "./src/Pages/HomeScreen";
+import CreatePostScreen from "./src/Pages/CreatePostScreen";
 import ProfileLocal from "./src/Pages/ProfileLocal";
 import ChatScreen from "./src/Pages/ChatScreen";
 import AiHubScreen from "./src/Pages/AI/AiHubScreen";
@@ -69,7 +70,9 @@ function AppContent() {
       <View className="flex-1 w-full h-full bg-black">
         <StatusBar
           style={
-            activeTab === "profile" || (activeTab === "home" && isMapOpen)
+            activeTab === "profile" ||
+            activeTab === "create" ||
+            (activeTab === "home" && isMapOpen)
               ? "dark"
               : "light"
           }
@@ -121,6 +124,11 @@ function AppContent() {
           <ChatScreen onRoomOpenChange={setChatRoomOpen} />
         ) : activeTab === "ai" ? (
           <AiHubScreen onFullScreenChange={setAiFullScreen} />
+        ) : activeTab === "create" ? (
+          <CreatePostScreen
+            onPosted={() => handleTabChange("home")}
+            onCancel={() => handleTabChange("home")}
+          />
         ) : (
           <View className="flex-1 bg-[#121212] items-center justify-center px-6">
             <Text className="text-2xl font-bold text-white mb-2">
@@ -134,6 +142,7 @@ function AppContent() {
 
         {/* Bottom Menu Bar (hidden during Map flow, chat room, AI sub-view, or profile sub-view) */}
         {!isMapOpen &&
+          activeTab !== "create" &&
           !(activeTab === "chat" && chatRoomOpen) &&
           !(activeTab === "ai" && aiFullScreen) &&
           !(activeTab === "profile" && (profileFullScreen || profileFolderId)) && (

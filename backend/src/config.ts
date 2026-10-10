@@ -28,9 +28,21 @@ export const config = {
     timeoutMs: num("AI_TIMEOUT_MS", 120000),
     maxTokens: num("AI_MAX_TOKENS", 1024),
   },
+
+  // Supabase (service_role — SERVER ONLY, bypasses RLS).
+  // Used to persist AI summaries into the `videos` table.
+  supabase: {
+    url: required("SUPABASE_URL"),
+    serviceRoleKey: required("SUPABASE_SERVICE_ROLE_KEY"),
+  },
 };
 
 /** True only when both base URL and token are configured. */
 export function isAiConfigured(): boolean {
   return Boolean(config.ai.baseUrl && config.ai.authToken);
+}
+
+/** True when the backend can read/write the Supabase database. */
+export function isSupabaseConfigured(): boolean {
+  return Boolean(config.supabase.url && config.supabase.serviceRoleKey);
 }

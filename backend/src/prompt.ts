@@ -127,3 +127,45 @@ ${extras ? `\n[meta]\n${extras}` : ""}
   }
 }`;
 }
+
+// ============================================================
+//  CAPTION HELPER — "ให้ AI ช่วยคิดแคปชัน" ตอนโพสต์
+// ============================================================
+
+/** ข้อมูลสำหรับให้ AI ช่วยคิดแคปชัน (ดึงจาก AI summary + สถานที่) */
+export interface CaptionInput {
+  /** ร่างแคปชันที่ผู้ใช้พิมพ์มาบ้างแล้ว (ถ้ามี) */
+  draft?: string;
+  locationName?: string;
+  province?: string;
+  district?: string;
+  hashtags?: string[];
+  /** สรุปจาก AI ของคลิป (แหล่งหลักในการคิดแคปชัน) */
+  summaryText?: string;
+  highlights?: string[];
+  uploaderType?: "community" | "tourist";
+}
+
+export const CAPTION_SYSTEM_PROMPT = `คุณคือผู้ช่วยคิดแคปชันของแอป Local แพลตฟอร์มท่องเที่ยวชุมชน OTOP ไทย
+หน้าที่: เขียนแคปชันสั้นๆ ให้คลิปวิดีโอที่กำลังจะโพสต์ ให้คนอยากดูและอยากไปเที่ยวตาม
+
+กติกา:
+- เขียนเป็นภาษาไทยที่เป็นธรรมชาติ อบอุ่น มีชีวิตชีวา เหมือนเจ้าของคลิปเล่าเอง
+- ความยาว 1–2 ประโยค กระชับ ใส่ emoji ได้ 1–2 ตัว
+- อิงจากสรุป AI และสถานที่ที่ให้มา ห้ามแต่งข้อมูลที่ไม่มี (ราคา/เบอร์)
+- เสนอ 3 ตัวเลือกที่โทนต่างกัน (สนุก / อบอุ่น / กระชับ)
+- ตอบกลับเป็น JSON เท่านั้น: { "captions": ["...", "...", "..."] }`;
+
+export function buildCaptionPrompt(input: CaptionInput): string {
+  const place = [input.locationName, input.district, input.province].filter(Boolean).join(" ");
+  return `โปรดคิดแคปชัน 3 แบบสำหรับคลิปนี้
+
+สถานที่: ${place || "(ไม่ระบุ)"}
+สรุปเนื้อหาคลิป (จาก AI): ${input.summaryText?.trim() || "(ไม่มี)"}
+จุดเด่น: ${input.highlights?.length ? input.highlights.join(", ") : "(ไม่มี)"}
+แฮชแท็กที่ผู้ใช้ใส่: ${input.hashtags?.length ? input.hashtags.join(" ") : "(ไม่มี)"}
+ร่างแคปชันเดิม: ${input.draft?.trim() || "(ไม่มี)"}
+
+ตอบกลับเป็น JSON เท่านั้น:
+{ "captions": ["แคปชันแบบที่ 1", "แคปชันแบบที่ 2", "แคปชันแบบที่ 3"] }`;
+}

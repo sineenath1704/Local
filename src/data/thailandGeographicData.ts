@@ -52,6 +52,26 @@ export interface RegionItem {
 
 export const THAILAND_GEOGRAPHIC_DATA: RegionItem[] = rawData as RegionItem[];
 
+/** Flattened OTOP places across the whole country (built once). */
+export const ALL_PLACES: PlaceItem[] = THAILAND_GEOGRAPHIC_DATA.flatMap((region) =>
+  region.provinces.flatMap((prov) => prov.districts.flatMap((d) => d.places))
+);
+
+/** Search OTOP places by name / district / province (for the post location picker). */
+export function searchPlaces(query: string, limit = 20): PlaceItem[] {
+  const q = query.trim().toLowerCase();
+  if (q.length < 1) return [];
+  const out: PlaceItem[] = [];
+  for (const p of ALL_PLACES) {
+    const hay = `${p.name} ${p.districtName} ${p.provinceName} ${p.subdistrict}`.toLowerCase();
+    if (hay.includes(q)) {
+      out.push(p);
+      if (out.length >= limit) break;
+    }
+  }
+  return out;
+}
+
 /** Helper to find a province by its name anywhere in Thailand */
 export function findProvinceByName(provinceName: string): { region: RegionItem; province: ProvinceItem } | null {
   const cleanName = provinceName.replace("จ.", "").replace("จังหวัด", "").trim();

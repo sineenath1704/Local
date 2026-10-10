@@ -3,6 +3,9 @@ import {
   SYSTEM_PROMPT,
   buildSummaryPrompt,
   VideoAnalysisInput,
+  CAPTION_SYSTEM_PROMPT,
+  buildCaptionPrompt,
+  CaptionInput,
 } from "./prompt";
 
 /** Structured place data extracted from the clip (Video Content Analyzer). */
@@ -161,6 +164,65 @@ export async function generateSummary(
       text: (parsed && typeof parsed.text === "string" ? parsed.text : rawText) || "AI ไม่ได้ส่งเนื้อหาสรุปกลับมา",
       onScreenText: input.onScreenText ?? [],
     };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Ask the AI to suggest 2–3 captions for a post, using the clip's AI summary
+ * + location as the main source. Returns a list of caption strings.
+ */
+export async function generateCaptions(input: CaptionInput): Promise<string[]> {
+  if (!isAiConfigured()) {
+    // Graceful stub so the feature works before the token is set.
+    const place = input.locationName || input.province || "ชุมชน";
+    return [
+      `วันนี้พามาเที่ยว ${place} บรรยากาศดีมากกก 🌿`,
+      `${place} สวยจนต้องมาเอง มาสัมผัสวิถีชุมชนกัน ✨`,
+      `แวะ ${place} มาเติมพลังใจ 😊`,
+    ];
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), config.ai.timeoutMs);
+  try {
+    const res = await fetch(`${config.ai.baseUrl}/v1/messages`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": config.ai.authToken,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: config.ai.model,
+        max_tokens: 512,
+        system: CAPTION_SYSTEM_PROMPT,
+        messages: [{ role: "user", content: buildCaptionPrompt(input) }],
+      }),
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(`AI endpoint error ${res.status}: ${errText.slice(0, 200)}`);
+    }
+    const data: any = await res.json();
+    const rawText: string = Array.isArray(data?.content)
+      ? data.content.map((c: any) => c?.text ?? "").join("\n").trim()
+      : typeof data?.content === "string"
+      ? data.content
+      : "";
+
+    const parsed = extractJson(rawText);
+    if (parsed && Array.isArray(parsed.captions)) {
+      return parsed.captions.filter((c: unknown) => typeof c === "string").slice(0, 3);
+    }
+    // Fallback: split lines if JSON wasn't returned.
+    return rawText
+      .split("\n")
+      .map((l) => l.replace(/^[-*\d.\s]+/, "").trim())
+      .filter(Boolean)
+      .slice(0, 3);
   } finally {
     clearTimeout(timer);
   }

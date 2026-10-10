@@ -18,7 +18,10 @@ import { supabase, isSupabaseConfigured } from "../lib/supabase";
 
 WebBrowser.maybeCompleteAuthSession(); // required for web
 
-const redirectTo = makeRedirectUri();
+// URL ที่ Google/Supabase จะ redirect กลับหลังล็อกอิน
+// Expo Go: exp://<ip>:8081/... | dev/standalone build: locallocal://...
+// ต้อง whitelist ค่านี้ใน Supabase → Authentication → URL Configuration
+export const redirectTo = makeRedirectUri();
 
 export interface AppUser {
   id: string;

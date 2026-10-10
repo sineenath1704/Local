@@ -1,13 +1,11 @@
-import type { VercelRequest, VercelResponse } from "@vercel/node";
+// Vercel serverless entrypoint.
+// Vercel's builder recognizes an Express serverless function by seeing
+// `express` used directly in THIS file. We create an express instance here
+// and mount the fully-configured app from createApp() onto it.
+import express from "express";
 import { createApp } from "../src/app";
 
-/**
- * Vercel serverless entry. The Express app is created once per cold start
- * and reused across invocations. vercel.json routes every path here.
- */
-const app = createApp();
+const app = express();
+app.use(createApp());
 
-export default function handler(req: VercelRequest, res: VercelResponse) {
-  // Express apps are valid (req, res) handlers.
-  return (app as any)(req, res);
-}
+export default app;

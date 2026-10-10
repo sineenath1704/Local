@@ -42,6 +42,9 @@ import CommentSheet from "./CommentSheet";
 import { useInteractions } from "../state/InteractionContext";
 import { getPostCommentData, countComments } from "../data/commentsData";
 
+// Fallback avatar when a Supabase row has no avatar_url yet.
+const DEFAULT_AVATAR = require("../../assets/persona_pa_somsri.jpg");
+
 export interface VideoFeedItemProps {
   post: VideoPost;
   isActive: boolean;
@@ -344,7 +347,7 @@ export default function VideoFeedItem({
         <View className="items-center mb-4">
           <TouchableOpacity activeOpacity={0.85} onPress={() => onOpenProfile?.(post.authorId)}>
             <Image
-              source={post.author.avatar}
+              source={post.author.avatar ?? DEFAULT_AVATAR}
               style={{ width: 48, height: 48, borderRadius: 24 }}
               className="border-2 border-white"
             />
