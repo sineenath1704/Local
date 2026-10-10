@@ -1,13 +1,17 @@
 import { readAsStringAsync, EncodingType } from "expo-file-system/legacy";
 import { decode } from "base64-arraybuffer";
 import { supabase, isSupabaseConfigured } from "../lib/supabase";
-import { API_BASE_URL, API_TIMEOUT_MS } from "./apiConfig";
+import type { AiSummaryResult } from "./captionService";
 
 /**
- * Upload service — pushes a picked video to Supabase Storage, creates a
- * `videos` row owned by the current user, then asks the backend to generate
- * & PERSIST the AI summary for that video (so it shows instantly later).
+ * Upload service — pushes a picked video to Supabase Storage and creates a
+ * `videos` row owned by the current user.
  * -------------------------------------------------------------
+ * The AI summary is generated in the CREATE screen BEFORE posting (so the
+ * uploader can review/edit it). We persist that reviewed summary straight
+ * into the row here, so the comment sheet reads it instantly later — no
+ * post-upload AI wait.
+ *
  * RN note: Blob/FormData give 0-byte files in React Native, so we read the
  * file as base64 → ArrayBuffer (the official Supabase RN pattern).
  */
@@ -19,6 +23,10 @@ export interface NewVideoInput {
   province?: string;
   district?: string;
   videoType?: "tourist_review" | "host_promo";
+  /** Reviewed AI summary (already generated + possibly edited by the uploader). */
+  aiSummary?: AiSummaryResult | null;
+  /** Uploader's 1–5 rating of how accurate the AI summary was (for model eval). */
+  summaryAccuracy?: number | null;
 }
 
 export interface UploadResult {
@@ -34,34 +42,6 @@ function contentType(ext: string): string {
   if (ext === "mov") return "video/quicktime";
   if (ext === "m4v") return "video/x-m4v";
   return "video/mp4";
-}
-
-/**
- * Ask the backend to generate + persist the AI summary for a video.
- * Fire-and-forget friendly: errors are swallowed (summary can be retried).
- */
-async function generateSummaryForVideo(videoId: string, input: NewVideoInput): Promise<void> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS * 4);
-  try {
-    await fetch(`${API_BASE_URL}/ai-summary/${encodeURIComponent(videoId)}/generate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify({
-        caption: input.caption,
-        // No STT/Vision pipeline yet — the backend summarizes from caption +
-        // location. audioType "none" tells it to rely on caption/visual.
-        audioType: "none",
-        location: [input.locationName, input.district, input.province].filter(Boolean).join(" "),
-        uploaderType: input.videoType === "host_promo" ? "community" : "tourist",
-      }),
-    });
-  } catch {
-    // Non-fatal: the summary can be generated again on demand.
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 export async function uploadVideo(input: NewVideoInput): Promise<UploadResult> {
@@ -87,7 +67,17 @@ export async function uploadVideo(input: NewVideoInput): Promise<UploadResult> {
   const { data: pub } = supabase.storage.from("videos").getPublicUrl(path);
   const videoUrl = pub.publicUrl;
 
-  // 4) Insert the feed row.
+  // 4) Decide the AI summary status we persist.
+  //    - ready       → a summary was generated (and maybe edited) before posting
+  //    - pending     → no summary available (AI was unreachable) → can retry later
+  const hasSummary =
+    !!input.aiSummary && typeof input.aiSummary.text === "string" && input.aiSummary.text.trim() !== "";
+  const summaryStatus =
+    hasSummary && input.aiSummary!.status !== "unavailable" && input.aiSummary!.status !== "error"
+      ? "ready"
+      : "pending";
+
+  // 5) Insert the feed row — WITH the reviewed AI summary baked in.
   const { data: row, error: insErr } = await supabase
     .from("videos")
     .insert({
@@ -99,16 +89,14 @@ export async function uploadVideo(input: NewVideoInput): Promise<UploadResult> {
       location_name: input.locationName ?? null,
       province: input.province ?? null,
       district: input.district ?? null,
-      ai_summary_status: "processing",
+      ai_summary: hasSummary ? { ...input.aiSummary, status: "ready" } : null,
+      ai_summary_status: summaryStatus,
+      ai_summary_accuracy:
+        typeof input.summaryAccuracy === "number" ? input.summaryAccuracy : null,
     })
     .select("id")
     .single();
   if (insErr || !row) throw new Error(`บันทึกโพสต์ไม่สำเร็จ: ${insErr?.message ?? ""}`);
 
-  const videoId = row.id as string;
-
-  // 5) Kick off AI summary generation + persistence (don't block the UI).
-  void generateSummaryForVideo(videoId, input);
-
-  return { videoId, videoUrl };
+  return { videoId: row.id as string, videoUrl };
 }

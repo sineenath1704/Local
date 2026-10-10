@@ -20,10 +20,19 @@ import {
   PaperAirplaneIcon,
   XMarkIcon,
   SparklesIcon,
+  PencilSquareIcon,
+  CheckIcon,
+  ArrowPathIcon,
+  StarIcon as StarOutline,
 } from "react-native-heroicons/outline";
+import { StarIcon as StarSolid } from "react-native-heroicons/solid";
 import { useAuth } from "../state/AuthContext";
 import { uploadVideo } from "../services/uploadService";
-import { suggestCaptions, previewSummary } from "../services/captionService";
+import {
+  suggestCaptions,
+  generatePreviewSummary,
+  type AiSummaryResult,
+} from "../services/captionService";
 import { searchPlaces } from "../data/thailandGeographicData";
 import type { PlaceItem } from "../data/thailandGeographicData";
 
@@ -50,6 +59,13 @@ export default function CreatePostScreen({ onPosted, onCancel }: CreatePostScree
   const [captionIdeas, setCaptionIdeas] = useState<string[]>([]);
   const [captionLoading, setCaptionLoading] = useState(false);
 
+  // --- AI summary (generated at upload time, before posting) ---
+  const [summary, setSummary] = useState<AiSummaryResult | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [summaryEditing, setSummaryEditing] = useState(false);
+  const [summaryDraft, setSummaryDraft] = useState("");
+  const [accuracy, setAccuracy] = useState<number>(0); // 1–5, 0 = not rated
+
   const player = useVideoPlayer(videoUri ?? "", (p) => {
     p.loop = true;
     p.muted = true;
@@ -57,12 +73,37 @@ export default function CreatePostScreen({ onPosted, onCancel }: CreatePostScree
 
   const placeResults = locationQuery.trim().length >= 1 ? searchPlaces(locationQuery) : [];
 
+  const locationString = () => [locationName, district, province].filter(Boolean).join(" ");
+
+  // Generate the AI summary from the clip's context (caption + location).
+  const runSummary = async (overrides?: { caption?: string; location?: string }) => {
+    setSummaryLoading(true);
+    setSummaryEditing(false);
+    const result = await generatePreviewSummary({
+      caption: overrides?.caption ?? caption,
+      location: overrides?.location ?? locationString(),
+      audioType: "none",
+      uploaderType: "tourist",
+    });
+    setSummary(result);
+    setSummaryDraft(result?.text ?? "");
+    setAccuracy(0);
+    setSummaryLoading(false);
+    if (!result) {
+      Alert.alert("สรุปไม่สำเร็จ", "ตอนนี้ให้ AI สรุปวิดีโอไม่ได้ ลองกดสรุปใหม่อีกครั้งได้เลย");
+    }
+  };
+
   const selectPlace = (p: PlaceItem) => {
     setLocationName(p.name);
     setProvince(p.provinceName);
     setDistrict(p.districtName);
     setLocationQuery("");
     setCaptionIdeas([]);
+    // If a clip is already chosen, refresh the summary with the new location.
+    if (videoUri) {
+      void runSummary({ location: [p.name, p.districtName, p.provinceName].filter(Boolean).join(" ") });
+    }
   };
   const clearLocation = () => {
     setLocationName("");
@@ -85,7 +126,18 @@ export default function CreatePostScreen({ onPosted, onCancel }: CreatePostScree
     });
     if (!result.canceled && result.assets[0]?.uri) {
       setVideoUri(result.assets[0].uri);
+      // Kick off the AI summary immediately on pick — the whole point:
+      // summarize at upload time, not after posting.
+      void runSummary();
     }
+  };
+
+  const removeVideo = () => {
+    setVideoUri(null);
+    setSummary(null);
+    setSummaryDraft("");
+    setSummaryEditing(false);
+    setAccuracy(0);
   };
 
   const parseHashtags = (raw: string): string[] =>
@@ -95,12 +147,16 @@ export default function CreatePostScreen({ onPosted, onCancel }: CreatePostScree
       .filter(Boolean)
       .map((t) => (t.startsWith("#") ? t : `#${t}`));
 
-  // "ให้ AI ช่วยคิดแคปชัน" — ดึงสรุปจากสถานที่ แล้วให้ AI คิดแคปชัน
+  // Save the edited summary text back into the summary object.
+  const saveSummaryEdit = () => {
+    setSummary((prev) => (prev ? { ...prev, text: summaryDraft.trim() } : prev));
+    setSummaryEditing(false);
+  };
+
+  // "ให้ AI ช่วยคิดแคปชัน" — use the already-generated summary as context.
   const handleAiCaption = async () => {
     setCaptionLoading(true);
     setCaptionIdeas([]);
-    const place = [locationName, district, province].filter(Boolean).join(" ");
-    const summary = place ? await previewSummary(place) : null;
     const ideas = await suggestCaptions({
       draft: caption,
       locationName,
@@ -108,7 +164,7 @@ export default function CreatePostScreen({ onPosted, onCancel }: CreatePostScree
       district,
       hashtags: parseHashtags(hashtags),
       summaryText: summary?.text,
-      highlights: summary?.highlights,
+      highlights: summary?.highlights ?? summary?.place?.highlights,
     });
     setCaptionIdeas(ideas);
     setCaptionLoading(false);
@@ -124,6 +180,11 @@ export default function CreatePostScreen({ onPosted, onCancel }: CreatePostScree
     }
     setUploading(true);
     try {
+      // Persist the reviewed summary text (if the user edited it in-place).
+      const finalSummary: AiSummaryResult | null = summary
+        ? { ...summary, text: summaryEditing ? summaryDraft.trim() : summary.text }
+        : null;
+
       await uploadVideo({
         localUri: videoUri,
         caption: caption.trim(),
@@ -131,13 +192,15 @@ export default function CreatePostScreen({ onPosted, onCancel }: CreatePostScree
         locationName: locationName.trim() || undefined,
         province: province.trim() || undefined,
         district: district.trim() || undefined,
+        aiSummary: finalSummary,
+        summaryAccuracy: accuracy > 0 ? accuracy : null,
       });
       setUploading(false);
-      Alert.alert("โพสต์สำเร็จ 🎉", "วิดีโอของคุณขึ้นฟีดแล้ว AI กำลังสรุปให้อัตโนมัติ", [
+      Alert.alert("โพสต์สำเร็จ 🎉", "วิดีโอของคุณขึ้นฟีดแล้ว พร้อมสรุปจาก AI", [
         {
           text: "ตกลง",
           onPress: () => {
-            setVideoUri(null);
+            removeVideo();
             setCaption("");
             setHashtags("");
             clearLocation();
@@ -168,7 +231,7 @@ export default function CreatePostScreen({ onPosted, onCancel }: CreatePostScree
     <View className="flex-1 bg-white">
       <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
 
-      {/* Header with cancel + inline post action */}
+      {/* Header with cancel + title */}
       <View
         style={{ paddingTop: Math.max(insets.top, 16) + (Platform.OS === "android" ? 8 : 4) }}
         className="px-4 pb-3 flex-row items-center justify-between border-b border-gray-100"
@@ -190,7 +253,7 @@ export default function CreatePostScreen({ onPosted, onCancel }: CreatePostScree
           <View className="rounded-2xl overflow-hidden bg-black mb-4" style={{ height: 300 }}>
             <VideoView player={player} style={{ flex: 1 }} contentFit="contain" nativeControls={false} />
             <TouchableOpacity
-              onPress={() => setVideoUri(null)}
+              onPress={removeVideo}
               className="absolute top-2 right-2 w-9 h-9 rounded-full bg-black/60 items-center justify-center"
             >
               <XMarkIcon size={18} color="#FFFFFF" />
@@ -209,7 +272,140 @@ export default function CreatePostScreen({ onPosted, onCancel }: CreatePostScree
           </TouchableOpacity>
         )}
 
-        {/* 1) Location — searchable OTOP place picker (shown first) */}
+        {/* AI Summary card — generated right after a clip is picked */}
+        {videoUri && (
+          <View className="mb-4 bg-amber-50 border border-amber-200/80 rounded-2xl p-4">
+            <View className="flex-row items-center mb-2">
+              <View className="w-8 h-8 rounded-full bg-amber-100 items-center justify-center mr-2">
+                <SparklesIcon size={16} color="#D97706" />
+              </View>
+              <View className="flex-1">
+                <Text className="text-gray-900 font-black text-[14px]">สรุปวิดีโอโดย AI</Text>
+                <Text className="text-gray-400 text-[10px]">
+                  สรุปอัตโนมัติตั้งแต่ตอนเลือกคลิป • แก้ไขได้ก่อนโพสต์
+                </Text>
+              </View>
+              {!summaryLoading && (
+                <TouchableOpacity
+                  onPress={() => runSummary()}
+                  activeOpacity={0.7}
+                  className="w-8 h-8 rounded-full bg-white border border-amber-200 items-center justify-center"
+                >
+                  <ArrowPathIcon size={15} color="#D97706" />
+                </TouchableOpacity>
+              )}
+            </View>
+
+            {summaryLoading ? (
+              <View className="py-6 items-center">
+                <ActivityIndicator color="#D97706" />
+                <Text className="text-amber-700/80 text-[12px] mt-2">AI กำลังสรุปวิดีโอ...</Text>
+              </View>
+            ) : summary ? (
+              <>
+                {summaryEditing ? (
+                  <TextInput
+                    value={summaryDraft}
+                    onChangeText={setSummaryDraft}
+                    multiline
+                    autoFocus
+                    placeholder="แก้ไขสรุปให้ตรงกับวิดีโอ..."
+                    placeholderTextColor="#B45309"
+                    className="bg-white border border-amber-200 rounded-xl px-3 py-2.5 text-[13.5px] text-gray-800"
+                    style={{ minHeight: 90, textAlignVertical: "top" }}
+                  />
+                ) : (
+                  <Text className="text-gray-800 text-[13.5px] leading-6">
+                    {summary.text || "AI ไม่ได้ส่งเนื้อหาสรุปกลับมา"}
+                  </Text>
+                )}
+
+                {/* Highlights (read-only preview) */}
+                {!summaryEditing && !!(summary.highlights ?? summary.place?.highlights)?.length && (
+                  <View className="mt-2.5">
+                    {(summary.highlights ?? summary.place?.highlights)!.slice(0, 4).map((h, i) => (
+                      <View key={i} className="flex-row mb-1">
+                        <Text className="text-amber-600 mr-1.5">•</Text>
+                        <Text className="text-gray-600 text-[12px] leading-5 flex-1">{h}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+
+                {/* Edit / Save control */}
+                <View className="flex-row justify-end mt-2">
+                  {summaryEditing ? (
+                    <TouchableOpacity
+                      onPress={saveSummaryEdit}
+                      activeOpacity={0.8}
+                      className="flex-row items-center bg-[#2D6A4F] px-3 py-1.5 rounded-full"
+                    >
+                      <CheckIcon size={14} color="#FFFFFF" />
+                      <Text className="text-white text-[12px] font-bold ml-1">บันทึกสรุป</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <TouchableOpacity
+                      onPress={() => {
+                        setSummaryDraft(summary.text ?? "");
+                        setSummaryEditing(true);
+                      }}
+                      activeOpacity={0.8}
+                      className="flex-row items-center bg-white border border-amber-300 px-3 py-1.5 rounded-full"
+                    >
+                      <PencilSquareIcon size={14} color="#B45309" />
+                      <Text className="text-amber-700 text-[12px] font-bold ml-1">แก้ไขสรุป</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+
+                {/* Accuracy rating — feedback for improving the AI */}
+                <View className="mt-3 pt-3 border-t border-amber-200/70">
+                  <Text className="text-gray-600 text-[12px] mb-1.5">
+                    สรุปของ AI ตรงกับวิดีโอแค่ไหน?{" "}
+                    <Text className="text-gray-400">(ช่วยพัฒนา AI)</Text>
+                  </Text>
+                  <View className="flex-row items-center">
+                    {[1, 2, 3, 4, 5].map((n) => (
+                      <TouchableOpacity
+                        key={n}
+                        onPress={() => setAccuracy(n)}
+                        activeOpacity={0.7}
+                        className="mr-1.5"
+                      >
+                        {n <= accuracy ? (
+                          <StarSolid size={24} color="#F59E0B" />
+                        ) : (
+                          <StarOutline size={24} color="#D1A75A" />
+                        )}
+                      </TouchableOpacity>
+                    ))}
+                    {accuracy > 0 && (
+                      <Text className="text-amber-700 text-[12px] font-semibold ml-1.5">
+                        {accuracy}/5
+                      </Text>
+                    )}
+                  </View>
+                </View>
+              </>
+            ) : (
+              <View className="py-3 items-center">
+                <Text className="text-amber-700/80 text-[12px] mb-2 text-center">
+                  ยังไม่มีสรุป — ลองกดสรุปอีกครั้ง
+                </Text>
+                <TouchableOpacity
+                  onPress={() => runSummary()}
+                  activeOpacity={0.8}
+                  className="flex-row items-center bg-amber-500 px-3.5 py-2 rounded-full"
+                >
+                  <SparklesIcon size={14} color="#FFFFFF" />
+                  <Text className="text-white text-[12px] font-bold ml-1">ให้ AI สรุป</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </View>
+        )}
+
+        {/* 1) Location — searchable OTOP place picker */}
         <View className="flex-row items-center mb-1.5">
           <MapPinIcon size={14} color="#EF4444" />
           <Text className="text-gray-700 font-bold text-[13px] ml-1">สถานที่ / ชุมชน</Text>
@@ -322,8 +518,8 @@ export default function CreatePostScreen({ onPosted, onCancel }: CreatePostScree
         />
       </ScrollView>
 
-      {/* Post button — fixed above the safe-area bottom (NOT covered by menu;
-          the bottom menu bar is hidden on this tab). */}
+      {/* Post button — fixed above the safe-area bottom (bottom menu bar is
+          hidden on this tab, so it's never covered). */}
       <View
         className="px-5 pt-3 border-t border-gray-100 bg-white"
         style={{ paddingBottom: Math.max(insets.bottom, 14) }}
