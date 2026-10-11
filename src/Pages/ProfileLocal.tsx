@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   View,
   Text,
@@ -32,6 +32,9 @@ import {
 import { VideoItemData } from "../data/profileLocalData";
 import { useMyProfile } from "../state/MyProfileContext";
 import { useInteractions } from "../state/InteractionContext";
+import { useMyVideos } from "../hooks/useMyVideos";
+import { loadLikedVideos, loadSavedVideos } from "../services/interactionService";
+import type { VideoPost } from "../data/homeFeedData";
 import { getVideoById } from "../data/profilesData";
 import { resolveSavedVideo } from "../data/tripsData";
 import EditProfileSheet from "../components/EditProfileSheet";
@@ -49,11 +52,14 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
   const insets = useSafeAreaInsets();
   const { width: screenWidth } = useWindowDimensions();
 
-  const { name, username, bio, avatar, location, registeredInfo, ownedVideos } = useMyProfile();
+  const { name, username, bio, avatar, location, registeredInfo } = useMyProfile();
   const { followingCount, likedVideoIds, savedVideoIds, folders, createFolder } = useInteractions();
 
+  // Own posted videos — real data from Supabase (no mock).
+  const { videos: myVideos } = useMyVideos();
+
   const followersCount = 0;
-  const totalLikesReceived = ownedVideos.filter((v) => likedVideoIds.includes(v.id)).length;
+  const totalLikesReceived = myVideos.reduce((sum, v) => sum + v.likesCount, 0);
 
   const [activeTab, setActiveTab] = useState<ProfileTabKey>("videos");
   const [showInfoModal, setShowInfoModal] = useState(false);
@@ -63,23 +69,36 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
 
-  // liked grid items (resolve ids → display info)
-  const toGridItem = (videoId: string): VideoItemData => {
-    const v = getVideoById(videoId);
-    const info = resolveSavedVideo(videoId);
-    return {
-      id: videoId,
-      title: v?.title ?? info.title,
-      thumbnail: v?.thumbnail ?? info.poster ?? avatar,
-      views: v?.views ?? "1K",
+  // Liked tab: the current user's liked videos, loaded from Supabase.
+  const likedKey = likedVideoIds.join(",");
+  const [likedVideos, setLikedVideos] = useState<VideoPost[]>([]);
+  useEffect(() => {
+    let active = true;
+    loadLikedVideos().then((v) => {
+      console.log("[profile] likedVideos fetched =", v.length, "likedIds =", likedVideoIds.length);
+      if (active) setLikedVideos(v);
+    });
+    return () => {
+      active = false;
     };
-  };
-  const likedVideos = likedVideoIds.map(toGridItem);
+  }, [likedKey]);
 
-  // Saved tab: videos NOT in any folder (loose), shown under the folders.
+  // Saved tab: loose saves (not in any folder), loaded from Supabase.
   const inFolderIds = new Set(folders.flatMap((f) => f.videoIds));
   const looseSavedIds = savedVideoIds.filter((id) => !inFolderIds.has(id));
-  const looseSaved = looseSavedIds.map((id) => resolveSavedVideo(id));
+  const looseKey = looseSavedIds.join(",");
+  const [looseSaved, setLooseSaved] = useState<VideoPost[]>([]);
+  useEffect(() => {
+    let active = true;
+    loadSavedVideos(looseKey ? looseKey.split(",") : []).then((v) => {
+      console.log("[profile] looseSaved fetched =", v.length, "savedIds =", savedVideoIds.length, "loose =", looseSavedIds.length);
+      if (active) setLooseSaved(v);
+    });
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [looseKey]);
 
   const gridItemWidth = (screenWidth - 4) / 3;
 
@@ -210,8 +229,8 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
           {/* 6a. VIDEOS tab — owned videos (tap → feed-style viewer w/ edit & delete) */}
           {activeTab === "videos" && (
             <View className="flex-row flex-wrap">
-              {ownedVideos.length > 0 ? (
-                ownedVideos.map((video, index) => (
+              {myVideos.length > 0 ? (
+                myVideos.map((video, index) => (
                   <TouchableOpacity
                     key={video.id}
                     onPress={() => setViewerVideoId(video.id)}
@@ -224,11 +243,15 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
                     }}
                     className="bg-gray-100 relative overflow-hidden"
                   >
-                    <Image source={video.thumbnail} className="w-full h-full" resizeMode="cover" />
+                    <Image
+                      source={video.thumbnailUrl ? { uri: video.thumbnailUrl } : avatar}
+                      className="w-full h-full"
+                      resizeMode="cover"
+                    />
                     <View style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 40, backgroundColor: "rgba(0,0,0,0.35)" }} />
                     <View className="absolute bottom-1.5 left-1.5 flex-row items-center">
                       <PlayOutline size={12} color="#FFFFFF" strokeWidth={2.5} />
-                      <Text className="text-white text-[11px] font-bold ml-1">{video.views}</Text>
+                      <Text className="text-white text-[11px] font-bold ml-1">{video.likesCount}</Text>
                     </View>
                   </TouchableOpacity>
                 ))
@@ -317,11 +340,17 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
                     }}
                     className="bg-gray-100 relative overflow-hidden"
                   >
-                    <Image source={video.thumbnail} className="w-full h-full" resizeMode="cover" />
+                    {video.poster ? (
+                      <Image source={video.poster} className="w-full h-full" resizeMode="cover" />
+                    ) : (
+                      <View className="w-full h-full items-center justify-center">
+                        <PlayOutline size={20} color="#9CA3AF" />
+                      </View>
+                    )}
                     <View style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 40, backgroundColor: "rgba(0,0,0,0.35)" }} />
                     <View className="absolute bottom-1.5 left-1.5 flex-row items-center">
                       <PlayOutline size={12} color="#FFFFFF" strokeWidth={2.5} />
-                      <Text className="text-white text-[11px] font-bold ml-1">{video.views}</Text>
+                      <Text className="text-white text-[11px] font-bold ml-1">{video.initialLikes}</Text>
                     </View>
                   </View>
                 ))

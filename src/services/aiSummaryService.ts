@@ -1,5 +1,6 @@
 import { AiSummary, getPostCommentData } from "../data/commentsData";
 import { API_BASE_URL, API_TIMEOUT_MS } from "./apiConfig";
+import { supabase, isSupabaseConfigured } from "../lib/supabase";
 
 /**
  * AI Summary service
@@ -48,6 +49,29 @@ function localFallback(postId: string): AiSummary | null {
  *   - local JSON fallback                          when the backend is unreachable
  */
 export async function fetchAiSummary(postId: string): Promise<AiSummary | null> {
+  // Primary: read the summary straight from the video row in Supabase (it was
+  // persisted at post time). Works with the app's anon key via RLS — no
+  // dependency on the backend/service_role for display.
+  if (isSupabaseConfigured && /^[0-9a-f-]{36}$/i.test(postId)) {
+    try {
+      const { data, error } = await supabase
+        .from("videos")
+        .select("ai_summary, ai_summary_status")
+        .eq("id", postId)
+        .maybeSingle();
+      if (!error && data) {
+        if (data.ai_summary) return data.ai_summary as AiSummary;
+        return {
+          status: "processing",
+          text: "ระบบกำลังประมวลผลวิดีโอนี้ด้วย AI โปรดกลับมาดูสรุปอีกครั้งภายหลัง",
+        };
+      }
+    } catch {
+      /* fall through to backend */
+    }
+  }
+
+  // Fallback: backend (used by demo ids post-1/2/3 held in memory).
   const url = `${API_BASE_URL}/ai-summary/${encodeURIComponent(postId)}`;
 
   try {

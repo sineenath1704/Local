@@ -1,4 +1,12 @@
-import React, { createContext, useContext, useMemo, useState, useCallback } from "react";
+import React, { createContext, useContext, useMemo, useState, useCallback, useEffect } from "react";
+import { useAuth } from "./AuthContext";
+import {
+  loadMyInteractions,
+  likeVideo,
+  unlikeVideo,
+  saveVideoRow,
+  unsaveVideoRow,
+} from "../services/interactionService";
 
 /**
  * InteractionContext — single source of truth for ACTION-DRIVEN state.
@@ -57,11 +65,32 @@ interface InteractionState {
 const InteractionContext = createContext<InteractionState | null>(null);
 
 export function InteractionProvider({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
   const [followedProfileIds, setFollowed] = useState<string[]>([]);
   const [likedVideoIds, setLiked] = useState<string[]>([]);
   const [savedVideoIds, setSaved] = useState<string[]>([]);
   const [folders, setFolders] = useState<SaveFolder[]>([]);
   const [chatShares, setChatShares] = useState<ChatShare[]>([]);
+
+  // Load the signed-in user's likes/saves from Supabase (per-user, persisted).
+  useEffect(() => {
+    console.log("[interaction] effect user =", user?.id ?? "null");
+    if (!user) {
+      setLiked([]);
+      setSaved([]);
+      return;
+    }
+    let active = true;
+    loadMyInteractions().then(({ likedIds, savedIds }) => {
+      if (!active) return;
+      console.log("[interaction] loaded likes =", likedIds.length, "saves =", savedIds.length);
+      setLiked(likedIds);
+      setSaved(savedIds);
+    });
+    return () => {
+      active = false;
+    };
+  }, [user]);
 
   const isFollowing = useCallback(
     (id: string) => followedProfileIds.includes(id),
@@ -77,13 +106,20 @@ export function InteractionProvider({ children }: { children: React.ReactNode })
   }, []);
 
   const toggleLike = useCallback((videoId: string) => {
-    setLiked((prev) =>
-      prev.includes(videoId) ? prev.filter((x) => x !== videoId) : [...prev, videoId]
-    );
+    // Optimistic update + persist to Supabase.
+    setLiked((prev) => {
+      const has = prev.includes(videoId);
+      if (has) void unlikeVideo(videoId);
+      else void likeVideo(videoId);
+      return has ? prev.filter((x) => x !== videoId) : [...prev, videoId];
+    });
   }, []);
 
   const saveVideo = useCallback((videoId: string, folderId?: string) => {
-    setSaved((prev) => (prev.includes(videoId) ? prev : [...prev, videoId]));
+    setSaved((prev) => {
+      if (!prev.includes(videoId)) void saveVideoRow(videoId);
+      return prev.includes(videoId) ? prev : [...prev, videoId];
+    });
     if (folderId) {
       setFolders((prev) =>
         prev.map((f) =>
@@ -96,7 +132,10 @@ export function InteractionProvider({ children }: { children: React.ReactNode })
   }, []);
 
   const unsaveVideo = useCallback((videoId: string) => {
-    setSaved((prev) => prev.filter((x) => x !== videoId));
+    setSaved((prev) => {
+      if (prev.includes(videoId)) void unsaveVideoRow(videoId);
+      return prev.filter((x) => x !== videoId);
+    });
     setFolders((prev) =>
       prev.map((f) => ({ ...f, videoIds: f.videoIds.filter((v) => v !== videoId) }))
     );

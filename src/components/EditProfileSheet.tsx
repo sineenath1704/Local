@@ -14,6 +14,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { XMarkIcon, CameraIcon } from "react-native-heroicons/outline";
 import * as ImagePicker from "expo-image-picker";
 import { useMyProfile } from "../state/MyProfileContext";
+import { useAuth } from "../state/AuthContext";
 
 interface EditProfileSheetProps {
   visible: boolean;
@@ -22,11 +23,13 @@ interface EditProfileSheetProps {
 
 export default function EditProfileSheet({ visible, onClose }: EditProfileSheetProps) {
   const insets = useSafeAreaInsets();
-  const { name, bio, username, avatar, updateName, updateBio, updateAvatarUri } = useMyProfile();
+  const { name, bio, username, avatar } = useMyProfile();
+  const { updateProfile } = useAuth();
 
   const [draftName, setDraftName] = useState(name);
   const [draftBio, setDraftBio] = useState(bio);
   const [draftAvatar, setDraftAvatar] = useState<any>(avatar);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (visible) {
@@ -53,10 +56,19 @@ export default function EditProfileSheet({ visible, onClose }: EditProfileSheetP
     }
   };
 
-  const save = () => {
-    updateName(draftName.trim() || name);
-    updateBio(draftBio);
-    if (draftAvatar?.uri) updateAvatarUri(draftAvatar.uri);
+  const save = async () => {
+    setSaving(true);
+    const { error } = await updateProfile({
+      displayName: draftName.trim() || name,
+      bio: draftBio,
+      // Only pass a newly-picked local uri (http = unchanged remote avatar).
+      avatarUri: draftAvatar?.uri && !draftAvatar.uri.startsWith("http") ? draftAvatar.uri : undefined,
+    });
+    setSaving(false);
+    if (error) {
+      Alert.alert("บันทึกไม่สำเร็จ", error);
+      return;
+    }
     onClose();
   };
 
@@ -130,10 +142,11 @@ export default function EditProfileSheet({ visible, onClose }: EditProfileSheetP
 
           <TouchableOpacity
             onPress={save}
+            disabled={saving}
             activeOpacity={0.85}
-            className="bg-[#2D6A4F] py-3.5 rounded-2xl items-center"
+            className={`py-3.5 rounded-2xl items-center ${saving ? "bg-gray-300" : "bg-[#2D6A4F]"}`}
           >
-            <Text className="text-white font-bold text-[15px]">บันทึก</Text>
+            <Text className="text-white font-bold text-[15px]">{saving ? "กำลังบันทึก..." : "บันทึก"}</Text>
           </TouchableOpacity>
         </ScrollView>
       </View>

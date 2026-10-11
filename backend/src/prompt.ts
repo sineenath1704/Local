@@ -35,7 +35,45 @@ export interface VideoAnalysisInput {
   uploaderType?: "community" | "tourist";
   /** ข้อมูลประกอบเพิ่มเติม (ถ้ามี) */
   location?: string;
+  /** Public URL ของวิดีโอ — เมื่อมี จะส่งคลิปให้ M3 วิเคราะห์ภาพ+ข้อความบนจอโดยตรง */
+  videoUrl?: string;
 }
+
+/**
+ * USER PROMPT สำหรับโหมด "วิเคราะห์จากวิดีโอโดยตรง" (ทาง A)
+ * -------------------------------------------------------------
+ * ส่งคลิปให้ M3 ดูภาพ + อ่านตัวหนังสือบนจอ แล้วสรุป — ไม่ใช้ caption ของผู้โพสต์
+ * (เพื่อให้สรุปเป็นข้อมูลอิสระ ใช้ป้อน AI คิดแคปชันต่อ) และ M3 ไม่ได้ยินเสียง
+ * จึงสรุปจาก "สิ่งที่เห็น" เท่านั้น
+ */
+export const VIDEO_PROMPT = `โปรดวิเคราะห์คลิปวิดีโอนี้จากสิ่งที่มองเห็นเท่านั้น (ภาพ + ตัวหนังสือ/ป้าย/ซับไตเติลที่ปรากฏบนจอ)
+
+ข้อกำหนด:
+- ใช้เฉพาะหลักฐานที่เห็นในคลิป ห้ามเดา/แต่งข้อมูลที่ไม่ปรากฏ (ใส่ null เมื่อไม่พบ)
+- โมเดลไม่ได้ยินเสียง จึงห้ามอ้างอิงคำพูด/เนื้อเพลง สรุปจากภาพและตัวหนังสือบนจอเท่านั้น
+- ถ้าคลิปไม่มีข้อมูลพอจะระบุสถานที่ ให้ place_name = null และบอกใน warning
+- summary เป็นภาษาไทย 2–4 ประโยค อ่านง่าย เห็นภาพ ดึงใจให้อยากไปเยือน
+
+ตอบกลับเป็น JSON รูปแบบนี้เท่านั้น (ห้ามมีข้อความอื่นนอก JSON):
+{
+  "place_name": "ชื่อสถานที่/ชุมชน หรือ null",
+  "location": { "province": null, "district": null, "subdistrict": null, "gps": null },
+  "category": ["โฮมสเตย์ | ร้านอาหาร | คาเฟ่ | Workshop | วัด | ธรรมชาติ | ..."],
+  "activities": ["กิจกรรมที่เห็นในคลิป"],
+  "price_info": { "weekday": null, "weekend": null, "currency": "THB" },
+  "contact": { "phone": null, "facebook": null, "line": null },
+  "opening_hours": null,
+  "otop_products": ["สินค้า OTOP ที่เห็น"],
+  "highlights": ["จุดเด่น 1", "จุดเด่น 2"],
+  "tags": ["#แท็ก"],
+  "summary": "คำบรรยายสรุป 2–4 ประโยค",
+  "confidence": {
+    "overall_confidence": 0.0,
+    "source_used": ["visual | on_screen_text"],
+    "missing_info": ["ข้อมูลที่ยังขาด"],
+    "warning": "ข้อควรระวัง หรือ null"
+  }
+}`;
 
 /**
  * SYSTEM PROMPT — Video Content Analyzer

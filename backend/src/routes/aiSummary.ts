@@ -15,6 +15,7 @@ function readInput(body: any): VideoAnalysisInput {
     videoDurationSec: body?.videoDurationSec,
     uploaderType: body?.uploaderType,
     location: body?.location,
+    videoUrl: body?.videoUrl,
   };
 }
 

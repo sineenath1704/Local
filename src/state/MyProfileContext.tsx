@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useMemo, useState, useCallback } from "react";
+import React, { createContext, useContext, useMemo, useState, useCallback, useEffect } from "react";
 import { PROFILE_LOCAL_SEED, MyVideo, RegisteredCommunityInfo } from "../data/profileLocalData";
+import { useAuth } from "./AuthContext";
 
 /**
  * MyProfileContext — the current user's EDITABLE profile + owned videos.
@@ -28,10 +29,23 @@ interface MyProfileState {
 const MyProfileContext = createContext<MyProfileState | null>(null);
 
 export function MyProfileProvider({ children }: { children: React.ReactNode }) {
+  // Pull the real signed-in user (name/username/avatar/bio) from Supabase.
+  const { user } = useAuth();
+
   const [name, setName] = useState(PROFILE_LOCAL_SEED.name);
   const [bio, setBio] = useState(PROFILE_LOCAL_SEED.bio);
   const [avatar, setAvatar] = useState<any>(PROFILE_LOCAL_SEED.avatar);
-  const [ownedVideos, setOwnedVideos] = useState<MyVideo[]>(PROFILE_LOCAL_SEED.ownedVideos);
+  const [username, setUsername] = useState(PROFILE_LOCAL_SEED.username);
+  const [ownedVideos, setOwnedVideos] = useState<MyVideo[]>([]);
+
+  // Sync profile fields from the real user row whenever it loads/changes.
+  useEffect(() => {
+    if (!user) return;
+    if (user.display_name) setName(user.display_name);
+    if (user.username) setUsername(user.username);
+    if (user.bio) setBio(user.bio);
+    if (user.avatar_url) setAvatar({ uri: user.avatar_url });
+  }, [user]);
 
   const updateName = useCallback((v: string) => setName(v), []);
   const updateBio = useCallback((v: string) => setBio(v), []);
@@ -49,7 +63,7 @@ export function MyProfileProvider({ children }: { children: React.ReactNode }) {
     () => ({
       location: PROFILE_LOCAL_SEED.location,
       name,
-      username: PROFILE_LOCAL_SEED.username,
+      username,
       bio,
       avatar,
       registeredInfo: PROFILE_LOCAL_SEED.registeredInfo,
@@ -60,7 +74,7 @@ export function MyProfileProvider({ children }: { children: React.ReactNode }) {
       updateVideoCaption,
       deleteVideo,
     }),
-    [name, bio, avatar, ownedVideos, updateName, updateBio, updateAvatarUri, updateVideoCaption, deleteVideo]
+    [name, username, bio, avatar, ownedVideos, updateName, updateBio, updateAvatarUri, updateVideoCaption, deleteVideo]
   );
 
   return <MyProfileContext.Provider value={value}>{children}</MyProfileContext.Provider>;

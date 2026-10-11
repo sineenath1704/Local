@@ -36,14 +36,29 @@ export interface AppUser {
   total_likes_received: number;
 }
 
+export interface OnboardingInput {
+  username: string;
+  displayName: string;
+  phone?: string;
+  avatarUri?: string | null;
+}
+
 interface AuthState {
   configured: boolean;
   loading: boolean;
   session: Session | null;
   user: AppUser | null;
+  /** True when signed in but the profile hasn't been completed (no username). */
+  needsOnboarding: boolean;
   signInWithGoogle: () => Promise<{ error: string | null }>;
   signOut: () => Promise<void>;
   refreshUser: () => Promise<void>;
+  /** Check if a username is still free (true = available). */
+  isUsernameAvailable: (username: string) => Promise<boolean>;
+  /** Finish registration: upload avatar + fill the users row. */
+  completeOnboarding: (input: OnboardingInput) => Promise<{ error: string | null }>;
+  /** Update editable profile fields (name/bio/avatar) back to Supabase. */
+  updateProfile: (patch: { displayName?: string; bio?: string; avatarUri?: string }) => Promise<{ error: string | null }>;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -70,8 +85,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   const loadUserRow = useCallback(async (userId: string) => {
-    const { data } = await supabase.from("users").select("*").eq("id", userId).single();
-    if (data) setUser(data as AppUser);
+    // maybeSingle() → no error when the row doesn't exist yet.
+    const { data } = await supabase.from("users").select("*").eq("id", userId).maybeSingle();
+    setUser((data as AppUser) ?? null);
   }, []);
 
   // Bootstrap session + subscribe to changes.
@@ -135,6 +151,108 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const isUsernameAvailable = useCallback(async (username: string) => {
+    const u = username.trim().toLowerCase();
+    if (!u) return false;
+    const { data } = await supabase
+      .from("users")
+      .select("id")
+      .eq("username", u)
+      .maybeSingle();
+    // Available when no row, or the only row is me.
+    return !data || data.id === session?.user?.id;
+  }, [session]);
+
+  const completeOnboarding = useCallback(
+    async (input: OnboardingInput): Promise<{ error: string | null }> => {
+      const uid = session?.user?.id;
+      if (!uid) return { error: "ยังไม่ได้เข้าสู่ระบบ" };
+
+      const username = input.username.trim().toLowerCase();
+      const displayName = input.displayName.trim();
+      if (!username) return { error: "กรุณาตั้งชื่อผู้ใช้ (username)" };
+      if (!displayName) return { error: "กรุณากรอกชื่อที่แสดง" };
+
+      // Final uniqueness guard (race-safe-ish; the DB unique constraint is the real guard).
+      if (!(await isUsernameAvailable(username))) {
+        return { error: "ชื่อผู้ใช้นี้ถูกใช้แล้ว กรุณาเลือกชื่ออื่น" };
+      }
+
+      // Upload avatar (optional) to the `avatars` bucket.
+      let avatarUrl: string | null = null;
+      if (input.avatarUri) {
+        try {
+          const resp = await fetch(input.avatarUri);
+          const arrayBuffer = await resp.arrayBuffer();
+          const ext = input.avatarUri.split("?")[0].match(/\.(\w+)$/)?.[1]?.toLowerCase() || "jpg";
+          const path = `${uid}/${Date.now()}.${ext}`;
+          const { error: upErr } = await supabase.storage
+            .from("avatars")
+            .upload(path, arrayBuffer, { contentType: `image/${ext === "jpg" ? "jpeg" : ext}`, upsert: true });
+          if (!upErr) {
+            avatarUrl = supabase.storage.from("avatars").getPublicUrl(path).data.publicUrl;
+          }
+        } catch {
+          /* non-fatal: continue without avatar */
+        }
+      }
+
+      const patch: Record<string, any> = {
+        username,
+        display_name: displayName,
+      };
+      if (input.phone?.trim()) patch.phone_number = input.phone.trim();
+      if (avatarUrl) patch.avatar_url = avatarUrl;
+
+      const { error } = await supabase.from("users").update(patch).eq("id", uid);
+      if (error) {
+        if (error.code === "23505") return { error: "ชื่อผู้ใช้นี้ถูกใช้แล้ว กรุณาเลือกชื่ออื่น" };
+        return { error: error.message };
+      }
+
+      await loadUserRow(uid);
+      return { error: null };
+    },
+    [session, isUsernameAvailable, loadUserRow]
+  );
+
+  const updateProfile = useCallback(
+    async (patch: { displayName?: string; bio?: string; avatarUri?: string }): Promise<{ error: string | null }> => {
+      const uid = session?.user?.id;
+      if (!uid) return { error: "ยังไม่ได้เข้าสู่ระบบ" };
+
+      const row: Record<string, any> = {};
+      if (patch.displayName !== undefined) row.display_name = patch.displayName.trim();
+      if (patch.bio !== undefined) row.bio = patch.bio;
+
+      // Upload a new avatar if a local uri was provided.
+      if (patch.avatarUri && !patch.avatarUri.startsWith("http")) {
+        try {
+          const resp = await fetch(patch.avatarUri);
+          const arrayBuffer = await resp.arrayBuffer();
+          const ext = patch.avatarUri.split("?")[0].match(/\.(\w+)$/)?.[1]?.toLowerCase() || "jpg";
+          const path = `${uid}/${Date.now()}.${ext}`;
+          const { error: upErr } = await supabase.storage
+            .from("avatars")
+            .upload(path, arrayBuffer, { contentType: `image/${ext === "jpg" ? "jpeg" : ext}`, upsert: true });
+          if (!upErr) {
+            row.avatar_url = supabase.storage.from("avatars").getPublicUrl(path).data.publicUrl;
+          }
+        } catch {
+          /* non-fatal */
+        }
+      }
+
+      if (Object.keys(row).length === 0) return { error: null };
+
+      const { error } = await supabase.from("users").update(row).eq("id", uid);
+      if (error) return { error: error.message };
+      await loadUserRow(uid);
+      return { error: null };
+    },
+    [session, loadUserRow]
+  );
+
   const signOut = useCallback(async () => {
     await supabase.auth.signOut();
     setUser(null);
@@ -145,17 +263,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (session?.user) await loadUserRow(session.user.id);
   }, [session, loadUserRow]);
 
+  // Signed in, but no username yet → must finish onboarding.
+  const needsOnboarding = Boolean(session?.user && (!user || !user.username));
+
   const value = useMemo<AuthState>(
     () => ({
       configured: isSupabaseConfigured,
       loading,
       session,
       user,
+      needsOnboarding,
       signInWithGoogle,
       signOut,
       refreshUser,
+      isUsernameAvailable,
+      completeOnboarding,
+      updateProfile,
     }),
-    [loading, session, user, signInWithGoogle, signOut, refreshUser]
+    [loading, session, user, needsOnboarding, signInWithGoogle, signOut, refreshUser, isUsernameAvailable, completeOnboarding, updateProfile]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

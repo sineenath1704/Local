@@ -2,6 +2,7 @@ import { config, isAiConfigured } from "./config";
 import {
   SYSTEM_PROMPT,
   buildSummaryPrompt,
+  VIDEO_PROMPT,
   VideoAnalysisInput,
   CAPTION_SYSTEM_PROMPT,
   buildCaptionPrompt,
@@ -91,7 +92,15 @@ export async function generateSummary(
     };
   }
 
-  const userPrompt = buildSummaryPrompt(input);
+  // Mode A — analyze the VIDEO directly (image frames + on-screen text), no
+  // caption/transcript. Falls back to the text-only prompt when no videoUrl.
+  const useVideo = Boolean(input.videoUrl);
+  const messageContent: any = useVideo
+    ? [
+        { type: "text", text: VIDEO_PROMPT },
+        { type: "video", source: { type: "url", url: input.videoUrl, fps: 1 } },
+      ]
+    : buildSummaryPrompt(input);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.ai.timeoutMs);
@@ -109,7 +118,7 @@ export async function generateSummary(
         model: config.ai.model,
         max_tokens: config.ai.maxTokens,
         system: SYSTEM_PROMPT,
-        messages: [{ role: "user", content: userPrompt }],
+        messages: [{ role: "user", content: messageContent }],
       }),
     });
 

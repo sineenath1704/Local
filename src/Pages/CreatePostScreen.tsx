@@ -27,7 +27,7 @@ import {
 } from "react-native-heroicons/outline";
 import { StarIcon as StarSolid } from "react-native-heroicons/solid";
 import { useAuth } from "../state/AuthContext";
-import { uploadVideo } from "../services/uploadService";
+import { uploadVideo, uploadDraftVideo } from "../services/uploadService";
 import {
   suggestCaptions,
   generatePreviewSummary,
@@ -61,6 +61,7 @@ export default function CreatePostScreen({ onPosted, onCancel }: CreatePostScree
 
   // --- AI summary (generated at upload time, before posting) ---
   const [summary, setSummary] = useState<AiSummaryResult | null>(null);
+  const [draftVideoUrl, setDraftVideoUrl] = useState<string | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryEditing, setSummaryEditing] = useState(false);
   const [summaryDraft, setSummaryDraft] = useState("");
@@ -73,15 +74,16 @@ export default function CreatePostScreen({ onPosted, onCancel }: CreatePostScree
 
   const placeResults = locationQuery.trim().length >= 1 ? searchPlaces(locationQuery) : [];
 
-  const locationString = () => [locationName, district, province].filter(Boolean).join(" ");
-
-  // Generate the AI summary from the clip's context (caption + location).
-  const runSummary = async (overrides?: { caption?: string; location?: string }) => {
+  // Generate the AI summary from the VIDEO itself (video-only, no caption).
+  const runSummary = async (overrides?: { videoUrl?: string }) => {
+    // Summary is produced from the VIDEO itself only (no caption/location),
+    // so it can feed the caption helper as an independent source.
+    const url = overrides?.videoUrl ?? draftVideoUrl;
+    if (!url) return;
     setSummaryLoading(true);
     setSummaryEditing(false);
     const result = await generatePreviewSummary({
-      caption: overrides?.caption ?? caption,
-      location: overrides?.location ?? locationString(),
+      videoUrl: url,
       audioType: "none",
       uploaderType: "tourist",
     });
@@ -89,6 +91,17 @@ export default function CreatePostScreen({ onPosted, onCancel }: CreatePostScree
     setSummaryDraft(result?.text ?? "");
     setAccuracy(0);
     setSummaryLoading(false);
+
+    // Auto-fill the location from the AI summary (if it found one) so the user
+    // doesn't have to type it — it also carries onto the map/feed via province.
+    const loc = result?.place?.location;
+    const placeName = result?.place?.place_name;
+    if (loc && (loc.province || loc.district || placeName) && !locationName) {
+      if (placeName) setLocationName(placeName);
+      if (loc.province) setProvince(loc.province);
+      if (loc.district) setDistrict(loc.district);
+    }
+
     if (!result) {
       Alert.alert("สรุปไม่สำเร็จ", "ตอนนี้ให้ AI สรุปวิดีโอไม่ได้ ลองกดสรุปใหม่อีกครั้งได้เลย");
     }
@@ -100,10 +113,7 @@ export default function CreatePostScreen({ onPosted, onCancel }: CreatePostScree
     setDistrict(p.districtName);
     setLocationQuery("");
     setCaptionIdeas([]);
-    // If a clip is already chosen, refresh the summary with the new location.
-    if (videoUri) {
-      void runSummary({ location: [p.name, p.districtName, p.provinceName].filter(Boolean).join(" ") });
-    }
+    // Location no longer affects the summary (summary is video-only).
   };
   const clearLocation = () => {
     setLocationName("");
@@ -125,15 +135,25 @@ export default function CreatePostScreen({ onPosted, onCancel }: CreatePostScree
       videoMaxDuration: 120,
     });
     if (!result.canceled && result.assets[0]?.uri) {
-      setVideoUri(result.assets[0].uri);
-      // Kick off the AI summary immediately on pick — the whole point:
-      // summarize at upload time, not after posting.
-      void runSummary();
+      const uri = result.assets[0].uri;
+      setVideoUri(uri);
+      // Upload a draft copy to Storage → get a public URL → let the backend
+      // AI analyze the VIDEO directly, right after the clip is picked.
+      setSummaryLoading(true);
+      try {
+        const { url } = await uploadDraftVideo(uri);
+        setDraftVideoUrl(url);
+        await runSummary({ videoUrl: url });
+      } catch (e: any) {
+        setSummaryLoading(false);
+        Alert.alert("เตรียมวิดีโอไม่สำเร็จ", e?.message ?? "ลองเลือกวิดีโอใหม่อีกครั้ง");
+      }
     }
   };
 
   const removeVideo = () => {
     setVideoUri(null);
+    setDraftVideoUrl(null);
     setSummary(null);
     setSummaryDraft("");
     setSummaryEditing(false);

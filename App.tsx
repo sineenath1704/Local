@@ -12,6 +12,7 @@ import { SettingsProvider } from "./src/state/SettingsContext";
 import { AuthProvider, useAuth } from "./src/state/AuthContext";
 import { useAiPlanner } from "./src/state/AiPlannerContext";
 import AuthScreen from "./src/Pages/Auth/AuthScreen";
+import OnboardingScreen from "./src/Pages/Auth/OnboardingScreen";
 import { ActivityIndicator } from "react-native";
 import HomeScreen from "./src/Pages/HomeScreen";
 import CreatePostScreen from "./src/Pages/CreatePostScreen";
@@ -166,7 +167,7 @@ function AppContent() {
 
 /** Decides between the auth screen and the main app based on the session. */
 function AuthGate() {
-  const { loading, session, configured } = useAuth();
+  const { loading, session, configured, needsOnboarding } = useAuth();
 
   // While Supabase isn't configured, let the app run (dev) so you can still
   // see screens; auth actions will warn until .env is set.
@@ -180,6 +181,11 @@ function AuthGate() {
 
   if (configured && !session) {
     return <AuthScreen />;
+  }
+
+  // Signed in but profile not completed → onboarding (username → details).
+  if (configured && session && needsOnboarding) {
+    return <OnboardingScreen />;
   }
 
   // Signed in (or Supabase not configured yet) → the full app, with its providers.

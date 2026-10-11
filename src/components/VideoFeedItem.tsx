@@ -79,10 +79,21 @@ export default function VideoFeedItem({
   const isSaved = isSavedFn(post.id);
   const isFollowing = isFollowingFn(post.authorId);
 
-  // Like count = real taps only (no mock base): 0 or 1 for the current user
-  const likesCount = isLiked ? 1 : 0;
-  // Comment count = number of REAL comments/replies that exist for this post
-  const commentCount = countComments(getPostCommentData(post.id));
+  // Counts come from the DB (post.initial*). The DB triggers keep them
+  // accurate across all users; we only adjust ±1 locally to reflect the
+  // current user's own un-synced tap so the number feels instant.
+  // `post.initialLiked/Saved` is the server's view of whether I already liked/saved.
+  const likesCount = Math.max(
+    0,
+    (post.initialLikes ?? 0) + (isLiked ? 1 : 0) - (post.initialLiked ? 1 : 0)
+  );
+  const savesCount = Math.max(
+    0,
+    (post.initialSaves ?? 0) + (isSaved ? 1 : 0) - (post.initialSaved ? 1 : 0)
+  );
+  const sharesCount = post.initialShares ?? 0;
+  // Comment count = real count from the DB.
+  const commentCount = post.initialComments ?? 0;
 
   const [showComments, setShowComments] = useState<boolean>(false);
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
@@ -414,7 +425,7 @@ export default function VideoFeedItem({
             )}
           </View>
           <Text className="text-white text-[11px] font-semibold mt-0.5">
-            {isSaved ? "บันทึกแล้ว" : "บันทึก"}
+            {formatCount(savesCount)}
           </Text>
         </TouchableOpacity>
 
@@ -427,7 +438,7 @@ export default function VideoFeedItem({
           <View className="w-10 h-10 items-center justify-center">
             <ShareOutline size={28} color="#FFFFFF" strokeWidth={1.8} />
           </View>
-          <Text className="text-white text-[11px] font-semibold mt-0.5">แชร์</Text>
+          <Text className="text-white text-[11px] font-semibold mt-0.5">{formatCount(sharesCount)}</Text>
         </TouchableOpacity>
 
         {/* Vinyl Music Record (Spinning) */}

@@ -44,28 +44,59 @@ function contentType(ext: string): string {
   return "video/mp4";
 }
 
+/**
+ * Upload a picked clip to the `videos` bucket under drafts/ so the backend AI
+ * can fetch it by public URL for analysis (before the user posts).
+ * Returns { path, url } — reuse `path` at post time to avoid re-uploading.
+ */
+export async function uploadDraftVideo(localUri: string): Promise<{ path: string; url: string }> {
+  if (!isSupabaseConfigured) throw new Error("ยังไม่ได้ตั้งค่า Supabase");
+  const { data: auth } = await supabase.auth.getUser();
+  const uid = auth.user?.id;
+  if (!uid) throw new Error("กรุณาเข้าสู่ระบบก่อน");
+
+  const base64 = await readAsStringAsync(localUri, { encoding: EncodingType.Base64 });
+  const bytes = decode(base64);
+  const ext = guessExt(localUri);
+  const path = `${uid}/drafts/${Date.now()}.${ext}`;
+  const { error } = await supabase.storage
+    .from("videos")
+    .upload(path, bytes, { contentType: contentType(ext), upsert: false });
+  if (error) throw new Error(`อัปโหลดวิดีโอชั่วคราวไม่สำเร็จ: ${error.message}`);
+  const url = supabase.storage.from("videos").getPublicUrl(path).data.publicUrl;
+  return { path, url };
+}
+
 export async function uploadVideo(input: NewVideoInput): Promise<UploadResult> {
   if (!isSupabaseConfigured) throw new Error("ยังไม่ได้ตั้งค่า Supabase");
 
   const { data: auth } = await supabase.auth.getUser();
   const uid = auth.user?.id;
+  console.log("[upload] 0/auth uid =", uid);
   if (!uid) throw new Error("กรุณาเข้าสู่ระบบก่อนโพสต์");
 
   // 1) Read local file → base64 → ArrayBuffer.
   const base64 = await readAsStringAsync(input.localUri, { encoding: EncodingType.Base64 });
   const bytes = decode(base64);
+  console.log("[upload] 1/read bytes =", bytes.byteLength, "uri =", input.localUri);
 
   // 2) Upload to the `videos` bucket under the user's folder (RLS-friendly).
   const ext = guessExt(input.localUri);
   const path = `${uid}/${Date.now()}.${ext}`;
+  console.log("[upload] 2/upload start path =", path);
   const { error: upErr } = await supabase.storage
     .from("videos")
     .upload(path, bytes, { contentType: contentType(ext), upsert: false });
-  if (upErr) throw new Error(`อัปโหลดวิดีโอไม่สำเร็จ: ${upErr.message}`);
+  if (upErr) {
+    console.log("[upload] 2/upload FAILED =", JSON.stringify(upErr));
+    throw new Error(`อัปโหลดวิดีโอไม่สำเร็จ: ${upErr.message}`);
+  }
+  console.log("[upload] 2/upload OK");
 
   // 3) Public URL.
   const { data: pub } = supabase.storage.from("videos").getPublicUrl(path);
   const videoUrl = pub.publicUrl;
+  console.log("[upload] 3/url =", videoUrl);
 
   // 4) Decide the AI summary status we persist.
   //    - ready       → a summary was generated (and maybe edited) before posting
@@ -96,7 +127,11 @@ export async function uploadVideo(input: NewVideoInput): Promise<UploadResult> {
     })
     .select("id")
     .single();
-  if (insErr || !row) throw new Error(`บันทึกโพสต์ไม่สำเร็จ: ${insErr?.message ?? ""}`);
+  if (insErr || !row) {
+    console.log("[upload] 5/insert FAILED =", JSON.stringify(insErr));
+    throw new Error(`บันทึกโพสต์ไม่สำเร็จ: ${insErr?.message ?? ""}`);
+  }
+  console.log("[upload] 5/insert OK id =", row.id);
 
   return { videoId: row.id as string, videoUrl };
 }

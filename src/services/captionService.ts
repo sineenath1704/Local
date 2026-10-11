@@ -53,6 +53,8 @@ export interface SummaryInput {
   location?: string;
   audioType?: "speech" | "music" | "mixed" | "none";
   uploaderType?: "tourist" | "community";
+  /** Public URL of the clip — makes the backend analyze the VIDEO directly. */
+  videoUrl?: string;
 }
 
 export interface CaptionRequest {
@@ -83,6 +85,7 @@ export async function generatePreviewSummary(input: SummaryInput): Promise<AiSum
         location: input.location ?? "",
         audioType: input.audioType ?? "none",
         uploaderType: input.uploaderType ?? "tourist",
+        videoUrl: input.videoUrl,
       }),
     });
     if (!res.ok) return null;

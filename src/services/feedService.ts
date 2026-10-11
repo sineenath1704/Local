@@ -1,14 +1,15 @@
 import { supabase, isSupabaseConfigured } from "../lib/supabase";
-import { VideoPost, HOME_FEED_POSTS } from "../data/homeFeedData";
+import { VideoPost } from "../data/homeFeedData";
 
 /**
- * Feed service — loads the video feed from Supabase.
+ * Feed service — loads the video feed from Supabase ONLY.
  * -------------------------------------------------------------
- * Maps the `videos` table (joined with `users`) into the existing VideoPost
- * shape so the UI doesn't change. Remote media become { uri } sources.
+ * Maps the `videos` table (joined with `users`) into the VideoPost shape.
+ * Remote media become { uri } sources.
  *
- * Falls back to the bundled HOME_FEED_POSTS when Supabase isn't configured,
- * the table is empty, or the query fails — so the screen is never blank.
+ * No mock/fallback data: when Supabase isn't configured, has no posts, or the
+ * query fails, this returns an empty list with a status the UI uses to show an
+ * empty / error state ("ยังไม่มีวิดีโอในขณะนี้").
  */
 interface VideoRow {
   id: string;
@@ -69,27 +70,46 @@ function rowToPost(row: VideoRow, likedIds: Set<string>, savedIds: Set<string>):
 
 export interface FeedResult {
   posts: VideoPost[];
-  source: "supabase" | "fallback";
+  /**
+   * ok        — loaded from Supabase (may still be an empty list)
+   * notConfigured — Supabase env not set
+   * error     — the query failed
+   */
+  status: "ok" | "notConfigured" | "error";
 }
 
 export async function loadFeed(): Promise<FeedResult> {
   if (!isSupabaseConfigured) {
-    return { posts: HOME_FEED_POSTS, source: "fallback" };
+    return { posts: [], status: "notConfigured" };
   }
 
   try {
+    // No join on users (avoids depending on a PostgREST FK relationship).
     const { data, error } = await supabase
       .from("videos")
       .select(
-        "id, user_id, video_url, thumbnail_url, caption, hashtags, location_name, province, district, likes_count, comments_count, saves_count, shares_count, created_at, users(id, display_name, username, avatar_url)"
+        "id, user_id, video_url, thumbnail_url, caption, hashtags, location_name, province, district, likes_count, comments_count, saves_count, shares_count, created_at"
       )
       .eq("is_deleted", false)
       .order("created_at", { ascending: false })
       .limit(50);
 
-    if (error || !data || data.length === 0) {
-      return { posts: HOME_FEED_POSTS, source: "fallback" };
+    console.log("[feed] rows =", data?.length ?? 0, "error =", error ? JSON.stringify(error) : "none");
+    if (error) {
+      return { posts: [], status: "error" };
     }
+    if (!data || data.length === 0) {
+      return { posts: [], status: "ok" }; // no posts yet → empty state
+    }
+
+    // Fetch the authors separately, then map them in.
+    const authorIds = Array.from(new Set(data.map((r: any) => r.user_id)));
+    const { data: users } = await supabase
+      .from("users")
+      .select("id, display_name, username, avatar_url")
+      .in("id", authorIds);
+    const userById = new Map((users ?? []).map((u: any) => [u.id, u]));
+    console.log("[feed] authors =", users?.length ?? 0);
 
     // Reflect the current user's likes/saves on the hearts/bookmarks.
     const { data: auth } = await supabase.auth.getUser();
@@ -106,9 +126,11 @@ export async function loadFeed(): Promise<FeedResult> {
       (saves ?? []).forEach((s: any) => savedIds.add(s.video_id));
     }
 
-    const posts = (data as unknown as VideoRow[]).map((r) => rowToPost(r, likedIds, savedIds));
-    return { posts, source: "supabase" };
+    const posts = (data as any[]).map((r) =>
+      rowToPost({ ...r, users: userById.get(r.user_id) ?? null }, likedIds, savedIds)
+    );
+    return { posts, status: "ok" };
   } catch {
-    return { posts: HOME_FEED_POSTS, source: "fallback" };
+    return { posts: [], status: "error" };
   }
 }
