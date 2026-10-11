@@ -4,7 +4,9 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  TouchableWithoutFeedback,
   FlatList,
+  Modal,
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
@@ -15,6 +17,8 @@ import {
   PaperAirplaneIcon,
   SparklesIcon,
   FolderIcon,
+  PaperClipIcon,
+  XMarkIcon,
 } from "react-native-heroicons/outline";
 import { useAiPlanner } from "../../state/AiPlannerContext";
 import { useInteractions } from "../../state/InteractionContext";
@@ -41,24 +45,35 @@ export default function AiChatScreen({ threadId, onBack, onPlanTrip, initialMess
   const { folders } = useInteractions();
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  const [attachedFolderId, setAttachedFolderId] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const listRef = useRef<FlatList<AiChatMessage>>(null);
   const autoSentRef = useRef(false);
 
   const thread = getThread(threadId);
-  const folder = thread?.folderId ? folders.find((f) => f.id === thread.folderId) : undefined;
+  // A thread can be folder-scoped, OR the user can attach a folder per message
+  // (like attaching a file). The attached folder wins while it's set.
+  const threadFolder = thread?.folderId ? folders.find((f) => f.id === thread.folderId) : undefined;
+  const attachedFolder = attachedFolderId ? folders.find((f) => f.id === attachedFolderId) : undefined;
+  const folder = attachedFolder ?? threadFolder;
 
   const send = async (text: string) => {
     const body = text.trim();
     if (!body || !thread || sending) return;
 
-    appendMessage(threadId, { role: "user", content: body });
+    // If a folder is attached, make it visible in the transcript too.
+    const visibleContent = attachedFolder
+      ? `📁 แนบโฟลเดอร์ "${attachedFolder.name}" (${attachedFolder.videoIds.length} คลิป)\n${body}`
+      : body;
+
+    appendMessage(threadId, { role: "user", content: visibleContent });
     setDraft("");
     setSending(true);
     setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
 
     const history = [...thread.messages.map((m) => ({ role: m.role, content: m.content })), {
       role: "user" as const,
-      content: body,
+      content: visibleContent,
     }];
 
     const folderCtx = folder
@@ -67,6 +82,7 @@ export default function AiChatScreen({ threadId, onBack, onPlanTrip, initialMess
 
     const reply = await sendChat(history, folderCtx);
     appendMessage(threadId, { role: "assistant", content: reply });
+    setAttachedFolderId(null); // attachment is one-shot per send
     setSending(false);
     setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
   };
@@ -189,15 +205,41 @@ export default function AiChatScreen({ threadId, onBack, onPlanTrip, initialMess
 
       {/* Composer */}
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        {/* Attached-folder chip (only for a per-message attachment) */}
+        {attachedFolder && (
+          <View className="flex-row items-center mx-3 mt-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+            <FolderIcon size={16} color="#D47A3A" />
+            <Text className="flex-1 text-amber-800 text-[12px] font-semibold ml-2" numberOfLines={1}>
+              {attachedFolder.name} • {attachedFolder.videoIds.length} คลิป
+            </Text>
+            <TouchableOpacity onPress={() => setAttachedFolderId(null)} className="p-0.5">
+              <XMarkIcon size={16} color="#B45309" />
+            </TouchableOpacity>
+          </View>
+        )}
+
         <View
           className="flex-row items-center px-3 pt-2 border-t border-gray-100"
           style={{ paddingBottom: Math.max(insets.bottom, 10) }}
         >
+          {/* Attach a saved-clip folder (like attaching a file) — only when the
+              thread isn't already scoped to a folder. */}
+          {!threadFolder && (
+            <TouchableOpacity
+              onPress={() => setPickerOpen(true)}
+              disabled={sending}
+              activeOpacity={0.7}
+              className="w-10 h-10 rounded-full bg-gray-100 items-center justify-center mr-2"
+            >
+              <PaperClipIcon size={20} color={attachedFolder ? "#D47A3A" : "#6B7280"} />
+            </TouchableOpacity>
+          )}
+
           <View className="flex-1 bg-gray-100 rounded-full px-4 py-2.5">
             <TextInput
               value={draft}
               onChangeText={setDraft}
-              placeholder="ถาม AI ช่วยคิด..."
+              placeholder="ถามน้องโลคอล..."
               placeholderTextColor="#9CA3AF"
               className="text-[14px] text-gray-900 py-0"
               multiline
@@ -216,6 +258,58 @@ export default function AiChatScreen({ threadId, onBack, onPlanTrip, initialMess
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
+
+      {/* Folder picker — pick a saved-clip folder to attach to the next message */}
+      <Modal visible={pickerOpen} transparent animationType="slide" onRequestClose={() => setPickerOpen(false)}>
+        <TouchableWithoutFeedback onPress={() => setPickerOpen(false)}>
+          <View className="flex-1 bg-black/40" />
+        </TouchableWithoutFeedback>
+        <View
+          className="absolute left-0 right-0 bottom-0 bg-white rounded-t-3xl"
+          style={{ maxHeight: "70%", paddingBottom: Math.max(insets.bottom, 12) }}
+        >
+          <View className="items-center pt-2.5 pb-1">
+            <View className="w-10 h-1.5 rounded-full bg-gray-300" />
+          </View>
+          <View className="px-5 pt-1 pb-3 flex-row items-center justify-between border-b border-gray-100">
+            <Text className="text-[16px] font-black text-gray-900">แนบโฟลเดอร์คลิป</Text>
+            <TouchableOpacity onPress={() => setPickerOpen(false)} className="p-1">
+              <XMarkIcon size={22} color="#6B7280" />
+            </TouchableOpacity>
+          </View>
+          <FlatList
+            data={folders}
+            keyExtractor={(f) => f.id}
+            contentContainerStyle={{ padding: 16 }}
+            renderItem={({ item }) => (
+              <TouchableOpacity
+                onPress={() => {
+                  setAttachedFolderId(item.id);
+                  setPickerOpen(false);
+                }}
+                activeOpacity={0.8}
+                className="flex-row items-center bg-gray-50 border border-gray-100 rounded-2xl p-4 mb-2.5"
+              >
+                <View className="w-11 h-11 rounded-2xl bg-amber-100 items-center justify-center mr-3">
+                  <FolderIcon size={22} color="#D47A3A" />
+                </View>
+                <View className="flex-1">
+                  <Text className="text-gray-900 font-bold text-[14px]">{item.name}</Text>
+                  <Text className="text-gray-400 text-[12px]">{item.videoIds.length} คลิปที่บันทึก</Text>
+                </View>
+              </TouchableOpacity>
+            )}
+            ListEmptyComponent={
+              <View className="py-14 items-center px-8">
+                <FolderIcon size={40} color="#D1D5DB" />
+                <Text className="text-gray-400 text-sm text-center mt-3 leading-5">
+                  ยังไม่มีโฟลเดอร์ ไปที่หน้าหลักแล้วกดบันทึกคลิปที่ชอบลงโฟลเดอร์ก่อน
+                </Text>
+              </View>
+            }
+          />
+        </View>
+      </Modal>
     </View>
   );
 }

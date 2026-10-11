@@ -15,20 +15,17 @@ import {
   PlusIcon,
   SparklesIcon,
 } from "react-native-heroicons/outline";
-import { useInteractions } from "../../state/InteractionContext";
 import { useAiPlanner } from "../../state/AiPlannerContext";
 
-import FolderDetailScreen from "./FolderDetailScreen";
 import AiChatScreen from "./AiChatScreen";
 import TripDashboard from "./TripDashboard";
 import TripWizard from "./TripWizard";
 import ItineraryViewer from "./ItineraryViewer";
 
-type HubTab = "folders" | "chat" | "trips";
+type HubTab = "chat" | "trips";
 
 type Nav =
   | { view: "hub" }
-  | { view: "folderDetail"; folderId: string }
   | { view: "chat"; threadId: string; initialMessage?: string }
   | { view: "wizard"; folderId?: string }
   | { view: "itinerary"; tripId: string };
@@ -39,16 +36,14 @@ interface AiHubScreenProps {
 
 export default function AiHubScreen({ onFullScreenChange }: AiHubScreenProps) {
   const insets = useSafeAreaInsets();
-  const { folders } = useInteractions();
   const {
     threads,
     startGeneralThread,
-    startFolderThread,
     pendingChatSeed,
     consumePendingChatSeed,
   } = useAiPlanner();
 
-  const [tab, setTab] = useState<HubTab>("folders");
+  const [tab, setTab] = useState<HubTab>("chat");
   const [nav, setNav] = useState<Nav>({ view: "hub" });
 
   // Hide the bottom menu bar whenever we're not on the hub list.
@@ -73,19 +68,6 @@ export default function AiHubScreen({ onFullScreenChange }: AiHubScreenProps) {
   const goHub = () => setNav({ view: "hub" });
 
   // ---- Full-screen sub-views ----
-  if (nav.view === "folderDetail") {
-    return (
-      <FolderDetailScreen
-        folderId={nav.folderId}
-        onBack={goHub}
-        onChatFromFolder={(folderId, folderName) => {
-          const id = startFolderThread(folderId, folderName);
-          setNav({ view: "chat", threadId: id });
-        }}
-        onPlanTrip={(folderId) => setNav({ view: "wizard", folderId })}
-      />
-    );
-  }
   if (nav.view === "chat") {
     return (
       <AiChatScreen
@@ -130,9 +112,8 @@ export default function AiHubScreen({ onFullScreenChange }: AiHubScreenProps) {
       {/* Primary tabs */}
       <View className="flex-row px-3 border-b border-gray-100">
         {([
-          ["folders", "โฟลเดอร์", FolderIcon],
           ["chat", "แชท AI", ChatBubbleLeftRightIcon],
-          ["trips", "ทริปของฉัน", MapIcon],
+          ["trips", "วางแผนทริป", MapIcon],
         ] as const).map(([key, label, Icon]) => {
           const active = tab === key;
           return (
@@ -153,39 +134,7 @@ export default function AiHubScreen({ onFullScreenChange }: AiHubScreenProps) {
         })}
       </View>
 
-      {/* ---- Folders tab ---- */}
-      {tab === "folders" && (
-        <FlatList
-          data={folders}
-          keyExtractor={(f) => f.id}
-          contentContainerStyle={{ padding: 16, paddingBottom: 120 }}
-          renderItem={({ item }) => (
-            <TouchableOpacity
-              onPress={() => setNav({ view: "folderDetail", folderId: item.id })}
-              activeOpacity={0.8}
-              className="flex-row items-center bg-gray-50 border border-gray-100 rounded-2xl p-4 mb-2.5"
-            >
-              <View className="w-12 h-12 rounded-2xl bg-amber-100 items-center justify-center mr-3">
-                <FolderIcon size={24} color="#D47A3A" />
-              </View>
-              <View className="flex-1">
-                <Text className="text-gray-900 font-bold text-[15px]">{item.name}</Text>
-                <Text className="text-gray-400 text-[12px]">{item.videoIds.length} คลิปที่บันทึก</Text>
-              </View>
-            </TouchableOpacity>
-          )}
-          ListEmptyComponent={
-            <View className="py-20 items-center px-10">
-              <FolderIcon size={44} color="#D1D5DB" />
-              <Text className="text-gray-400 text-sm text-center mt-3 leading-5">
-                ยังไม่มีโฟลเดอร์ ไปที่หน้าหลักแล้วกดบันทึกคลิปที่ชอบ เลือกสร้างโฟลเดอร์ไว้ให้ AI วางแผนทริปได้
-              </Text>
-            </View>
-          }
-        />
-      )}
-
-      {/* ---- Chat tab ---- */}
+      {/* ---- Chat tab (แชท AI "น้องโลคอล") ---- */}
       {tab === "chat" && (
         <View className="flex-1">
           <TouchableOpacity
@@ -197,8 +146,12 @@ export default function AiHubScreen({ onFullScreenChange }: AiHubScreenProps) {
             className="mx-4 mt-3 mb-2 bg-violet-600 rounded-2xl p-4 flex-row items-center justify-center"
           >
             <PlusIcon size={20} color="#FFFFFF" strokeWidth={2.5} />
-            <Text className="text-white font-black text-[15px] ml-1.5">เริ่มแชทใหม่ (เรื่องทั่วไป)</Text>
+            <Text className="text-white font-black text-[15px] ml-1.5">เริ่มแชทกับน้องโลคอล</Text>
           </TouchableOpacity>
+
+          <Text className="text-gray-400 text-[11px] px-5 pt-1 pb-1 leading-4">
+            คุยเรื่องเที่ยว วางแผนทริป หรือแนบโฟลเดอร์คลิปที่บันทึกไว้มาถามน้องโลคอลได้เลย
+          </Text>
 
           <Text className="text-gray-400 text-[11px] font-bold px-5 pt-2 pb-1 uppercase">แชทที่ผ่านมา</Text>
           <FlatList

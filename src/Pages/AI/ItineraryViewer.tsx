@@ -19,6 +19,7 @@ import {
   ArrowDownTrayIcon,
   BanknotesIcon,
   MapPinIcon,
+  ChatBubbleLeftRightIcon,
 } from "react-native-heroicons/outline";
 import { useAiPlanner } from "../../state/AiPlannerContext";
 import { ItineraryStop } from "../../data/tripsData";
@@ -38,7 +39,7 @@ function driveLabel(mins: number): string {
 
 export default function ItineraryViewer({ tripId, onBack }: ItineraryViewerProps) {
   const insets = useSafeAreaInsets();
-  const { trips, updateTrip, setTripStatus } = useAiPlanner();
+  const { trips, updateTrip, setTripStatus, openChatWithSeed } = useAiPlanner();
   const trip = trips.find((t) => t.id === tripId);
   const [editing, setEditing] = useState(false);
 
@@ -61,6 +62,26 @@ export default function ItineraryViewer({ tripId, onBack }: ItineraryViewerProps
 
   const b = trip.budget;
   const overBudget = !b.withinBudget;
+
+  // Build a readable summary of the (possibly edited) trip and hand it to the
+  // AI chat so the user can ask น้องโลคอล to re-plan or discuss it further.
+  const sendBackToAi = () => {
+    const dayLines = trip.itinerary
+      .map((day) => {
+        const stops = day.stops
+          .map((s) => `   • ${s.name} — ${s.activity} (~${s.stayHours} ชม.)`)
+          .join("\n");
+        return `วันที่ ${day.day}:\n${stops}`;
+      })
+      .join("\n");
+    const summary =
+      `ช่วยปรับ/จัดแผนทริปนี้ใหม่ให้หน่อย หรือแนะนำเพิ่มเติมได้เลย\n\n` +
+      `ทริป: ${trip.title}\n` +
+      `ออกจาก: ${trip.startPoint} • ${trip.days} วัน ${trip.nights} คืน\n` +
+      `งบต่อคน: ${trip.budgetPerPerson.toLocaleString()} ฿ (ประเมินใช้จริง ${b.perPerson.toLocaleString()} ฿)\n\n` +
+      `${dayLines}`;
+    openChatWithSeed(summary);
+  };
 
   return (
     <View className="flex-1 bg-white">
@@ -203,30 +224,44 @@ export default function ItineraryViewer({ tripId, onBack }: ItineraryViewerProps
         ))}
       </ScrollView>
 
-      {/* Footer: offline pack + save */}
+      {/* Footer: send-to-AI + offline pack + save */}
       <View
-        className="px-5 pt-3 border-t border-gray-100 flex-row"
+        className="px-5 pt-3 border-t border-gray-100"
         style={{ paddingBottom: Math.max(insets.bottom, 14) }}
       >
+        {/* Hand the plan back to น้องโลคอล to re-plan / discuss */}
         <TouchableOpacity
-          onPress={() => Alert.alert("ดาวน์โหลดสำเร็จ", "บันทึกแผนที่และแผนทริปแบบออฟไลน์แล้ว ใช้งานได้แม้สัญญาณหลุดบนดอย")}
+          onPress={sendBackToAi}
           activeOpacity={0.85}
-          className="flex-1 flex-row items-center justify-center bg-gray-100 rounded-2xl py-3.5 mr-2"
+          className="flex-row items-center justify-center bg-violet-50 border border-violet-200 rounded-2xl py-3 mb-2.5"
         >
-          <ArrowDownTrayIcon size={18} color="#374151" />
-          <Text className="text-gray-700 font-bold text-[13px] ml-1.5">แพ็กออฟไลน์</Text>
+          <ChatBubbleLeftRightIcon size={18} color="#7C3AED" />
+          <Text className="text-violet-700 font-bold text-[13px] ml-1.5">
+            ให้ AI จัดใหม่ / คุยต่อ
+          </Text>
         </TouchableOpacity>
-        <TouchableOpacity
-          onPress={() => {
-            setTripStatus(tripId, "upcoming");
-            Alert.alert("บันทึกทริปแล้ว", "ย้ายไปที่ \"ทริปที่กำลังจะไป\" เรียบร้อย");
-            onBack();
-          }}
-          activeOpacity={0.85}
-          className="flex-1 items-center justify-center bg-violet-600 rounded-2xl py-3.5"
-        >
-          <Text className="text-white font-bold text-[14px]">ยืนยันทริปนี้</Text>
-        </TouchableOpacity>
+
+        <View className="flex-row">
+          <TouchableOpacity
+            onPress={() => Alert.alert("ดาวน์โหลดสำเร็จ", "บันทึกแผนที่และแผนทริปแบบออฟไลน์แล้ว ใช้งานได้แม้สัญญาณหลุดบนดอย")}
+            activeOpacity={0.85}
+            className="flex-1 flex-row items-center justify-center bg-gray-100 rounded-2xl py-3.5 mr-2"
+          >
+            <ArrowDownTrayIcon size={18} color="#374151" />
+            <Text className="text-gray-700 font-bold text-[13px] ml-1.5">แพ็กออฟไลน์</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => {
+              setTripStatus(tripId, "upcoming");
+              Alert.alert("บันทึกทริปแล้ว", "ย้ายไปที่ \"ทริปที่กำลังจะไป\" เรียบร้อย");
+              onBack();
+            }}
+            activeOpacity={0.85}
+            className="flex-1 items-center justify-center bg-violet-600 rounded-2xl py-3.5"
+          >
+            <Text className="text-white font-bold text-[14px]">ยืนยันทริปนี้</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     </View>
   );
