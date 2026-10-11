@@ -144,3 +144,15 @@ export function buildPlaceFeedPost(place: PlaceItem): VideoPost {
     initialSaved: false,
   };
 }
+
+/** Fast id → post lookup for the bundled feed. */
+const POST_BY_ID = new Map(HOME_FEED_POSTS.map((p) => [p.id, p]));
+
+/**
+ * Resolve a video id (e.g. a clip shared into a chat) to its full VideoPost.
+ * Returns undefined when the id isn't in the bundled feed (e.g. a Supabase
+ * upload) — callers should handle that gracefully.
+ */
+export function getPostById(videoId: string): VideoPost | undefined {
+  return POST_BY_ID.get(videoId);
+}

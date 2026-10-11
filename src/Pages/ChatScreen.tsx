@@ -11,7 +11,6 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   BellIcon,
-  UserIcon,
   UserGroupIcon,
   PlusIcon,
   HeartIcon,
@@ -19,17 +18,38 @@ import {
   UserPlusIcon,
   SparklesIcon,
 } from "react-native-heroicons/outline";
+import { useMemo } from "react";
 import { useChat } from "../state/ChatContext";
 import ChatRoom from "../components/ChatRoom";
+import ChatClipViewer from "../components/ChatClipViewer";
 import CreateGroupSheet from "../components/CreateGroupSheet";
 import {
   AppNotification,
+  ChatMessage,
   friendAvatar,
   getFriend,
   ME_ID,
 } from "../data/chatData";
+import { getPostById, VideoPost } from "../data/homeFeedData";
 
-type ChatTab = "notifications" | "direct" | "group";
+type ChatTab = "notifications" | "chats";
+
+/** A unified row for the merged chat list (direct + group). */
+type Conversation =
+  | { kind: "direct"; id: string; friendId: string; name: string; avatar: any | null; messages: ChatMessage[]; lastAt: number }
+  | { kind: "group"; id: string; name: string; memberIds: string[]; messages: ChatMessage[]; lastAt: number };
+
+/** Resolve the clips shared in a conversation, in order, to full posts. */
+function sharedClipsOf(messages: ChatMessage[]): VideoPost[] {
+  const out: VideoPost[] = [];
+  for (const m of messages) {
+    if (m.sharedVideoId) {
+      const post = getPostById(m.sharedVideoId);
+      if (post) out.push(post);
+    }
+  }
+  return out;
+}
 
 /** Icon per notification type. */
 function NotiIcon({ type }: { type: AppNotification["type"] }) {
@@ -77,16 +97,67 @@ export default function ChatScreen({ onRoomOpenChange }: ChatScreenProps) {
     sendGroupMessage,
   } = useChat();
 
-  const [tab, setTab] = useState<ChatTab>("direct");
+  const [tab, setTab] = useState<ChatTab>("chats");
   const [openDirectFriendId, setOpenDirectFriendId] = useState<string | null>(null);
   const [openGroupId, setOpenGroupId] = useState<string | null>(null);
   const [showCreateGroup, setShowCreateGroup] = useState(false);
   const [addMembersGroupId, setAddMembersGroupId] = useState<string | null>(null);
+  // Clip viewer: which conversation's clips + the index to start at.
+  const [clipViewer, setClipViewer] = useState<
+    { clips: VideoPost[]; index: number; title: string } | null
+  >(null);
 
-  // Tell the host whether a room is open (so it can hide the bottom bar)
+  // Merge direct + group chats into one list, newest activity first.
+  const conversations = useMemo<Conversation[]>(() => {
+    const directs: Conversation[] = directChats.map((c) => {
+      const f = getFriend(c.friendId);
+      return {
+        kind: "direct",
+        id: c.id,
+        friendId: c.friendId,
+        name: f?.name ?? "ผู้ใช้",
+        avatar: f?.avatar ?? friendAvatar(c.friendId),
+        messages: c.messages,
+        lastAt: c.messages[c.messages.length - 1]?.at ?? 0,
+      };
+    });
+    const groups: Conversation[] = groupChats.map((g) => ({
+      kind: "group",
+      id: g.id,
+      name: g.name,
+      memberIds: g.memberIds,
+      messages: g.messages,
+      lastAt: g.messages[g.messages.length - 1]?.at ?? 0,
+    }));
+    return [...directs, ...groups].sort((a, b) => b.lastAt - a.lastAt);
+  }, [directChats, groupChats]);
+
+  // Tell the host whether a full-screen view is open (hides the bottom bar).
   React.useEffect(() => {
-    onRoomOpenChange?.(openDirectFriendId !== null || openGroupId !== null);
-  }, [openDirectFriendId, openGroupId, onRoomOpenChange]);
+    onRoomOpenChange?.(
+      openDirectFriendId !== null || openGroupId !== null || clipViewer !== null
+    );
+  }, [openDirectFriendId, openGroupId, clipViewer, onRoomOpenChange]);
+
+  // Open the clip viewer for the clip the user tapped inside a conversation.
+  const openClipFromMessages = (messages: ChatMessage[], videoId: string, title: string) => {
+    const clips = sharedClipsOf(messages);
+    const index = clips.findIndex((c) => c.id === videoId);
+    if (clips.length === 0 || index < 0) return; // clip not resolvable (e.g. Supabase upload)
+    setClipViewer({ clips, index, title });
+  };
+
+  // ---- Full-screen clip viewer (clips shared in the open conversation) ----
+  if (clipViewer) {
+    return (
+      <ChatClipViewer
+        clips={clipViewer.clips}
+        initialIndex={clipViewer.index}
+        title={clipViewer.title}
+        onClose={() => setClipViewer(null)}
+      />
+    );
+  }
 
   // ---- Open a direct chat room ----
   if (openDirectFriendId) {
@@ -100,6 +171,9 @@ export default function ChatScreen({ onRoomOpenChange }: ChatScreenProps) {
         messages={chat?.messages ?? []}
         onSend={(text) => sendDirectMessage(openDirectFriendId, text)}
         onBack={() => setOpenDirectFriendId(null)}
+        onOpenClip={(videoId) =>
+          openClipFromMessages(chat?.messages ?? [], videoId, friend?.name ?? "แชท")
+        }
       />
     );
   }
@@ -117,6 +191,9 @@ export default function ChatScreen({ onRoomOpenChange }: ChatScreenProps) {
           onSend={(text) => sendGroupMessage(openGroupId, text)}
           onBack={() => setOpenGroupId(null)}
           onAddMembers={() => setAddMembersGroupId(openGroupId)}
+          onOpenClip={(videoId) =>
+            openClipFromMessages(group?.messages ?? [], videoId, group?.name ?? "กลุ่ม")
+          }
         />
         <CreateGroupSheet
           visible={addMembersGroupId === openGroupId}
@@ -146,7 +223,7 @@ export default function ChatScreen({ onRoomOpenChange }: ChatScreenProps) {
         className="px-5 pb-2 flex-row items-center justify-between"
       >
         <Text className="text-2xl font-black text-gray-900">กล่องข้อความ</Text>
-        {tab === "group" && (
+        {tab === "chats" && (
           <TouchableOpacity
             onPress={() => setShowCreateGroup(true)}
             activeOpacity={0.8}
@@ -162,8 +239,7 @@ export default function ChatScreen({ onRoomOpenChange }: ChatScreenProps) {
       <View className="flex-row px-3 border-b border-gray-100">
         {([
           ["notifications", "แจ้งเตือน", <BellIcon key="b" size={16} />],
-          ["direct", "แชทส่วนตัว", <UserIcon key="u" size={16} />],
-          ["group", "แชทกลุ่ม", <UserGroupIcon key="g" size={16} />],
+          ["chats", "แชท", <ChatBubbleOvalLeftIcon key="c" size={16} />],
         ] as const).map(([key, label]) => {
           const active = tab === key;
           const showBadge = key === "notifications" && unreadNotifications > 0;
@@ -222,24 +298,50 @@ export default function ChatScreen({ onRoomOpenChange }: ChatScreenProps) {
         />
       )}
 
-      {/* ---- Direct chats tab ---- */}
-      {tab === "direct" && (
+      {/* ---- Unified chats tab (direct + group together) ---- */}
+      {tab === "chats" && (
         <FlatList
-          data={directChats}
+          data={conversations}
           keyExtractor={(c) => c.id}
           contentContainerStyle={{ paddingVertical: 4, paddingBottom: 100 }}
           renderItem={({ item }) => {
-            const friend = getFriend(item.friendId);
+            const hasClips = item.messages.some((m) => m.sharedVideoId);
             return (
               <TouchableOpacity
-                onPress={() => setOpenDirectFriendId(item.friendId)}
+                onPress={() =>
+                  item.kind === "direct"
+                    ? setOpenDirectFriendId(item.friendId)
+                    : setOpenGroupId(item.id)
+                }
                 activeOpacity={0.7}
                 className="flex-row items-center px-5 py-3"
               >
-                <Avatar avatar={friend?.avatar ?? friendAvatar(item.friendId)} name={friend?.name ?? "ผู้ใช้"} />
+                {/* Avatar — person for direct, group icon for group */}
+                {item.kind === "group" ? (
+                  <View className="w-[52px] h-[52px] rounded-full bg-emerald-100 items-center justify-center">
+                    <UserGroupIcon size={24} color="#2D6A4F" />
+                  </View>
+                ) : (
+                  <Avatar avatar={item.avatar} name={item.name} />
+                )}
+
                 <View className="flex-1 ml-3">
-                  <Text className="text-gray-900 font-bold text-[14px]">{friend?.name ?? "ผู้ใช้"}</Text>
-                  <Text className="text-gray-500 text-[12px]" numberOfLines={1}>
+                  <View className="flex-row items-center">
+                    <Text className="text-gray-900 font-bold text-[14px]" numberOfLines={1}>
+                      {item.name}
+                    </Text>
+                    {/* Small type tag so direct vs group is never confusing */}
+                    {item.kind === "group" && (
+                      <View className="ml-2 flex-row items-center bg-emerald-50 rounded-full px-2 py-0.5">
+                        <UserGroupIcon size={10} color="#2D6A4F" />
+                        <Text className="text-[#2D6A4F] text-[10px] font-semibold ml-0.5">
+                          {item.memberIds.length}
+                        </Text>
+                      </View>
+                    )}
+                    {hasClips && <Text className="ml-1.5 text-[11px]">📹</Text>}
+                  </View>
+                  <Text className="text-gray-500 text-[12px] mt-0.5" numberOfLines={1}>
                     {lastText(item.messages)}
                   </Text>
                 </View>
@@ -247,42 +349,10 @@ export default function ChatScreen({ onRoomOpenChange }: ChatScreenProps) {
             );
           }}
           ListEmptyComponent={
-            <View className="py-20 items-center">
-              <Text className="text-gray-400 text-sm">ยังไม่มีแชทส่วนตัว</Text>
-            </View>
-          }
-        />
-      )}
-
-      {/* ---- Group chats tab ---- */}
-      {tab === "group" && (
-        <FlatList
-          data={groupChats}
-          keyExtractor={(g) => g.id}
-          contentContainerStyle={{ paddingVertical: 4, paddingBottom: 100 }}
-          renderItem={({ item }) => (
-            <TouchableOpacity
-              onPress={() => setOpenGroupId(item.id)}
-              activeOpacity={0.7}
-              className="flex-row items-center px-5 py-3"
-            >
-              <View className="w-[52px] h-[52px] rounded-full bg-emerald-100 items-center justify-center">
-                <UserGroupIcon size={24} color="#2D6A4F" />
-              </View>
-              <View className="flex-1 ml-3">
-                <Text className="text-gray-900 font-bold text-[14px]">{item.name}</Text>
-                <Text className="text-gray-400 text-[11px] mb-0.5">{item.memberIds.length} สมาชิก</Text>
-                <Text className="text-gray-500 text-[12px]" numberOfLines={1}>
-                  {lastText(item.messages)}
-                </Text>
-              </View>
-            </TouchableOpacity>
-          )}
-          ListEmptyComponent={
             <View className="py-20 items-center px-10">
-              <UserGroupIcon size={40} color="#D1D5DB" />
+              <ChatBubbleOvalLeftIcon size={40} color="#D1D5DB" />
               <Text className="text-gray-400 text-sm text-center mt-3">
-                ยังไม่มีแชทกลุ่ม กดปุ่มสร้างกลุ่ม เพื่อชวนเพื่อนมาวางแผนทริปด้วยกัน
+                ยังไม่มีแชท แชร์คลิปจากหน้าหลักให้เพื่อน หรือกดปุ่ม "สร้างกลุ่ม" เพื่อเริ่มคุยกัน
               </Text>
             </View>
           }

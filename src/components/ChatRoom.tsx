@@ -18,6 +18,7 @@ import {
   UserPlusIcon,
 } from "react-native-heroicons/outline";
 import { ChatMessage, ME_ID, friendName, friendAvatar } from "../data/chatData";
+import { getPostById } from "../data/homeFeedData";
 
 interface ChatRoomProps {
   title: string;
@@ -28,10 +29,20 @@ interface ChatRoomProps {
   onSend: (text: string) => void;
   onBack: () => void;
   onAddMembers?: () => void;
+  /** Open the shared clip (tapped video card) in the full-screen clip viewer. */
+  onOpenClip?: (videoId: string) => void;
 }
 
 /** One message row (text or shared video), left for others, right for me. */
-function MessageBubble({ message, isGroup }: { message: ChatMessage; isGroup: boolean }) {
+function MessageBubble({
+  message,
+  isGroup,
+  onOpenClip,
+}: {
+  message: ChatMessage;
+  isGroup: boolean;
+  onOpenClip?: (videoId: string) => void;
+}) {
   const mine = message.senderId === ME_ID;
   const avatar = friendAvatar(message.senderId);
 
@@ -60,25 +71,40 @@ function MessageBubble({ message, isGroup }: { message: ChatMessage; isGroup: bo
         )}
 
         {message.sharedVideoId ? (
-          // Shared video card
-          <View
-            className={`rounded-2xl overflow-hidden border ${
-              mine ? "bg-[#2D6A4F] border-[#2D6A4F]" : "bg-gray-100 border-gray-200"
-            }`}
-            style={{ width: 180 }}
-          >
-            <View className="h-24 bg-black/80 items-center justify-center">
-              <PlayIcon size={30} color="#FFFFFF" />
-            </View>
-            <View className="p-2.5">
-              <Text className={`text-[12px] font-bold ${mine ? "text-white" : "text-gray-900"}`}>
-                แชร์คลิปวิดีโอ
-              </Text>
-              <Text className={`text-[10px] ${mine ? "text-white/70" : "text-gray-400"}`} numberOfLines={1}>
-                {message.sharedVideoId}
-              </Text>
-            </View>
-          </View>
+          // Shared video card — tappable, opens the in-chat clip viewer.
+          (() => {
+            const sharedPost = getPostById(message.sharedVideoId);
+            const subtitle = sharedPost
+              ? sharedPost.location.village || sharedPost.author.handle
+              : "แตะเพื่อดูคลิป";
+            return (
+              <TouchableOpacity
+                activeOpacity={0.85}
+                onPress={() => onOpenClip?.(message.sharedVideoId!)}
+                className={`rounded-2xl overflow-hidden border ${
+                  mine ? "bg-[#2D6A4F] border-[#2D6A4F]" : "bg-gray-100 border-gray-200"
+                }`}
+                style={{ width: 180 }}
+              >
+                <View className="h-24 bg-black/80 items-center justify-center">
+                  <View className="w-11 h-11 rounded-full bg-white/20 items-center justify-center">
+                    <PlayIcon size={24} color="#FFFFFF" />
+                  </View>
+                </View>
+                <View className="p-2.5">
+                  <Text className={`text-[12px] font-bold ${mine ? "text-white" : "text-gray-900"}`}>
+                    📹 แชร์คลิปวิดีโอ
+                  </Text>
+                  <Text
+                    className={`text-[10px] ${mine ? "text-white/70" : "text-gray-400"}`}
+                    numberOfLines={1}
+                  >
+                    {subtitle}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+            );
+          })()
         ) : (
           // Text bubble
           <View
@@ -105,6 +131,7 @@ export default function ChatRoom({
   onSend,
   onBack,
   onAddMembers,
+  onOpenClip,
 }: ChatRoomProps) {
   const insets = useSafeAreaInsets();
   const [draft, setDraft] = useState("");
@@ -160,7 +187,9 @@ export default function ChatRoom({
         ref={listRef}
         data={messages}
         keyExtractor={(m) => m.id}
-        renderItem={({ item }) => <MessageBubble message={item} isGroup={isGroup} />}
+        renderItem={({ item }) => (
+          <MessageBubble message={item} isGroup={isGroup} onOpenClip={onOpenClip} />
+        )}
         contentContainerStyle={{ paddingVertical: 12 }}
         showsVerticalScrollIndicator={false}
         onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
