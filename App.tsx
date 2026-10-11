@@ -1,5 +1,5 @@
 import "./global.css";
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { StatusBar } from "expo-status-bar";
 import { View, Text } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -10,6 +10,7 @@ import { AiPlannerProvider } from "./src/state/AiPlannerContext";
 import { MyProfileProvider } from "./src/state/MyProfileContext";
 import { SettingsProvider } from "./src/state/SettingsContext";
 import { AuthProvider, useAuth } from "./src/state/AuthContext";
+import { useAiPlanner } from "./src/state/AiPlannerContext";
 import AuthScreen from "./src/Pages/Auth/AuthScreen";
 import { ActivityIndicator } from "react-native";
 import HomeScreen from "./src/Pages/HomeScreen";
@@ -47,6 +48,8 @@ function AppContent() {
     profile: "โปรไฟล์",
   };
 
+  const { pendingChatSeed } = useAiPlanner();
+
   const handleTabChange = (tab: TabKey) => {
     setActiveTab(tab);
     // ปิด Map เมื่อผู้ใช้กดสลับแท็บเมนูด้านล่าง
@@ -65,6 +68,15 @@ function AppContent() {
       setProfileFolderId(null);
     }
   };
+
+  // When something (e.g. the comment sheet's "คุยต่อกับ AI") seeds a chat,
+  // jump to the AI tab so AiHubScreen can open + send it.
+  useEffect(() => {
+    if (pendingChatSeed) {
+      handleTabChange("ai");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingChatSeed]);
 
   return (
       <View className="flex-1 w-full h-full bg-black">

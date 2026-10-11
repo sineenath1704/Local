@@ -6,13 +6,16 @@ import {
   TouchableOpacity,
   TouchableWithoutFeedback,
   Modal,
-  FlatList,
   TextInput,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
   ActivityIndicator,
+  Animated,
+  PanResponder,
+  useWindowDimensions,
 } from "react-native";
+import { useRef } from "react";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   XMarkIcon,
@@ -22,6 +25,7 @@ import {
   StarIcon as StarOutline,
   HeartIcon as HeartOutline,
   PhotoIcon,
+  ChatBubbleLeftRightIcon,
 } from "react-native-heroicons/outline";
 import { StarIcon as StarSolid, HeartIcon as HeartSolid } from "react-native-heroicons/solid";
 
@@ -38,6 +42,7 @@ import {
   AiSummary,
 } from "../data/commentsData";
 import { fetchAiSummary } from "../services/aiSummaryService";
+import { useAiPlanner } from "../state/AiPlannerContext";
 
 type TabKey = "comments" | "reviews" | "ai";
 
@@ -243,9 +248,11 @@ function ReviewRow({ review }: { review: ReviewItem }) {
 function AiSummaryPanel({
   summary,
   loading,
+  onContinueInChat,
 }: {
   summary: AiSummary | null;
   loading: boolean;
+  onContinueInChat?: () => void;
 }) {
   if (loading) {
     return (
@@ -292,6 +299,18 @@ function AiSummaryPanel({
       <View className="bg-amber-50 border border-amber-200/70 rounded-2xl p-4">
         <Text className="text-gray-800 text-[13.5px] leading-6">{summary.text}</Text>
       </View>
+
+      {/* Continue the conversation about this clip in the AI chat */}
+      {onContinueInChat && (
+        <TouchableOpacity
+          onPress={onContinueInChat}
+          activeOpacity={0.85}
+          className="mt-3 bg-violet-600 rounded-2xl py-3.5 flex-row items-center justify-center"
+        >
+          <ChatBubbleLeftRightIcon size={17} color="#FFFFFF" />
+          <Text className="text-white font-bold text-[14px] ml-2">คุยต่อกับ AI เรื่องนี้</Text>
+        </TouchableOpacity>
+      )}
 
       {/* Structured place info (Video Content Analyzer) */}
       {summary.place && (
@@ -459,7 +478,45 @@ function AiSummaryPanel({
 
 export default function CommentSheet({ visible, postId, onClose }: CommentSheetProps) {
   const insets = useSafeAreaInsets();
+  const { height: screenH } = useWindowDimensions();
   const base = useMemo(() => getPostCommentData(postId), [postId]);
+  const { openChatWithSeed } = useAiPlanner();
+
+  // Fixed sheet height so it never grows/shrinks with its content (the AI tab
+  // used to push the sheet past the top; the empty state used to shrink it).
+  // Web/desktop keeps a taller sheet; phones & tablets use 40% of the screen.
+  const heightRatio = Platform.OS === "web" ? 0.5 : 0.4;
+  const sheetHeight = Math.min(Math.round(screenH * heightRatio), 500);
+
+  // --- Swipe-down-to-dismiss (uses core Animated + PanResponder, no new deps) ---
+  // The <Modal animationType="slide"> owns the close animation, so closeSheet
+  // just calls onClose() ONCE (guarded) — no second manual animation, which
+  // was causing the sheet to appear to close twice.
+  const translateY = useRef(new Animated.Value(0)).current;
+  const closingRef = useRef(false);
+  const resetPosition = () =>
+    Animated.spring(translateY, { toValue: 0, useNativeDriver: true, bounciness: 2 }).start();
+  const closeSheet = () => {
+    if (closingRef.current) return; // guard against double-close
+    closingRef.current = true;
+    translateY.setValue(0); // reset drag offset; Modal handles the slide-out
+    onClose();
+  };
+  const panResponder = useRef(
+    PanResponder.create({
+      // Only take over for a deliberate vertical drag (so taps/horizontal scroll pass through).
+      onMoveShouldSetPanResponder: (_e, g) => g.dy > 6 && Math.abs(g.dy) > Math.abs(g.dx),
+      onPanResponderMove: (_e, g) => {
+        if (g.dy > 0) translateY.setValue(g.dy);
+      },
+      onPanResponderRelease: (_e, g) => {
+        // Drag far enough OR flick down → close; otherwise snap back.
+        if (g.dy > 110 || g.vy > 0.9) closeSheet();
+        else resetPosition();
+      },
+      onPanResponderTerminate: () => resetPosition(),
+    })
+  ).current;
 
   const [tab, setTab] = useState<TabKey>("comments");
 
@@ -473,6 +530,18 @@ export default function CommentSheet({ visible, postId, onClose }: CommentSheetP
   const [aiLoading, setAiLoading] = useState(false);
   const [aiFetchedFor, setAiFetchedFor] = useState<string | null>(null);
 
+  // Build a seed message from the AI summary + hand it to the AI chat.
+  const handleContinueInChat = () => {
+    if (!aiSummary || aiSummary.status !== "ready") return;
+    const place = aiSummary.place?.place_name;
+    const seed =
+      `ช่วยเล่าเพิ่มเติม / แนะนำเกี่ยวกับคลิปนี้หน่อย\n\n` +
+      (place ? `สถานที่: ${place}\n` : "") +
+      `สรุปจาก AI: ${aiSummary.text}`;
+    openChatWithSeed(seed);
+    onClose();
+  };
+
   // Reset local state whenever a different post opens
   useEffect(() => {
     setComments(base.comments);
@@ -482,6 +551,14 @@ export default function CommentSheet({ visible, postId, onClose }: CommentSheetP
     setAiSummary(null);
     setAiFetchedFor(null);
   }, [base, postId]);
+
+  // Re-arm the close guard + drag position each time the sheet opens.
+  useEffect(() => {
+    if (visible) {
+      closingRef.current = false;
+      translateY.setValue(0);
+    }
+  }, [visible, translateY]);
 
   // Lazily fetch the AI summary the first time the AI tab is opened for a post
   useEffect(() => {
@@ -532,27 +609,36 @@ export default function CommentSheet({ visible, postId, onClose }: CommentSheetP
   };
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={closeSheet}>
       {/* Dim backdrop — tap to close */}
-      <TouchableWithoutFeedback onPress={onClose}>
-        <View className="flex-1 bg-black/40" />
+      <TouchableWithoutFeedback onPress={closeSheet}>
+        <View className="flex-1" />
       </TouchableWithoutFeedback>
 
       <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : undefined}
         style={{ position: "absolute", left: 0, right: 0, bottom: 0 }}
       >
-        <View
-          className="bg-white rounded-t-3xl overflow-hidden"
-          style={{ height: "75%", paddingBottom: Math.max(insets.bottom, 10) }}
+        <Animated.View
+          className="rounded-t-3xl overflow-hidden"
+          style={{
+            height: sheetHeight,
+            paddingBottom: Math.max(insets.bottom, 10),
+            transform: [{ translateY }],
+            // Inline bg so it never drops out on web (nativewind + Animated.View
+            // sometimes misses the className background there).
+            backgroundColor: "#FFFFFF",
+          }}
         >
-          {/* Grab handle */}
-          <View className="items-center pt-2.5 pb-1">
-            <View className="w-10 h-1.5 rounded-full bg-gray-300" />
-          </View>
+          {/* Drag zone: grab handle + header (swipe down here to close) */}
+          <View {...panResponder.panHandlers}>
+            {/* Grab handle */}
+            <View className="items-center pt-2.5 pb-1">
+              <View className="w-10 h-1.5 rounded-full bg-gray-300" />
+            </View>
 
-          {/* Header row: tabs + AI button + close */}
-          <View className="flex-row items-center justify-between px-4 pt-1 pb-3 border-b border-gray-100">
+            {/* Header row: tabs + AI button + close */}
+            <View className="flex-row items-center justify-between px-4 pt-1 pb-3 border-b border-gray-100">
             <View className="flex-row items-center flex-1">
               <TouchableOpacity onPress={() => setTab("comments")} activeOpacity={0.7} className="mr-4">
                 <Text
@@ -589,44 +675,67 @@ export default function CommentSheet({ visible, postId, onClose }: CommentSheetP
               <MapPinIcon size={13} color="#FFFFFF" />
             </TouchableOpacity>
 
-            <TouchableOpacity onPress={onClose} activeOpacity={0.7} className="p-1">
+            <TouchableOpacity onPress={closeSheet} activeOpacity={0.7} className="p-1">
               <XMarkIcon size={22} color="#6B7280" />
             </TouchableOpacity>
+            </View>
           </View>
 
           {/* Body */}
-          <View className="flex-1">
+          <View
+            className="flex-1"
+            style={
+              // On web a flex child must have minHeight:0 (and clip overflow)
+              // for an inner FlatList/ScrollView to actually scroll. Native
+              // handles this on its own, so only apply it on web.
+              Platform.OS === "web" ? { minHeight: 0, overflow: "hidden" } : undefined
+            }
+          >
             {tab === "comments" && (
-              <FlatList
-                data={comments}
-                keyExtractor={(c) => c.id}
-                renderItem={({ item }) => <CommentRow comment={item} onReply={startReply} />}
-                ItemSeparatorComponent={() => <View className="h-px bg-gray-100 ml-16" />}
+              // ScrollView (not FlatList) so it scrolls reliably on web, like
+              // the AI tab. Comment counts per post are small, so no need to
+              // virtualize.
+              <ScrollView
+                style={{ flex: 1 }}
                 showsVerticalScrollIndicator={false}
                 contentContainerStyle={{ paddingVertical: 4 }}
-                ListEmptyComponent={
+              >
+                {comments.length === 0 ? (
                   <View className="py-16 items-center">
                     <Text className="text-gray-400 text-sm">ยังไม่มีความคิดเห็น มาเป็นคนแรกกันเลย</Text>
                   </View>
-                }
-              />
+                ) : (
+                  comments.map((item, i) => (
+                    <View key={item.id}>
+                      <CommentRow comment={item} onReply={startReply} />
+                      {i < comments.length - 1 && <View className="h-px bg-gray-100 ml-16" />}
+                    </View>
+                  ))
+                )}
+              </ScrollView>
             )}
 
             {tab === "reviews" && (
-              <FlatList
-                data={base.reviews}
-                keyExtractor={(r) => r.id}
-                renderItem={({ item }) => <ReviewRow review={item} />}
-                showsVerticalScrollIndicator={false}
-                ListEmptyComponent={
+              <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
+                {base.reviews.length === 0 ? (
                   <View className="py-16 items-center">
                     <Text className="text-gray-400 text-sm">ยังไม่มีรีวิว</Text>
                   </View>
+                ) : (
+                  base.reviews.map((item) => <ReviewRow key={item.id} review={item} />)
+                )}
+              </ScrollView>
+            )}
+
+            {tab === "ai" && (
+              <AiSummaryPanel
+                summary={aiSummary}
+                loading={aiLoading}
+                onContinueInChat={
+                  aiSummary?.status === "ready" ? handleContinueInChat : undefined
                 }
               />
             )}
-
-            {tab === "ai" && <AiSummaryPanel summary={aiSummary} loading={aiLoading} />}
           </View>
 
           {/* Composer (hidden on AI tab) */}
@@ -677,7 +786,7 @@ export default function CommentSheet({ visible, postId, onClose }: CommentSheetP
               </View>
             </View>
           )}
-        </View>
+        </Animated.View>
       </KeyboardAvoidingView>
     </Modal>
   );

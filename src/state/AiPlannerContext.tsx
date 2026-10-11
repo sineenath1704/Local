@@ -14,6 +14,17 @@ interface AiPlannerState {
   threads: AiChatThread[];
   trips: Trip[];
 
+  /**
+   * A one-shot "seed" used to jump into the AI chat from elsewhere (e.g. the
+   * comment sheet's AI-summary tab → "คุยต่อกับ AI"). Holds the thread that was
+   * just created + the first user message to send. AiHubScreen consumes it.
+   */
+  pendingChatSeed: { threadId: string; message: string } | null;
+  /** Create a fresh general thread seeded with `message`, and request opening it. */
+  openChatWithSeed: (message: string) => void;
+  /** Clear the pending seed once AiHubScreen has opened + sent it. */
+  consumePendingChatSeed: () => void;
+
   getThread: (id: string) => AiChatThread | undefined;
   /** Start (or reuse) a general chat thread. Returns thread id. */
   startGeneralThread: () => string;
@@ -35,6 +46,9 @@ const uid = (p: string) => `${p}-${Date.now()}-${seq++}`;
 export function AiPlannerProvider({ children }: { children: React.ReactNode }) {
   const [threads, setThreads] = useState<AiChatThread[]>([]);
   const [trips, setTrips] = useState<Trip[]>([]);
+  const [pendingChatSeed, setPendingChatSeed] = useState<
+    { threadId: string; message: string } | null
+  >(null);
 
   const getThread = useCallback((id: string) => threads.find((t) => t.id === id), [threads]);
 
@@ -45,6 +59,21 @@ export function AiPlannerProvider({ children }: { children: React.ReactNode }) {
       ...prev,
     ]);
     return id;
+  }, []);
+
+  const openChatWithSeed = useCallback((message: string) => {
+    const text = message.trim();
+    if (!text) return;
+    const id = uid("thread");
+    setThreads((prev) => [
+      { id, title: "คุยต่อจากสรุป AI", messages: [], createdAt: Date.now() },
+      ...prev,
+    ]);
+    setPendingChatSeed({ threadId: id, message: text });
+  }, []);
+
+  const consumePendingChatSeed = useCallback(() => {
+    setPendingChatSeed(null);
   }, []);
 
   const startFolderThread = useCallback(
@@ -95,6 +124,9 @@ export function AiPlannerProvider({ children }: { children: React.ReactNode }) {
     () => ({
       threads,
       trips,
+      pendingChatSeed,
+      openChatWithSeed,
+      consumePendingChatSeed,
       getThread,
       startGeneralThread,
       startFolderThread,
@@ -107,6 +139,9 @@ export function AiPlannerProvider({ children }: { children: React.ReactNode }) {
     [
       threads,
       trips,
+      pendingChatSeed,
+      openChatWithSeed,
+      consumePendingChatSeed,
       getThread,
       startGeneralThread,
       startFolderThread,

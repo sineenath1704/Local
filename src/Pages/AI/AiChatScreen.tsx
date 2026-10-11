@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useRef, useState, useEffect } from "react";
 import {
   View,
   Text,
@@ -25,6 +25,8 @@ interface AiChatScreenProps {
   threadId: string;
   onBack: () => void;
   onPlanTrip?: (folderId?: string) => void;
+  /** If set, auto-send this as the first user message once, on mount. */
+  initialMessage?: string;
 }
 
 const SUGGESTIONS = [
@@ -33,13 +35,14 @@ const SUGGESTIONS = [
   "แนะนำอาหารพื้นถิ่นที่ต้องลอง",
 ];
 
-export default function AiChatScreen({ threadId, onBack, onPlanTrip }: AiChatScreenProps) {
+export default function AiChatScreen({ threadId, onBack, onPlanTrip, initialMessage }: AiChatScreenProps) {
   const insets = useSafeAreaInsets();
   const { getThread, appendMessage } = useAiPlanner();
   const { folders } = useInteractions();
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const listRef = useRef<FlatList<AiChatMessage>>(null);
+  const autoSentRef = useRef(false);
 
   const thread = getThread(threadId);
   const folder = thread?.folderId ? folders.find((f) => f.id === thread.folderId) : undefined;
@@ -67,6 +70,22 @@ export default function AiChatScreen({ threadId, onBack, onPlanTrip }: AiChatScr
     setSending(false);
     setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
   };
+
+  // Auto-send the seed message once (used when opened from the AI-summary
+  // "คุยต่อกับ AI" button). Only fires on an empty thread.
+  useEffect(() => {
+    if (
+      initialMessage &&
+      initialMessage.trim() &&
+      !autoSentRef.current &&
+      thread &&
+      thread.messages.length === 0
+    ) {
+      autoSentRef.current = true;
+      void send(initialMessage);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialMessage, thread]);
 
   const isEmpty = !thread || thread.messages.length === 0;
 

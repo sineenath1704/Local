@@ -29,7 +29,7 @@ type HubTab = "folders" | "chat" | "trips";
 type Nav =
   | { view: "hub" }
   | { view: "folderDetail"; folderId: string }
-  | { view: "chat"; threadId: string }
+  | { view: "chat"; threadId: string; initialMessage?: string }
   | { view: "wizard"; folderId?: string }
   | { view: "itinerary"; tripId: string };
 
@@ -40,7 +40,13 @@ interface AiHubScreenProps {
 export default function AiHubScreen({ onFullScreenChange }: AiHubScreenProps) {
   const insets = useSafeAreaInsets();
   const { folders } = useInteractions();
-  const { threads, startGeneralThread, startFolderThread } = useAiPlanner();
+  const {
+    threads,
+    startGeneralThread,
+    startFolderThread,
+    pendingChatSeed,
+    consumePendingChatSeed,
+  } = useAiPlanner();
 
   const [tab, setTab] = useState<HubTab>("folders");
   const [nav, setNav] = useState<Nav>({ view: "hub" });
@@ -49,6 +55,20 @@ export default function AiHubScreen({ onFullScreenChange }: AiHubScreenProps) {
   React.useEffect(() => {
     onFullScreenChange?.(nav.view !== "hub");
   }, [nav.view, onFullScreenChange]);
+
+  // A seed was dropped (e.g. from the comment sheet's "คุยต่อกับ AI"):
+  // open its thread, auto-send the message, then clear the seed.
+  React.useEffect(() => {
+    if (pendingChatSeed) {
+      setTab("chat");
+      setNav({
+        view: "chat",
+        threadId: pendingChatSeed.threadId,
+        initialMessage: pendingChatSeed.message,
+      });
+      consumePendingChatSeed();
+    }
+  }, [pendingChatSeed, consumePendingChatSeed]);
 
   const goHub = () => setNav({ view: "hub" });
 
@@ -70,6 +90,7 @@ export default function AiHubScreen({ onFullScreenChange }: AiHubScreenProps) {
     return (
       <AiChatScreen
         threadId={nav.threadId}
+        initialMessage={nav.initialMessage}
         onBack={goHub}
         onPlanTrip={(folderId) => setNav({ view: "wizard", folderId })}
       />
