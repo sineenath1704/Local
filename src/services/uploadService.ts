@@ -20,8 +20,13 @@ export interface NewVideoInput {
   caption: string;
   hashtags: string[];
   locationName?: string;
+  placeName?: string;
+  community?: string;
+  subdistrict?: string;
   province?: string;
   district?: string;
+  latitude?: number | null;
+  longitude?: number | null;
   videoType?: "tourist_review" | "host_promo";
   /** Reviewed AI summary (already generated + possibly edited by the uploader). */
   aiSummary?: AiSummaryResult | null;
@@ -117,9 +122,12 @@ export async function uploadVideo(input: NewVideoInput): Promise<UploadResult> {
       video_url: videoUrl,
       caption: input.caption,
       hashtags: input.hashtags,
-      location_name: input.locationName ?? null,
+      location_name: input.locationName ?? input.community ?? null,
+      place_name: input.placeName ?? null,
       province: input.province ?? null,
       district: input.district ?? null,
+      latitude: input.latitude ?? null,
+      longitude: input.longitude ?? null,
       ai_summary: hasSummary ? { ...input.aiSummary, status: "ready" } : null,
       ai_summary_status: summaryStatus,
       ai_summary_accuracy:

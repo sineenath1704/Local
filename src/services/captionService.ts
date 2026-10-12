@@ -12,6 +12,7 @@ import { API_BASE_URL, API_TIMEOUT_MS } from "./apiConfig";
 /** Structured place block (mirrors backend AiSummaryResult.place). */
 export interface SummaryPlace {
   place_name: string | null;
+  community?: string | null;
   location: {
     province: string | null;
     district: string | null;

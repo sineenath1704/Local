@@ -5,6 +5,8 @@ import aiSummaryRouter from "./routes/aiSummary";
 import aiCaptionRouter from "./routes/aiCaption";
 import aiChatRouter from "./routes/aiChat";
 import tripsRouter from "./routes/trips";
+import placesRouter from "./routes/places";
+import otopRouter from "./routes/otop";
 import { seedMemorySummary } from "./summaryStore";
 
 /**
@@ -25,6 +27,8 @@ export function createApp() {
   app.use("/ai-caption", aiCaptionRouter);
   app.use("/ai-chat", aiChatRouter);
   app.use("/trips", tripsRouter);
+  app.use("/places", placesRouter);
+  app.use("/otop", otopRouter);
 
   // Seed demo summaries (memory-only; post-1/2/3 are not real DB video ids).
   // Real summaries are persisted in Supabase via POST /ai-summary/:id/generate.

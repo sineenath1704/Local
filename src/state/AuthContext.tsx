@@ -19,9 +19,12 @@ import { supabase, isSupabaseConfigured } from "../lib/supabase";
 WebBrowser.maybeCompleteAuthSession(); // required for web
 
 // URL ที่ Google/Supabase จะ redirect กลับหลังล็อกอิน
-// Expo Go: exp://<ip>:8081/... | dev/standalone build: locallocal://...
+// ใช้ custom scheme ที่ลงทะเบียนไว้ (app.json → "scheme": "locallocal")
+// เพื่อให้ OS เปิดกลับเข้าแอปได้ → locallocal://auth-callback
+//   • Dev build / standalone: ทำงาน 100%
+//   • Expo Go: custom scheme เปิดไม่ได้ (ข้อจำกัดของ Expo Go) — ต้องใช้ dev build
 // ต้อง whitelist ค่านี้ใน Supabase → Authentication → URL Configuration
-export const redirectTo = makeRedirectUri();
+export const redirectTo = makeRedirectUri({ scheme: "locallocal", path: "auth-callback" });
 
 export interface AppUser {
   id: string;
@@ -34,6 +37,30 @@ export interface AppUser {
   followers_count: number;
   following_count: number;
   total_likes_received: number;
+  // OTOP community verification (host role)
+  otop_verified?: boolean;
+  otop_village_id?: string | null;
+  otop_region?: string | null;
+  otop_province?: string | null;
+  otop_amphur?: string | null;
+  otop_tambol?: string | null;
+  otop_village?: string | null;
+  otop_nawatwithi?: string | null;
+  otop_for_tourism?: string | null;
+  otop_cbt_village?: string | null;
+}
+
+export interface OtopRegInfo {
+  idNumber: string | null;
+  region: string | null;
+  province: string | null;
+  amphur: string | null;
+  tambol: string | null;
+  village: string | null;
+  otopNawatwithi: string | null;
+  otopForTourism: string | null;
+  cbtVillage: string | null;
+  raw?: any;
 }
 
 export interface OnboardingInput {
@@ -41,6 +68,10 @@ export interface OnboardingInput {
   displayName: string;
   phone?: string;
   avatarUri?: string | null;
+  /** "tourist" (default) or "host" (OTOP community). */
+  role?: "tourist" | "host";
+  /** Verified OTOP community info (only for host role). */
+  otop?: OtopRegInfo | null;
 }
 
 interface AuthState {
@@ -65,15 +96,27 @@ const AuthContext = createContext<AuthState | null>(null);
 
 /** Parse tokens from the OAuth redirect URL and create a Supabase session. */
 async function createSessionFromUrl(url: string): Promise<Session | null> {
+  // Supabase/Google return the tokens in the URL fragment (#access_token=...),
+  // but can also use query (?access_token=...). Read both.
   const { params, errorCode } = QueryParams.getQueryParams(url);
   if (errorCode) throw new Error(errorCode);
 
-  const { access_token, refresh_token } = params;
+  let access_token: string | undefined = params.access_token;
+  let refresh_token: string | undefined = params.refresh_token;
+
+  // Fallback: parse the hash fragment manually when tokens aren't in the query.
+  if (!access_token && url.includes("#")) {
+    const hash = url.slice(url.indexOf("#") + 1);
+    const hp = new URLSearchParams(hash);
+    access_token = hp.get("access_token") ?? undefined;
+    refresh_token = hp.get("refresh_token") ?? undefined;
+  }
+
   if (!access_token) return null;
 
   const { data, error } = await supabase.auth.setSession({
     access_token,
-    refresh_token,
+    refresh_token: refresh_token ?? "",
   });
   if (error) throw error;
   return data.session;
@@ -200,9 +243,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const patch: Record<string, any> = {
         username,
         display_name: displayName,
+        role: input.role === "host" ? "host" : "tourist",
       };
       if (input.phone?.trim()) patch.phone_number = input.phone.trim();
       if (avatarUrl) patch.avatar_url = avatarUrl;
+
+      // OTOP community info (host role, verified via CDD API).
+      if (input.role === "host" && input.otop) {
+        const o = input.otop;
+        patch.otop_verified = true;
+        patch.otop_village_id = o.idNumber;
+        patch.otop_region = o.region;
+        patch.otop_province = o.province;
+        patch.otop_amphur = o.amphur;
+        patch.otop_tambol = o.tambol;
+        patch.otop_village = o.village;
+        patch.otop_nawatwithi = o.otopNawatwithi;
+        patch.otop_for_tourism = o.otopForTourism;
+        patch.otop_cbt_village = o.cbtVillage;
+        patch.otop_raw = o.raw ?? null;
+      }
 
       const { error } = await supabase.from("users").update(patch).eq("id", uid);
       if (error) {

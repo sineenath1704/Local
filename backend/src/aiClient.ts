@@ -12,6 +12,8 @@ import {
 /** Structured place data extracted from the clip (Video Content Analyzer). */
 export interface PlaceData {
   place_name: string | null;
+  /** Community / village name (separate from the specific place_name). */
+  community?: string | null;
   location: {
     province: string | null;
     district: string | null;
@@ -142,6 +144,7 @@ export async function generateSummary(
     if (parsed && typeof parsed.summary === "string") {
       const place: PlaceData = {
         place_name: parsed.place_name ?? null,
+        community: parsed.community ?? null,
         location: parsed.location ?? { province: null, district: null },
         category: parsed.category ?? [],
         activities: parsed.activities ?? [],

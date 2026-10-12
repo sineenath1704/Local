@@ -31,6 +31,7 @@ import {
 
 import { VideoItemData } from "../data/profileLocalData";
 import { useMyProfile } from "../state/MyProfileContext";
+import { useAuth } from "../state/AuthContext";
 import { useInteractions } from "../state/InteractionContext";
 import { useMyVideos } from "../hooks/useMyVideos";
 import { loadLikedVideos, loadSavedVideos } from "../services/interactionService";
@@ -53,7 +54,10 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
   const { width: screenWidth } = useWindowDimensions();
 
   const { name, username, bio, avatar, location, registeredInfo } = useMyProfile();
+  const { user } = useAuth();
   const { followingCount, likedVideoIds, savedVideoIds, folders, createFolder } = useInteractions();
+
+  const isOtopHost = user?.role === "host" && user?.otop_verified;
 
   // Own posted videos — real data from Supabase (no mock).
   const { videos: myVideos } = useMyVideos();
@@ -189,13 +193,16 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
               </View>
             </View>
 
-            <TouchableOpacity
-              onPress={() => setShowInfoModal(true)}
-              activeOpacity={0.8}
-              className="bg-[#D47A3A] px-5 py-2.5 rounded-xl items-center justify-center shadow-sm"
-            >
-              <Text className="text-white text-xs font-bold tracking-wide">ข้อมูลเพิ่มเติม</Text>
-            </TouchableOpacity>
+            {isOtopHost && (
+              <TouchableOpacity
+                onPress={() => setShowInfoModal(true)}
+                activeOpacity={0.8}
+                className="bg-[#D47A3A] px-5 py-2.5 rounded-xl flex-row items-center justify-center shadow-sm"
+              >
+                <ShieldCheckIcon size={14} color="#FFFFFF" />
+                <Text className="text-white text-xs font-bold tracking-wide ml-1">ชุมชน OTOP ยืนยันแล้ว</Text>
+              </TouchableOpacity>
+            )}
           </View>
 
           {/* 5. Tabs */}
@@ -405,19 +412,30 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
             <View className="flex-row items-center justify-between pb-3 border-b border-gray-100 mb-4">
               <View className="flex-row items-center">
                 <ShieldCheckIcon size={22} color="#2D6A4F" />
-                <Text className="text-lg font-bold text-gray-900 ml-2">ข้อมูลการลงทะเบียนชุมชน</Text>
+                <Text className="text-lg font-bold text-gray-900 ml-2">ชุมชน OTOP นวัตวิถี</Text>
               </View>
               <TouchableOpacity onPress={() => setShowInfoModal(false)} className="w-8 h-8 rounded-full bg-gray-100 items-center justify-center">
                 <XMarkIcon size={18} color="#4B5563" />
               </TouchableOpacity>
             </View>
 
+            {/* Verified badge */}
+            <View className="bg-emerald-50 rounded-xl p-3 border border-emerald-200 mb-4 flex-row items-center">
+              <ShieldCheckIcon size={18} color="#2D6A4F" />
+              <Text className="text-[#1B4332] text-[12px] font-semibold ml-2">
+                ยืนยันกับทะเบียน OTOP แล้ว (เลขทะเบียน {user?.otop_village_id ?? "-"})
+              </Text>
+            </View>
+
             {[
-              ["รหัสวิสาหกิจชุมชน (SMCE)", registeredInfo.smceCode],
-              ["ผู้ประสานงาน / ประธานกลุ่ม", registeredInfo.presidentName],
-              ["หมวดหมู่บริการ", registeredInfo.category],
-              ["เพดานราคาตายตัว", registeredInfo.pricingCeiling],
-              ["ขีดความสามารถรองรับ", registeredInfo.carryingCapacity],
+              ["ชื่อ OTOP นวัตวิถี", user?.otop_nawatwithi],
+              ["OTOP เพื่อการท่องเที่ยว", user?.otop_for_tourism],
+              ["หมู่บ้านท่องเที่ยวโดยชุมชน", user?.otop_cbt_village],
+              ["หมู่บ้าน", user?.otop_village],
+              ["ตำบล", user?.otop_tambol],
+              ["อำเภอ", user?.otop_amphur],
+              ["จังหวัด", user?.otop_province],
+              ["ภูมิภาค", user?.otop_region],
             ].map(([label, val], i) => (
               <View key={i} className="mb-2.5">
                 <Text className="text-[11px] text-gray-400">{label}</Text>
@@ -427,7 +445,7 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
 
             <View className="bg-amber-50 rounded-xl p-3 border border-amber-200/60 mb-4">
               <Text className="text-amber-800 text-[11px] leading-4">
-                📌 ข้อมูลส่วนนี้ดึงจากการลงทะเบียน OTOP เข้าสู่ระบบ (แก้ไขในแอปไม่ได้)
+                📌 ข้อมูลส่วนนี้ดึงจากทะเบียน OTOP นวัตวิถี (กรมการพัฒนาชุมชน) แก้ไขในแอปไม่ได้
               </Text>
             </View>
 
