@@ -40,6 +40,8 @@ function AppContent() {
   const [profileFullScreen, setProfileFullScreen] = useState<boolean>(false);
   // A folder opened from the Profile "saved" tab
   const [profileFolderId, setProfileFolderId] = useState<string | null>(null);
+  // Post location prefilled from a finished trip stop check-in
+  const [pendingPostLocation, setPendingPostLocation] = useState<any | null>(null);
 
   const tabLabels: Record<TabKey, string> = {
     home: "หน้าหลัก",
@@ -136,11 +138,24 @@ function AppContent() {
         ) : activeTab === "chat" ? (
           <ChatScreen onRoomOpenChange={setChatRoomOpen} />
         ) : activeTab === "ai" ? (
-          <AiHubScreen onFullScreenChange={setAiFullScreen} />
+          <AiHubScreen
+            onFullScreenChange={setAiFullScreen}
+            onPostCheckin={(loc) => {
+              setPendingPostLocation(loc);
+              handleTabChange("create");
+            }}
+          />
         ) : activeTab === "create" ? (
           <CreatePostScreen
-            onPosted={() => handleTabChange("home")}
-            onCancel={() => handleTabChange("home")}
+            initialLocation={pendingPostLocation ?? undefined}
+            onPosted={() => {
+              setPendingPostLocation(null);
+              handleTabChange("home");
+            }}
+            onCancel={() => {
+              setPendingPostLocation(null);
+              handleTabChange("home");
+            }}
           />
         ) : (
           <View className="flex-1 bg-[#121212] items-center justify-center px-6">

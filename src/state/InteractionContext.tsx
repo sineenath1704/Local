@@ -1,4 +1,5 @@
-import React, { createContext, useContext, useMemo, useState, useCallback, useEffect } from "react";
+import React, { createContext, useContext, useMemo, useState, useCallback, useEffect, useRef } from "react";
+import { Alert } from "react-native";
 import { useAuth } from "./AuthContext";
 import {
   loadMyInteractions,
@@ -7,6 +8,17 @@ import {
   saveVideoRow,
   unsaveVideoRow,
 } from "../services/interactionService";
+import {
+  getMyFolders,
+  createFolder as dbCreateFolder,
+  deleteFolder as dbDeleteFolder,
+  renameFolder as dbRenameFolder,
+  addClipToFolder as dbAddClipToFolder,
+  removeClipFromFolder as dbRemoveClipFromFolder,
+  getClipsInFolder,
+  getFloatingClips,
+  Folder,
+} from "../services/folderService";
 
 /**
  * InteractionContext — single source of truth for ACTION-DRIVEN state.
@@ -19,6 +31,8 @@ import {
  *
  * Screens derive their numbers from this (e.g. ProfileLocal "กำลังติดตาม"
  * = number of follows; the "liked" tab = liked video ids).
+ *
+ * **Folders & folder items are persisted in Supabase** via folderService.
  */
 
 export interface SaveFolder {
@@ -53,8 +67,12 @@ interface InteractionState {
   /** Save a video (optionally into a folder). Returns nothing; idempotent. */
   saveVideo: (videoId: string, folderId?: string) => void;
   unsaveVideo: (videoId: string) => void;
-  createFolder: (name: string) => string; // returns new folder id
+  createFolder: (name: string) => string; // returns new folder id (optimistic)
+  deleteFolder: (folderId: string) => void;
+  renameFolder: (folderId: string, newName: string) => void;
   shareToChat: (friendId: string, videoId: string) => void;
+  /** Reload folders from DB (call after external changes) */
+  reloadFolders: () => void;
 
   // ---- derived counts ----
   followingCount: number;
@@ -72,26 +90,58 @@ export function InteractionProvider({ children }: { children: React.ReactNode })
   const [folders, setFolders] = useState<SaveFolder[]>([]);
   const [chatShares, setChatShares] = useState<ChatShare[]>([]);
 
-  // Load the signed-in user's likes/saves from Supabase (per-user, persisted).
+  // ──────────────────────────────────────────────
+  //  Load likes + saves + folders from Supabase
+  // ──────────────────────────────────────────────
+  const loadFoldersFromDb = useCallback(async () => {
+    try {
+      const dbFolders = await getMyFolders();
+      // For each folder, load its clip list
+      const enriched: SaveFolder[] = await Promise.all(
+        dbFolders.map(async (f: Folder) => {
+          const items = await getClipsInFolder(f.id);
+          return {
+            id: f.id,
+            name: f.name,
+            videoIds: items.map((i) => i.video_id),
+          };
+        })
+      );
+      setFolders(enriched);
+    } catch (err) {
+      console.warn("[interaction] loadFoldersFromDb error:", err);
+    }
+  }, []);
+
   useEffect(() => {
     console.log("[interaction] effect user =", user?.id ?? "null");
     if (!user) {
       setLiked([]);
       setSaved([]);
+      setFolders([]);
       return;
     }
     let active = true;
+
+    // Load likes + saves
     loadMyInteractions().then(({ likedIds, savedIds }) => {
       if (!active) return;
       console.log("[interaction] loaded likes =", likedIds.length, "saves =", savedIds.length);
       setLiked(likedIds);
       setSaved(savedIds);
     });
+
+    // Load folders from DB
+    loadFoldersFromDb();
+
     return () => {
       active = false;
     };
-  }, [user]);
+  }, [user, loadFoldersFromDb]);
 
+  // ──────────────────────────────────────────────
+  //  Queries
+  // ──────────────────────────────────────────────
   const isFollowing = useCallback(
     (id: string) => followedProfileIds.includes(id),
     [followedProfileIds]
@@ -99,6 +149,9 @@ export function InteractionProvider({ children }: { children: React.ReactNode })
   const isLiked = useCallback((id: string) => likedVideoIds.includes(id), [likedVideoIds]);
   const isSaved = useCallback((id: string) => savedVideoIds.includes(id), [savedVideoIds]);
 
+  // ──────────────────────────────────────────────
+  //  Mutations
+  // ──────────────────────────────────────────────
   const toggleFollow = useCallback((profileId: string) => {
     setFollowed((prev) =>
       prev.includes(profileId) ? prev.filter((x) => x !== profileId) : [...prev, profileId]
@@ -115,12 +168,27 @@ export function InteractionProvider({ children }: { children: React.ReactNode })
     });
   }, []);
 
+  // Track in-flight folder creations to handle chaining (e.g. createFolder then immediately saveVideo)
+  const pendingCreationsRef = useRef<Map<string, Promise<Folder>>>(new Map());
+
   const saveVideo = useCallback((videoId: string, folderId?: string) => {
+    // 1. Persist to video_saves (floating save)
     setSaved((prev) => {
-      if (!prev.includes(videoId)) void saveVideoRow(videoId);
+      if (!prev.includes(videoId)) {
+        console.log("[save] saveVideoRow", videoId);
+        saveVideoRow(videoId).then(() => {
+          console.log("[save] saveVideoRow OK", videoId);
+        }).catch((e) => {
+          console.warn("[save] saveVideoRow FAIL", videoId, e?.message);
+          Alert.alert("บันทึกคลิปไม่สำเร็จ", e?.message ?? String(e));
+        });
+      }
       return prev.includes(videoId) ? prev : [...prev, videoId];
     });
+
+    // 2. If a folder is specified, also add to folder_items in DB
     if (folderId) {
+      // Optimistic local update
       setFolders((prev) =>
         prev.map((f) =>
           f.id === folderId && !f.videoIds.includes(videoId)
@@ -128,6 +196,19 @@ export function InteractionProvider({ children }: { children: React.ReactNode })
             : f
         )
       );
+
+      // Check if this folderId is currently being created (in-flight optimistic ID)
+      const pendingCreation = pendingCreationsRef.current.get(folderId);
+      if (pendingCreation) {
+        pendingCreation
+          .then((realFolder: Folder) => dbAddClipToFolder(realFolder.id, videoId))
+          .catch((err: unknown) => console.warn("[interaction] addClipToFolder after creation error:", err));
+      } else {
+        // Persist to Supabase directly
+        dbAddClipToFolder(folderId, videoId).catch((err: unknown) =>
+          console.warn("[interaction] addClipToFolder error:", err)
+        );
+      }
     }
   }, []);
 
@@ -136,15 +217,79 @@ export function InteractionProvider({ children }: { children: React.ReactNode })
       if (prev.includes(videoId)) void unsaveVideoRow(videoId);
       return prev.filter((x) => x !== videoId);
     });
-    setFolders((prev) =>
-      prev.map((f) => ({ ...f, videoIds: f.videoIds.filter((v) => v !== videoId) }))
-    );
+    // Remove from all local folders + DB
+    setFolders((prev) => {
+      prev.forEach((f) => {
+        if (f.videoIds.includes(videoId)) {
+          dbRemoveClipFromFolder(f.id, videoId).catch((err) =>
+            console.warn("[interaction] removeClipFromFolder error:", err)
+          );
+        }
+      });
+      return prev.map((f) => ({
+        ...f,
+        videoIds: f.videoIds.filter((v) => v !== videoId),
+      }));
+    });
   }, []);
 
   const createFolder = useCallback((name: string) => {
-    const id = `folder-${Date.now()}`;
-    setFolders((prev) => [...prev, { id, name: name.trim() || "โฟลเดอร์ใหม่", videoIds: [] }]);
-    return id;
+    // Optimistic ID so callers get an immediate response
+    const optimisticId = `folder-${Date.now()}`;
+    const trimmedName = name.trim() || "โฟลเดอร์ใหม่";
+
+    // Optimistic local update
+    setFolders((prev) => [...prev, { id: optimisticId, name: trimmedName, videoIds: [] }]);
+
+    // Persist to Supabase & swap optimistic ID with real ID
+    const creationPromise = dbCreateFolder(trimmedName);
+    pendingCreationsRef.current.set(optimisticId, creationPromise);
+
+    creationPromise
+      .then((realFolder) => {
+        setFolders((prev) =>
+          prev.map((f) =>
+            f.id === optimisticId
+              ? { ...f, id: realFolder.id }
+              : f
+          )
+        );
+        console.log("[folder] created in DB:", realFolder.id, realFolder.name);
+      })
+      .catch((err: any) => {
+        const msg = err?.message ?? String(err);
+        console.warn("[folder] createFolder DB FAILED:", msg);
+        // Show the real error so we can diagnose it.
+        Alert.alert("สร้างโฟลเดอร์ไม่สำเร็จ", msg);
+        setFolders((prev) => prev.filter((f) => f.id !== optimisticId));
+      })
+      .finally(() => {
+        pendingCreationsRef.current.delete(optimisticId);
+      });
+
+    return optimisticId;
+  }, []);
+
+  const deleteFolderHandler = useCallback((folderId: string) => {
+    // Optimistic local removal
+    setFolders((prev) => prev.filter((f) => f.id !== folderId));
+    // Persist to DB
+    dbDeleteFolder(folderId).catch((err) =>
+      console.warn("[interaction] deleteFolder DB error:", err)
+    );
+  }, []);
+
+  const renameFolderHandler = useCallback((folderId: string, newName: string) => {
+    const trimmed = newName.trim();
+    if (!trimmed) return;
+    // Optimistic local update
+    setFolders((prev) =>
+      prev.map((f) => (f.id === folderId ? { ...f, name: trimmed } : f))
+    );
+    // Persist to DB
+    dbRenameFolder(folderId, trimmed).catch((err) =>
+      console.warn("[interaction] renameFolder DB error:", err)
+    );
   }, []);
 
   const shareToChat = useCallback((friendId: string, videoId: string) => {
@@ -154,6 +299,13 @@ export function InteractionProvider({ children }: { children: React.ReactNode })
     ]);
   }, []);
 
+  const reloadFolders = useCallback(() => {
+    loadFoldersFromDb();
+  }, [loadFoldersFromDb]);
+
+  // ──────────────────────────────────────────────
+  //  Context value
+  // ──────────────────────────────────────────────
   const value = useMemo<InteractionState>(
     () => ({
       followedProfileIds,
@@ -169,7 +321,10 @@ export function InteractionProvider({ children }: { children: React.ReactNode })
       saveVideo,
       unsaveVideo,
       createFolder,
+      deleteFolder: deleteFolderHandler,
+      renameFolder: renameFolderHandler,
       shareToChat,
+      reloadFolders,
       followingCount: followedProfileIds.length,
       likedCount: likedVideoIds.length,
       savedCount: savedVideoIds.length,
@@ -188,7 +343,10 @@ export function InteractionProvider({ children }: { children: React.ReactNode })
       saveVideo,
       unsaveVideo,
       createFolder,
+      deleteFolderHandler,
+      renameFolderHandler,
       shareToChat,
+      reloadFolders,
     ]
   );
 

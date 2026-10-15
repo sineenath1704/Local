@@ -113,6 +113,17 @@ export async function loadLikedVideos(): Promise<VideoPost[]> {
 /** Videos the current user SAVED (optionally only those in a given folder). */
 export async function loadSavedVideos(videoIds: string[]): Promise<VideoPost[]> {
   if (!isSupabaseConfigured || videoIds.length === 0) return [];
-  const { data } = await supabase.from("videos").select(VIDEO_SELECT).in("id", videoIds);
-  return (data ?? []).map(rowToPost);
+  const { data, error } = await supabase
+    .from("videos")
+    .select("id, user_id, video_url, thumbnail_url, caption, hashtags, location_name, province, district, likes_count, comments_count, saves_count, shares_count, created_at")
+    .in("id", videoIds);
+  console.log("[loadSavedVideos] ids =", videoIds.length, "rows =", data?.length ?? 0, "error =", error ? JSON.stringify(error) : "none");
+  if (error || !data) return [];
+
+  // Fetch authors separately (avoid join recursion).
+  const authorIds = Array.from(new Set(data.map((r: any) => r.user_id)));
+  const { data: users } = await supabase.from("users").select("id, display_name, username, avatar_url").in("id", authorIds);
+  const userById = new Map((users ?? []).map((u: any) => [u.id, u]));
+
+  return data.map((r: any) => rowToPost({ ...r, users: userById.get(r.user_id) ?? null }));
 }

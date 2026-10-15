@@ -39,27 +39,42 @@ import { verifyLocationOffline, type VerifyResult } from "../services/placeVerif
 import { findLocalPlaces, saveVerifiedPlace, type LocalPlace } from "../services/placesLocalService";
 import { verifyPlaceOnGoogle, type PlaceCandidate } from "../services/placesService";
 
+export interface InitialPostLocation {
+  placeName?: string;
+  community?: string;
+  province?: string;
+  district?: string;
+  subdistrict?: string;
+  coords?: { lat: number; lng: number };
+}
+
 interface CreatePostScreenProps {
   /** Called after a successful upload (host refreshes feed / switches tab). */
   onPosted?: () => void;
   /** Go back / cancel. */
   onCancel?: () => void;
+  /** Prefilled location from a completed trip stop */
+  initialLocation?: InitialPostLocation;
 }
 
-export default function CreatePostScreen({ onPosted, onCancel }: CreatePostScreenProps) {
+export default function CreatePostScreen({ onPosted, onCancel, initialLocation }: CreatePostScreenProps) {
   const insets = useSafeAreaInsets();
   const { session } = useAuth();
 
   const [videoUri, setVideoUri] = useState<string | null>(null);
   const [caption, setCaption] = useState("");
   const [hashtags, setHashtags] = useState("");
-  const [province, setProvince] = useState("");
-  const [district, setDistrict] = useState("");
-  const [subdistrict, setSubdistrict] = useState("");
-  const [community, setCommunity] = useState("");
-  const [placeName, setPlaceName] = useState(""); // specific place (ร้าน/จุด)
-  const [locationName, setLocationName] = useState("");
-  const [locationQuery, setLocationQuery] = useState("");
+  const [province, setProvince] = useState(initialLocation?.province || "");
+  const [district, setDistrict] = useState(initialLocation?.district || "");
+  const [subdistrict, setSubdistrict] = useState(initialLocation?.subdistrict || "");
+  const [community, setCommunity] = useState(initialLocation?.community || "");
+  const [placeName, setPlaceName] = useState(initialLocation?.placeName || ""); // specific place (ร้าน/จุด)
+  const [locationName, setLocationName] = useState(
+    initialLocation?.placeName || initialLocation?.community || ""
+  );
+  const [locationQuery, setLocationQuery] = useState(
+    initialLocation?.placeName || initialLocation?.community || ""
+  );
   const [uploading, setUploading] = useState(false);
 
   // Location verification (offline + Local places store).

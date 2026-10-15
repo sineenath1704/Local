@@ -36,6 +36,8 @@ interface AiPlannerState {
   updateTrip: (tripId: string, patch: Partial<Trip>) => void;
   setTripStatus: (tripId: string, status: TripStatus) => void;
   tripsByStatus: (status: TripStatus) => Trip[];
+  getTripByPlanId: (planId: string) => Trip | undefined;
+  createOrUpdateTripFromPlan: (tripData: Partial<Trip> & { title: string; destinations: string[] }) => Trip;
 }
 
 const AiPlannerContext = createContext<AiPlannerState | null>(null);
@@ -120,6 +122,68 @@ export function AiPlannerProvider({ children }: { children: React.ReactNode }) {
     [trips]
   );
 
+  const getTripByPlanId = useCallback(
+    (planId: string) => trips.find((t) => t.planId === planId),
+    [trips]
+  );
+
+  const createOrUpdateTripFromPlan = useCallback(
+    (data: Partial<Trip> & { title: string; destinations: string[] }): Trip => {
+      const existing = data.planId ? trips.find((t) => t.planId === data.planId) : undefined;
+      if (existing) {
+        const updated: Trip = {
+          ...existing,
+          ...data,
+          updatedAt: Date.now(),
+        };
+        setTrips((prev) => prev.map((t) => (t.id === existing.id ? updated : t)));
+        return updated;
+      }
+
+      const newTrip: Trip = {
+        id: data.id || uid("trip"),
+        planId: data.planId || uid("plan"),
+        title: data.title,
+        summary: data.summary || "แผนการเดินทางจาก AI ผู้ช่วยจัดทริป",
+        status: data.status || "draft",
+        startPoint: data.startPoint || "จุดเริ่มต้น",
+        startPointUrl: data.startPointUrl,
+        startPointCoords: data.startPointCoords,
+        startTime: data.startTime || "08:00",
+        destinations: data.destinations,
+        days: data.days || 1,
+        nights: data.nights || 0,
+        budgetPerPerson: data.budgetPerPerson || 1500,
+        style: data.style || "nature",
+        itinerary: data.itinerary || [
+          {
+            day: 1,
+            stops: data.destinations.map((d) => ({
+              name: d,
+              activity: "ท่องเที่ยวและเรียนรู้วิถีชุมชน",
+              stayHours: 2,
+              driveToNextMins: 30,
+            })),
+          },
+        ],
+        budget: data.budget || {
+          lodging: 0,
+          fuel: 300,
+          food: 400,
+          total: 700,
+          perPerson: 700,
+          withinBudget: true,
+        },
+        sourceFolderId: data.sourceFolderId,
+        createdAt: Date.now(),
+      };
+
+      setTrips((prev) => [newTrip, ...prev]);
+      return newTrip;
+    },
+    [trips]
+  );
+
   const value = useMemo<AiPlannerState>(
     () => ({
       threads,
@@ -135,6 +199,8 @@ export function AiPlannerProvider({ children }: { children: React.ReactNode }) {
       updateTrip,
       setTripStatus,
       tripsByStatus,
+      getTripByPlanId,
+      createOrUpdateTripFromPlan,
     }),
     [
       threads,
@@ -150,6 +216,8 @@ export function AiPlannerProvider({ children }: { children: React.ReactNode }) {
       updateTrip,
       setTripStatus,
       tripsByStatus,
+      getTripByPlanId,
+      createOrUpdateTripFromPlan,
     ]
   );
 

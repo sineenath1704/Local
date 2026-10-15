@@ -19,18 +19,27 @@ import {
   FolderIcon,
   PaperClipIcon,
   XMarkIcon,
+  MapPinIcon,
+  CalendarDaysIcon,
+  ArrowTopRightOnSquareIcon,
 } from "react-native-heroicons/outline";
 import { useAiPlanner } from "../../state/AiPlannerContext";
 import { useInteractions } from "../../state/InteractionContext";
 import { sendChat } from "../../services/aiChatService";
-import { placeLabelsFor, AiChatMessage } from "../../data/tripsData";
+import { getFolderContextForAi } from "../../services/folderService";
+import { AiChatMessage, Trip } from "../../data/tripsData";
+import OriginSelectorModal from "../../components/OriginSelectorModal";
+import { parseGoogleMapsUrl } from "../../services/savedPlacesService";
 
 interface AiChatScreenProps {
   threadId: string;
   onBack: () => void;
   onPlanTrip?: (folderId?: string) => void;
+  onOpenTrip?: (tripId: string) => void;
   /** If set, auto-send this as the first user message once, on mount. */
   initialMessage?: string;
+  /** Plan ID tied to this thread (if modifying an existing trip) */
+  linkedPlanId?: string;
 }
 
 const SUGGESTIONS = [
@@ -39,23 +48,75 @@ const SUGGESTIONS = [
   "แนะนำอาหารพื้นถิ่นที่ต้องลอง",
 ];
 
-export default function AiChatScreen({ threadId, onBack, onPlanTrip, initialMessage }: AiChatScreenProps) {
+export default function AiChatScreen({
+  threadId,
+  onBack,
+  onPlanTrip,
+  onOpenTrip,
+  initialMessage,
+  linkedPlanId,
+}: AiChatScreenProps) {
   const insets = useSafeAreaInsets();
-  const { getThread, appendMessage } = useAiPlanner();
+  const { getThread, appendMessage, createOrUpdateTripFromPlan } = useAiPlanner();
   const { folders } = useInteractions();
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [attachedFolderId, setAttachedFolderId] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [originModalOpen, setOriginModalOpen] = useState(false);
+  const [currentOrigin, setCurrentOrigin] = useState<{ label: string; address: string; url?: string; coords?: { lat: number; lng: number } } | null>(null);
+  const [currentPlanId, setCurrentPlanId] = useState<string | undefined>(linkedPlanId);
+
   const listRef = useRef<FlatList<AiChatMessage>>(null);
   const autoSentRef = useRef(false);
 
   const thread = getThread(threadId);
-  // A thread can be folder-scoped, OR the user can attach a folder per message
-  // (like attaching a file). The attached folder wins while it's set.
   const threadFolder = thread?.folderId ? folders.find((f) => f.id === thread.folderId) : undefined;
   const attachedFolder = attachedFolderId ? folders.find((f) => f.id === attachedFolderId) : undefined;
   const folder = attachedFolder ?? threadFolder;
+
+  const handleSelectOrigin = (origin: { label: string; address: string; url?: string; coords?: { lat: number; lng: number } }) => {
+    setCurrentOrigin(origin);
+    const msg = `🚗 จุดเริ่มต้นเดินทางของฉัน: ${origin.label} (${origin.address})${origin.url ? `\nลิงก์: ${origin.url}` : ""}`;
+    void send(msg);
+  };
+
+  const handleCreateTripFromChat = async (lastMessageContent: string) => {
+    const threadTitle = thread?.title && thread.title !== "แชทใหม่" ? thread.title : "ทริปจากน้องโลคอล";
+    // Build destinations from Supabase folder data (real location names).
+    let destinations: string[] = ["ชุมชนท่องเที่ยว OTOP"];
+    if (folder) {
+      const dbCtx = await getFolderContextForAi(folder.id).catch(() => null);
+      if (dbCtx) {
+        destinations = Array.from(new Set(
+          dbCtx.clips
+            .map((c) => c.location_name || c.province)
+            .filter(Boolean) as string[]
+        ));
+      }
+    }
+    if (destinations.length === 0) destinations = ["ชุมชน OTOP ท่องเที่ยว"];
+    const planId = currentPlanId || `plan-${Date.now()}`;
+    setCurrentPlanId(planId);
+
+    const trip = createOrUpdateTripFromPlan({
+      planId,
+      title: threadTitle,
+      summary: lastMessageContent.slice(0, 150) + "...",
+      status: "draft",
+      startPoint: currentOrigin?.label || "บ้าน",
+      startPointUrl: currentOrigin?.url,
+      startPointCoords: currentOrigin?.coords,
+      destinations: destinations.length > 0 ? destinations : ["ชุมชน OTOP ท่องเที่ยว"],
+      days: 2,
+      nights: 1,
+      style: "nature",
+    });
+
+    if (onOpenTrip) {
+      onOpenTrip(trip.id);
+    }
+  };
 
   const send = async (text: string) => {
     const body = text.trim();
@@ -71,14 +132,39 @@ export default function AiChatScreen({ threadId, onBack, onPlanTrip, initialMess
     setSending(true);
     setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
 
+    // If the user typed or pasted a Google Maps URL, pre-parse it so AI understands immediately
+    let processedForAi = visibleContent;
+    const gmapsMatch = body.match(/https?:\/\/(?:maps\.app\.goo\.gl\/[^\s]+|www\.google\.com\/maps[^\s]+)/i);
+    if (gmapsMatch) {
+      const url = gmapsMatch[0];
+      const parsed = parseGoogleMapsUrl(url);
+      if (parsed.lat && parsed.lng) {
+        processedForAi = `${visibleContent}\n[ข้อมูลพิกัดจากลิงก์: ละติจูด ${parsed.lat.toFixed(4)}, ลองจิจูด ${parsed.lng.toFixed(4)}]`;
+      } else {
+        processedForAi = `${visibleContent}\n[หมายเหตุ: ลิงก์จุดเริ่มต้นการเดินทางของผู้ใช้ ให้เริ่มวางแผนจากจุดนี้ได้ทันที ไม่ต้องกดเปิดลิงก์ภายนอก]`;
+      }
+    }
+
     const history = [...thread.messages.map((m) => ({ role: m.role, content: m.content })), {
       role: "user" as const,
-      content: visibleContent,
+      content: processedForAi,
     }];
 
-    const folderCtx = folder
-      ? { folderName: folder.name, places: placeLabelsFor(folder.videoIds) }
-      : undefined;
+    // Build folder context from Supabase (real location_name/province per clip).
+    // Falls back to the folder name alone when unavailable.
+    let folderCtx: { folderName: string; places: string[] } | undefined;
+    if (folder) {
+      const dbCtx = await getFolderContextForAi(folder.id).catch(() => null);
+      const places = dbCtx
+        ? Array.from(new Set(
+            dbCtx.clips
+              .map((c) => [c.location_name, c.province].filter(Boolean).join(" "))
+              .filter(Boolean)
+          ))
+        : [];
+      folderCtx = { folderName: folder.name, places };
+      console.log("[aiChat] folderCtx places =", places);
+    }
 
     const reply = await sendChat(history, folderCtx);
     appendMessage(threadId, { role: "assistant", content: reply });
@@ -180,14 +266,36 @@ export default function AiChatScreen({ threadId, onBack, onPlanTrip, initialMess
                     <SparklesIcon size={14} color="#7C3AED" />
                   </View>
                 )}
-                <View
-                  className={`max-w-[80%] px-3.5 py-2.5 rounded-2xl ${
-                    mine ? "bg-[#2D6A4F] rounded-br-md" : "bg-gray-100 rounded-bl-md"
-                  }`}
-                >
-                  <Text className={`text-[13.5px] leading-5 ${mine ? "text-white" : "text-gray-900"}`}>
-                    {item.content}
-                  </Text>
+                <View className="max-w-[88%]">
+                  <View
+                    className={
+                      mine
+                        ? "px-3.5 py-2.5 rounded-2xl bg-[#2D6A4F] rounded-br-md self-end"
+                        : "py-1 self-start"
+                    }
+                  >
+                    <Text
+                      className={`text-[14px] leading-6 ${
+                        mine ? "text-white font-medium" : "text-gray-900"
+                      }`}
+                    >
+                      {item.content}
+                    </Text>
+                  </View>
+
+                  {/* If assistant gave a trip plan response, show "เลือกแพลนทริปนี้" button */}
+                  {!mine && (item.content.includes("วัน") || item.content.includes("ทริป") || item.content.includes("เดินทาง") || item.content.includes("แผน")) && (
+                    <TouchableOpacity
+                      onPress={() => handleCreateTripFromChat(item.content)}
+                      activeOpacity={0.8}
+                      className="mt-2 bg-violet-600 rounded-xl px-3.5 py-2.5 flex-row items-center self-start shadow-sm"
+                    >
+                      <CalendarDaysIcon size={16} color="#FFFFFF" />
+                      <Text className="text-white text-[12.5px] font-bold ml-1.5">
+                        {currentPlanId ? "อัปเดตทริปที่แพลนไว้ ➔" : "เลือกแพลนทริปนี้ (บันทึกร่าง) ➔"}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
                 </View>
               </View>
             );
@@ -205,6 +313,19 @@ export default function AiChatScreen({ threadId, onBack, onPlanTrip, initialMess
 
       {/* Composer */}
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        {/* Origin display chip if chosen */}
+        {currentOrigin && (
+          <View className="flex-row items-center mx-3 mt-1.5 bg-violet-50 border border-violet-200 rounded-xl px-3 py-1.5">
+            <MapPinIcon size={14} color="#7C3AED" />
+            <Text className="flex-1 text-violet-800 text-[11.5px] font-semibold ml-1.5" numberOfLines={1}>
+              เริ่มจาก: {currentOrigin.label} ({currentOrigin.address})
+            </Text>
+            <TouchableOpacity onPress={() => setCurrentOrigin(null)} className="p-0.5">
+              <XMarkIcon size={14} color="#7C3AED" />
+            </TouchableOpacity>
+          </View>
+        )}
+
         {/* Attached-folder chip (only for a per-message attachment) */}
         {attachedFolder && (
           <View className="flex-row items-center mx-3 mt-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
@@ -222,8 +343,17 @@ export default function AiChatScreen({ threadId, onBack, onPlanTrip, initialMess
           className="flex-row items-center px-3 pt-2 border-t border-gray-100"
           style={{ paddingBottom: Math.max(insets.bottom, 10) }}
         >
-          {/* Attach a saved-clip folder (like attaching a file) — only when the
-              thread isn't already scoped to a folder. */}
+          {/* Quick Origin Selector Button (House/Pin) */}
+          <TouchableOpacity
+            onPress={() => setOriginModalOpen(true)}
+            disabled={sending}
+            activeOpacity={0.7}
+            className="w-10 h-10 rounded-full bg-violet-50 items-center justify-center mr-1.5 border border-violet-200"
+          >
+            <MapPinIcon size={18} color="#7C3AED" />
+          </TouchableOpacity>
+
+          {/* Attach a saved-clip folder */}
           {!threadFolder && (
             <TouchableOpacity
               onPress={() => setPickerOpen(true)}
@@ -231,7 +361,7 @@ export default function AiChatScreen({ threadId, onBack, onPlanTrip, initialMess
               activeOpacity={0.7}
               className="w-10 h-10 rounded-full bg-gray-100 items-center justify-center mr-2"
             >
-              <PaperClipIcon size={20} color={attachedFolder ? "#D47A3A" : "#6B7280"} />
+              <PaperClipIcon size={18} color={attachedFolder ? "#D47A3A" : "#6B7280"} />
             </TouchableOpacity>
           )}
 
@@ -310,6 +440,13 @@ export default function AiChatScreen({ threadId, onBack, onPlanTrip, initialMess
           />
         </View>
       </Modal>
+
+      {/* Origin selector modal */}
+      <OriginSelectorModal
+        visible={originModalOpen}
+        onClose={() => setOriginModalOpen(false)}
+        onSelectOrigin={handleSelectOrigin}
+      />
     </View>
   );
 }

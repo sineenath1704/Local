@@ -39,7 +39,7 @@ router.post("/", async (req: Request, res: Response) => {
   }
 
   try {
-    const reply = await callAi({ system, messages, maxTokens: 1024 });
+    const reply = await callAi({ system, messages, maxTokens: 2048 });
     return res.json({ reply });
   } catch (err: any) {
     const message =

@@ -69,7 +69,7 @@ export interface AiChatThread {
 }
 
 // ---- Trips ----
-export type TripStatus = "upcoming" | "draft" | "past";
+export type TripStatus = "draft" | "planned" | "active" | "completed";
 export type TravelStyle = "nature" | "slowlife" | "culture" | "foodie";
 
 export const TRAVEL_STYLES: { key: TravelStyle; label: string; emoji: string }[] = [
@@ -80,14 +80,23 @@ export const TRAVEL_STYLES: { key: TravelStyle; label: string; emoji: string }[]
 ];
 
 export interface ItineraryStop {
+  id?: string;
   name: string;
   activity: string;
   stayHours: number;
   driveToNextMins: number;
+  startTime?: string; // e.g. "08:30"
+  endTime?: string;   // e.g. "10:30"
+  province?: string;
+  district?: string;
+  community?: string;
+  coordinates?: { lat: number; lng: number };
+  completed?: boolean;
 }
 
 export interface ItineraryDay {
   day: number;
+  date?: string;
   stops: ItineraryStop[];
 }
 
@@ -102,10 +111,14 @@ export interface TripBudget {
 
 export interface Trip {
   id: string;
+  planId?: string; // Unique plan id for two-way chat iteration
   title: string;
   summary: string;
   status: TripStatus;
   startPoint: string;
+  startPointUrl?: string; // e.g. Google Maps URL
+  startPointCoords?: { lat: number; lng: number };
+  startTime?: string; // e.g. "06:00"
   destinations: string[];
   days: number;
   nights: number;
@@ -115,6 +128,7 @@ export interface Trip {
   budget: TripBudget;
   sourceFolderId?: string;
   createdAt: number;
+  updatedAt?: number;
 }
 
 export interface TripRequestInput {

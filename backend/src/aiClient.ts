@@ -119,6 +119,7 @@ export async function generateSummary(
       body: JSON.stringify({
         model: config.ai.model,
         max_tokens: config.ai.maxTokens,
+        temperature: 0.1,
         system: SYSTEM_PROMPT,
         messages: [{ role: "user", content: messageContent }],
       }),

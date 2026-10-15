@@ -22,6 +22,8 @@ import TripDashboard from "./TripDashboard";
 import TripWizard from "./TripWizard";
 import ItineraryViewer from "./ItineraryViewer";
 
+import { InitialPostLocation } from "../CreatePostScreen";
+
 type HubTab = "chat" | "trips";
 
 type Nav =
@@ -32,9 +34,10 @@ type Nav =
 
 interface AiHubScreenProps {
   onFullScreenChange?: (full: boolean) => void;
+  onPostCheckin?: (loc: InitialPostLocation) => void;
 }
 
-export default function AiHubScreen({ onFullScreenChange }: AiHubScreenProps) {
+export default function AiHubScreen({ onFullScreenChange, onPostCheckin }: AiHubScreenProps) {
   const insets = useSafeAreaInsets();
   const {
     threads,
@@ -75,6 +78,7 @@ export default function AiHubScreen({ onFullScreenChange }: AiHubScreenProps) {
         initialMessage={nav.initialMessage}
         onBack={goHub}
         onPlanTrip={(folderId) => setNav({ view: "wizard", folderId })}
+        onOpenTrip={(tripId) => setNav({ view: "itinerary", tripId })}
       />
     );
   }
@@ -88,7 +92,16 @@ export default function AiHubScreen({ onFullScreenChange }: AiHubScreenProps) {
     );
   }
   if (nav.view === "itinerary") {
-    return <ItineraryViewer tripId={nav.tripId} onBack={() => { setTab("trips"); goHub(); }} />;
+    return (
+      <ItineraryViewer
+        tripId={nav.tripId}
+        onBack={() => {
+          setTab("trips");
+          goHub();
+        }}
+        onPostCheckin={onPostCheckin}
+      />
+    );
   }
 
   // ---- Hub (list) ----
@@ -113,7 +126,7 @@ export default function AiHubScreen({ onFullScreenChange }: AiHubScreenProps) {
       <View className="flex-row px-3 border-b border-gray-100">
         {([
           ["chat", "แชท AI", ChatBubbleLeftRightIcon],
-          ["trips", "วางแผนทริป", MapIcon],
+          ["trips", "ทริปที่แพลนไว้", MapIcon],
         ] as const).map(([key, label, Icon]) => {
           const active = tab === key;
           return (

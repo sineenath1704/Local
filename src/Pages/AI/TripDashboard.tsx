@@ -14,15 +14,16 @@ interface TripDashboardProps {
   onOpenTrip: (tripId: string) => void;
 }
 
-const TABS: { key: TripStatus; label: string }[] = [
-  { key: "upcoming", label: "กำลังจะไป" },
-  { key: "draft", label: "แบบร่าง" },
-  { key: "past", label: "ผ่านมาแล้ว" },
+const TABS: { key: TripStatus; label: string; icon: string }[] = [
+  { key: "draft", label: "ดราฟ", icon: "📝" },
+  { key: "planned", label: "แพลนเสร็จ", icon: "🗓️" },
+  { key: "active", label: "กำลังเที่ยว", icon: "🚗" },
+  { key: "completed", label: "เที่ยวสำเร็จ", icon: "✅" },
 ];
 
 export default function TripDashboard({ onNewTrip, onOpenTrip }: TripDashboardProps) {
   const { tripsByStatus } = useAiPlanner();
-  const [tab, setTab] = useState<TripStatus>("upcoming");
+  const [tab, setTab] = useState<TripStatus>("draft");
   const list = tripsByStatus(tab);
 
   const renderTrip = ({ item }: { item: Trip }) => (
@@ -75,15 +76,19 @@ export default function TripDashboard({ onNewTrip, onOpenTrip }: TripDashboardPr
       <View className="flex-row px-4 mb-2">
         {TABS.map((t) => {
           const active = tab === t.key;
+          const count = tripsByStatus(t.key).length;
           return (
             <TouchableOpacity
               key={t.key}
               onPress={() => setTab(t.key)}
               activeOpacity={0.7}
-              className={`mr-2 px-4 py-2 rounded-full ${active ? "bg-gray-900" : "bg-gray-100"}`}
+              className={`flex-1 flex-row items-center justify-center py-2 rounded-xl mx-0.5 ${
+                active ? "bg-violet-600" : "bg-gray-100"
+              }`}
             >
-              <Text className={`text-[12px] font-bold ${active ? "text-white" : "text-gray-500"}`}>
-                {t.label} ({tripsByStatus(t.key).length})
+              <Text className="text-[11px] mr-1">{t.icon}</Text>
+              <Text className={`text-[11.5px] font-bold ${active ? "text-white" : "text-gray-600"}`}>
+                {t.label} {count > 0 ? `(${count})` : ""}
               </Text>
             </TouchableOpacity>
           );
@@ -97,14 +102,19 @@ export default function TripDashboard({ onNewTrip, onOpenTrip }: TripDashboardPr
         contentContainerStyle={{ padding: 16, paddingBottom: 120 }}
         showsVerticalScrollIndicator={false}
         ListEmptyComponent={
-          <View className="py-16 items-center px-10">
-            <CalendarDaysIcon size={40} color="#D1D5DB" />
-            <Text className="text-gray-400 text-sm text-center mt-3">
-              {tab === "upcoming"
-                ? "ยังไม่มีทริปที่กำลังจะไป กดสร้างทริปใหม่ด้วย AI ได้เลย"
-                : tab === "draft"
-                ? "ยังไม่มีแบบร่าง"
-                : "ยังไม่มีทริปที่ผ่านมา"}
+          <View className="py-16 items-center px-8">
+            <Text className="text-[36px] mb-2">{TABS.find((t) => t.key === tab)?.icon || "🗺️"}</Text>
+            <Text className="text-gray-900 font-bold text-[15px] mb-1">
+              ยังไม่มีทริปในหมวด "{TABS.find((t) => t.key === tab)?.label}"
+            </Text>
+            <Text className="text-gray-400 text-[12px] text-center leading-5 max-w-[260px]">
+              {tab === "draft"
+                ? "คุยกับ AI ในแท็บแชทแล้วกด 'เลือกแพลนทริปนี้' เพื่อนำมาบันทึกร่างที่นี่"
+                : tab === "planned"
+                ? "เมื่อตรวจสอบร่างทริปเรียบร้อย กด 'ยืนยันแพลนทริป' เพื่อเตรียมเดินทาง"
+                : tab === "active"
+                ? "กด 'เริ่มออกเดินทาง' เพื่อติดตามกิจกรรมและเวลาจริงระหว่างเที่ยว"
+                : "ทริปที่เที่ยวเสร็จสิ้นแล้ว สามารถกดโพสต์คลิปรีวิวและเช็คอินเพื่อสะสมตราปั๊มได้ที่นี่"}
             </Text>
           </View>
         }
