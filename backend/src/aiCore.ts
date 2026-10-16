@@ -81,11 +81,10 @@ export async function callAi(params: {
         fullReply = rawText;
       }
 
-      // Determine if the response is incomplete
-      const trimmed = rawText.trim();
-      const endsWithPunct = /[.!?~\n\r\s]$/.test(trimmed);
-      const continuationCue = /ต่อ|ต่อจาก/.test(trimmed);
-      const isIncomplete = stopReason === "max_tokens" || stopReason === "length" || !endsWithPunct || continuationCue;
+      // Continue only when the model was genuinely cut off by the token limit.
+      // Checking punctuation is unreliable for Thai (Thai doesn't use sentence-ending
+      // punctuation like . or !) and was causing infinite continuation loops on Vercel.
+      const isIncomplete = stopReason === "max_tokens" || stopReason === "length";
 
       if (!isIncomplete || round >= MAX_CONTINUE_ROUNDS - 1) {
         break;
