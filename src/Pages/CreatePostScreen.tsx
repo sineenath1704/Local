@@ -146,8 +146,35 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     );
 
     // Verify the location the AI extracted (offline + Local places store).
-    // For OTOP hosts, location is already confirmed from their profile — skip verify.
-    if (result?.place && !isHost) await runLocationVerify(result.place);
+    // For OTOP hosts: compare AI result with OTOP profile.
+    //   - AI name matches OTOP village → keep OTOP location (authoritative)
+    //   - AI name differs → update locationName to what AI found, but keep
+    //     province/district/tambol from OTOP (we know where the community is)
+    if (result?.place) {
+      if (isHost && hostLocation) {
+        const aiName = result.place.place_name ?? (result.place as any).community ?? "";
+        const otopName = hostLocation.locationName;
+        // Fuzzy match: normalize Thai (remove spaces, lowercase)
+        const norm = (s: string) => s.replace(/\s/g, "").toLowerCase();
+        const nameMatches = aiName && otopName && (
+          norm(aiName).includes(norm(otopName)) ||
+          norm(otopName).includes(norm(aiName))
+        );
+        if (nameMatches || !aiName) {
+          // AI agrees with OTOP or found nothing → keep OTOP location
+          console.log("[summary] host: AI name matches OTOP → keep OTOP location");
+        } else {
+          // AI found a different specific place inside the community
+          // → update locationName to AI's name, but keep province/district
+          console.log("[summary] host: AI found different place:", aiName, "→ update name");
+          setLocationName(aiName);
+          setPlaceName(aiName);
+          // Keep province/district/subdistrict from OTOP (not changing)
+        }
+      } else {
+        await runLocationVerify(result.place);
+      }
+    }
 
     if (!result) {
       Alert.alert("สรุปไม่สำเร็จ", "ตอนนี้ให้ AI สรุปวิดีโอไม่ได้ ลองกดสรุปใหม่อีกครั้งได้เลย");
@@ -375,6 +402,33 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setSummaryDraft("");
     setSummaryEditing(false);
     setAccuracy(0);
+    // Reset location back to OTOP defaults for hosts, or clear for tourists.
+    if (isHost && hostLocation) {
+      setLocationName(hostLocation.locationName);
+      setCommunity(hostLocation.community);
+      setSubdistrict(hostLocation.subdistrict);
+      setDistrict(hostLocation.district);
+      setProvince(hostLocation.province);
+      setPlaceName("");
+      setLocationConfirmed(true);
+      setVerify(null);
+      setGoogleCandidates([]);
+      setPendingConfirm(null);
+    } else {
+      setLocationName("");
+      setPlaceName("");
+      setCommunity("");
+      setSubdistrict("");
+      setDistrict("");
+      setProvince("");
+      setLocationQuery("");
+      setVerify(null);
+      setLocalPlaceCandidates([]);
+      setLocationConfirmed(false);
+      setGoogleCandidates([]);
+      setPendingConfirm(null);
+      setCoords(null);
+    }
   };
 
   const parseHashtags = (raw: string): string[] =>
