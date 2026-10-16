@@ -83,6 +83,10 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
   const [locationConfirmed, setLocationConfirmed] = useState(false);
   const [googleCandidates, setGoogleCandidates] = useState<PlaceCandidate[]>([]);
   const [googleLoading, setGoogleLoading] = useState(false);
+  // Single Google result pending confirmation (with editable fields).
+  const [pendingConfirm, setPendingConfirm] = useState<PlaceCandidate | null>(null);
+  const [pendingName, setPendingName] = useState("");
+  const [pendingAddress, setPendingAddress] = useState("");
   // coordinates captured when a Google candidate is chosen
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
 
@@ -122,6 +126,13 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setAccuracy(0);
     setSummaryLoading(false);
 
+    // Diagnostic log — check what M3 returned
+    console.log("[summary] status =", result?.status,
+      "place_name =", result?.place?.place_name ?? "null",
+      "community =", (result?.place as any)?.community ?? "null",
+      "province =", result?.place?.location?.province ?? "null"
+    );
+
     // Verify the location the AI extracted (offline + Local places store).
     if (result?.place) await runLocationVerify(result.place);
 
@@ -134,8 +145,11 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
   // when ambiguous — surface candidates for the user to choose.
   const runLocationVerify = async (place: NonNullable<AiSummaryResult["place"]>) => {
     const aiPlaceName = place.place_name ?? null;
-    const aiCommunity = place.community ?? null;
+    const aiCommunity = (place as any).community ?? null;
     const loc = place.location ?? ({} as any);
+
+    console.log("[verify] aiPlaceName =", aiPlaceName, "community =", aiCommunity,
+      "province =", loc.province, "district =", loc.district);
 
     const res = verifyLocationOffline({
       placeName: aiPlaceName,
@@ -160,6 +174,11 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
 
     setGoogleCandidates([]);
     setCoords(null);
+
+    console.log("[verify] offline result status =", res.status,
+      "candidates =", res.communityCandidates.length,
+      "adminValid =", res.adminValid
+    );
 
     // If the AI named a specific place, see if we've confirmed it before.
     if (aiPlaceName) {
@@ -190,10 +209,44 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     dist?: string | null,
     prov?: string | null
   ) => {
+    console.log("[google] lookupOnGoogle name =", name, "comm =", comm, "dist =", dist, "prov =", prov);
     setGoogleLoading(true);
+    setPendingConfirm(null);
+    setGoogleCandidates([]);
     const r = await verifyPlaceOnGoogle({ placeName: name, community: comm, district: dist, province: prov });
-    setGoogleCandidates(r.candidates);
+    console.log("[google] result configured =", r.configured, "candidates =", r.candidates.length);
     setGoogleLoading(false);
+    if (r.candidates.length === 1) {
+      // Exactly one result → show confirmation card (user can edit before confirming).
+      setPendingConfirm(r.candidates[0]);
+      setPendingName(r.candidates[0].name);
+      setPendingAddress(r.candidates[0].address);
+    } else {
+      setGoogleCandidates(r.candidates);
+    }
+  };
+
+  // Confirm the single Google result (after optional editing).
+  const confirmPending = async () => {
+    if (!pendingConfirm) return;
+    const confirmed: PlaceCandidate = {
+      ...pendingConfirm,
+      name: pendingName.trim() || pendingConfirm.name,
+    };
+    applyGoogleCandidate(confirmed);
+    // Save to Supabase places store immediately so it appears on the map.
+    void saveVerifiedPlace({
+      name: confirmed.name,
+      community: community.trim() || null,
+      subdistrict: (confirmed.subdistrict ?? subdistrict.trim()) || null,
+      district: (confirmed.district ?? district.trim()) || null,
+      province: (confirmed.province ?? province.trim()) || null,
+      latitude: confirmed.latitude,
+      longitude: confirmed.longitude,
+      googlePlaceId: confirmed.placeId || null,
+      source: "google",
+    });
+    setPendingConfirm(null);
   };
 
   const applyGoogleCandidate = (c: PlaceCandidate) => {
@@ -204,6 +257,8 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setLocationName(c.name);
     if (c.latitude != null && c.longitude != null) setCoords({ lat: c.latitude, lng: c.longitude });
     setLocationConfirmed(true);
+    setPendingConfirm(null);
+    setGoogleCandidates([]);
   };
 
   const applyLocalPlace = (p: LocalPlace) => {
@@ -239,6 +294,8 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setVerify(null);
     setLocalPlaceCandidates([]);
     setLocationConfirmed(false);
+    setGoogleCandidates([]);
+    setPendingConfirm(null);
   };
 
   const pickVideo = async () => {
@@ -635,15 +692,69 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
                 <Text className="text-blue-700 text-[12px] ml-2">กำลังค้นหาใน Google Maps...</Text>
               </View>
             )}
-            {googleCandidates.length > 0 && (
+
+            {/* Single Google result → confirmation card (editable before confirming) */}
+            {pendingConfirm && !googleLoading && (
+              <View className="bg-blue-50 border border-blue-300 rounded-xl p-3 mb-2">
+                <Text className="text-blue-800 text-[11px] font-bold mb-1.5">📍 พบสถานที่บน Google Maps — ยืนยันหรือแก้ไขก่อน</Text>
+
+                <Text className="text-gray-500 text-[11px] mb-0.5">ชื่อสถานที่</Text>
+                <TextInput
+                  value={pendingName}
+                  onChangeText={setPendingName}
+                  className="bg-white border border-blue-200 rounded-lg px-2.5 py-2 text-[13px] text-gray-900 mb-1.5"
+                />
+
+                <Text className="text-gray-400 text-[11px]" numberOfLines={1}>{pendingAddress}</Text>
+                <Text className="text-gray-500 text-[11px] mt-1">
+                  {[pendingConfirm.subdistrict && `ต.${pendingConfirm.subdistrict}`,
+                    pendingConfirm.district && `อ.${pendingConfirm.district}`,
+                    pendingConfirm.province && `จ.${pendingConfirm.province}`]
+                    .filter(Boolean).join(" • ")}
+                </Text>
+
+                <View className="flex-row mt-2.5">
+                  <TouchableOpacity
+                    onPress={confirmPending}
+                    activeOpacity={0.85}
+                    className="flex-1 bg-[#2D6A4F] rounded-xl py-2.5 items-center mr-1.5"
+                  >
+                    <Text className="text-white font-bold text-[12px]">✓ ยืนยันสถานที่นี้</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() => { setPendingConfirm(null); lookupOnGoogle(placeName, community, district, province); }}
+                    activeOpacity={0.8}
+                    className="flex-1 bg-gray-100 rounded-xl py-2.5 items-center"
+                  >
+                    <Text className="text-gray-600 font-bold text-[12px]">ค้นหาใหม่</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+
+            {/* Multiple Google results → list to choose from */}
+            {googleCandidates.length > 1 && !googleLoading && (
               <>
                 <Text className="text-gray-500 text-[11px] font-bold mt-1 mb-1">
-                  {googleCandidates.length > 1 ? "พบหลายที่บน Google Maps เลือกที่ถูกต้อง:" : "พบบน Google Maps:"}
+                  พบหลายที่บน Google Maps — เลือกที่ถูกต้อง:
                 </Text>
                 {googleCandidates.map((c) => (
                   <TouchableOpacity
                     key={c.placeId}
-                    onPress={() => applyGoogleCandidate(c)}
+                    onPress={() => {
+                      applyGoogleCandidate(c);
+                      void saveVerifiedPlace({
+                        name: c.name,
+                        community: community.trim() || null,
+                        subdistrict: c.subdistrict ?? null,
+                        district: c.district ?? null,
+                        province: c.province ?? null,
+                        latitude: c.latitude,
+                        longitude: c.longitude,
+                        googlePlaceId: c.placeId || null,
+                        source: "google",
+                      });
+                    }}
                     activeOpacity={0.8}
                     className="bg-white border border-blue-200 rounded-xl px-3 py-2 mb-1.5"
                   >
@@ -655,7 +766,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
             )}
 
             {/* Manual Google search trigger (if auto lookup found nothing) */}
-            {placeName && !googleLoading && googleCandidates.length === 0 && (
+            {placeName && !googleLoading && googleCandidates.length === 0 && !pendingConfirm && (
               <TouchableOpacity
                 onPress={() => lookupOnGoogle(placeName, community, district, province)}
                 activeOpacity={0.8}
