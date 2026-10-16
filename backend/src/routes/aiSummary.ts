@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import { generateSummary } from "../aiClient";
 import { getSummary, saveSummary, hasSummary } from "../summaryStore";
 import { VideoAnalysisInput } from "../prompt";
+import { enrichWithGooglePlaces } from "./places";
 
 const router = Router();
 
@@ -28,7 +29,10 @@ function readInput(body: any): VideoAnalysisInput {
  */
 router.post("/preview", async (req: Request, res: Response) => {
   try {
-    const summary = await generateSummary(readInput(req.body));
+    const rawSummary = await generateSummary(readInput(req.body));
+    // Auto-enrich with Google Places to fill province/district/coords
+    // that M3 couldn't see from video frames alone.
+    const summary = await enrichWithGooglePlaces(rawSummary).catch(() => rawSummary);
     return res.json(summary);
   } catch (err: any) {
     const message =

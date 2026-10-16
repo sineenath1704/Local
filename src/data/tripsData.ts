@@ -79,14 +79,28 @@ export const TRAVEL_STYLES: { key: TravelStyle; label: string; emoji: string }[]
   { key: "foodie", label: "สายกิน อาหารพื้นถิ่น", emoji: "🍜" },
 ];
 
+export type StopType =
+  | "departure"
+  | "attraction"
+  | "community"
+  | "food"
+  | "cafe"
+  | "accommodation"
+  | "activity"
+  | "return";
+
 export interface ItineraryStop {
   id?: string;
   name: string;
   activity: string;
   stayHours: number;
   driveToNextMins: number;
-  startTime?: string; // e.g. "08:30"
-  endTime?: string;   // e.g. "10:30"
+  startTime?: string;
+  endTime?: string;
+  type?: StopType;
+  estimatedCost?: number;
+  verified?: boolean;
+  note?: string;
   province?: string;
   district?: string;
   community?: string;

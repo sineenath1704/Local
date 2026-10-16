@@ -183,11 +183,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (error) return { error: error.message };
 
       const res = await WebBrowser.openAuthSessionAsync(data?.url ?? "", redirectTo);
-      if (res.type === "success") {
-        await createSessionFromUrl(res.url);
+
+      // On Expo Go / web the redirect scheme (exp:// or locallocal://) may not
+      // be registered, so the browser returns type "cancel" even though the
+      // token IS in the URL. Try to parse it regardless.
+      const resultUrl =
+        res.type === "success"
+          ? res.url
+          : (res as any).url ?? "";   // some versions put url on cancel too
+
+      if (resultUrl && (resultUrl.includes("access_token") || resultUrl.includes("#"))) {
+        await createSessionFromUrl(resultUrl);
         return { error: null };
       }
-      // user closed the browser
+
+      if (res.type === "success") {
+        return { error: null };
+      }
+
+      // Last resort: on web Supabase may have stored the session in localStorage
+      // during the redirect even if we couldn't parse the URL. Poll once.
+      const { data: sess } = await supabase.auth.getSession();
+      if (sess?.session) return { error: null };
+
       return { error: null };
     } catch (e: any) {
       return { error: e?.message ?? "เข้าสู่ระบบด้วย Google ไม่สำเร็จ" };

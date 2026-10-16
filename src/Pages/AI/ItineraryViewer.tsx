@@ -21,9 +21,14 @@ import {
   MapPinIcon,
   ChatBubbleLeftRightIcon,
   VideoCameraIcon,
+  HomeModernIcon,
+  BuildingStorefrontIcon,
+  SparklesIcon,
+  ArrowRightCircleIcon,
+  FlagIcon,
 } from "react-native-heroicons/outline";
 import { useAiPlanner } from "../../state/AiPlannerContext";
-import { ItineraryStop } from "../../data/tripsData";
+import { ItineraryStop, StopType } from "../../data/tripsData";
 import { InitialPostLocation } from "../CreatePostScreen";
 
 interface ItineraryViewerProps {
@@ -38,6 +43,36 @@ function driveLabel(mins: number): string {
   const h = Math.floor(mins / 60);
   const m = mins % 60;
   return `ขับรถ ~${h} ชม.${m ? ` ${m} นาที` : ""}`;
+}
+
+/** Color + icon + label per stop type — matches the trip plan UI in the app. */
+function stopConfig(type?: StopType): {
+  dotColor: string;
+  badgeBg: string;
+  badgeText: string;
+  label: string;
+  Icon: React.ComponentType<{ size: number; color: string }>;
+} {
+  switch (type) {
+    case "departure":
+      return { dotColor: "#6366F1", badgeBg: "#EEF2FF", badgeText: "#4338CA", label: "เริ่มต้น", Icon: FlagIcon };
+    case "community":
+      return { dotColor: "#2D6A4F", badgeBg: "#ECFDF5", badgeText: "#065F46", label: "ชุมชน OTOP", Icon: HomeModernIcon };
+    case "attraction":
+      return { dotColor: "#EF4444", badgeBg: "#FEF2F2", badgeText: "#B91C1C", label: "สถานที่ท่องเที่ยว", Icon: MapPinIcon };
+    case "food":
+      return { dotColor: "#F59E0B", badgeBg: "#FFFBEB", badgeText: "#92400E", label: "อาหาร", Icon: SparklesIcon };
+    case "cafe":
+      return { dotColor: "#D97706", badgeBg: "#FEF3C7", badgeText: "#92400E", label: "คาเฟ่", Icon: BuildingStorefrontIcon };
+    case "accommodation":
+      return { dotColor: "#7C3AED", badgeBg: "#F5F3FF", badgeText: "#5B21B6", label: "ที่พัก", Icon: HomeModernIcon };
+    case "activity":
+      return { dotColor: "#0891B2", badgeBg: "#ECFEFF", badgeText: "#164E63", label: "กิจกรรม", Icon: SparklesIcon };
+    case "return":
+      return { dotColor: "#64748B", badgeBg: "#F1F5F9", badgeText: "#475569", label: "เดินทางกลับ", Icon: ArrowRightCircleIcon };
+    default:
+      return { dotColor: "#7C3AED", badgeBg: "#F5F3FF", badgeText: "#5B21B6", label: "จุดแวะ", Icon: MapPinIcon };
+  }
 }
 
 export default function ItineraryViewer({ tripId, onBack, onPostCheckin }: ItineraryViewerProps) {
@@ -169,89 +204,115 @@ export default function ItineraryViewer({ tripId, onBack, onPostCheckin }: Itine
               <View className="flex-1 h-px bg-gray-200 ml-3" />
             </View>
 
-            {day.stops.map((stop, si) => (
+            {day.stops.map((stop, si) => {
+              const cfg = stopConfig(stop.type);
+              const isLast = si === day.stops.length - 1;
+              return (
               <View key={si} className="flex-row mb-1">
                 {/* Timeline rail */}
-                <View className="items-center mr-3">
-                  <View className="w-3 h-3 rounded-full bg-violet-600 mt-1.5" />
-                  {si < day.stops.length - 1 && <View className="w-0.5 flex-1 bg-violet-200 my-1" />}
+                <View className="items-center mr-3" style={{ width: 24 }}>
+                  <View style={{ width: 14, height: 14, borderRadius: 7, backgroundColor: cfg.dotColor, marginTop: 14 }} />
+                  {!isLast && <View style={{ width: 2, flex: 1, backgroundColor: cfg.dotColor + "35", marginVertical: 3 }} />}
                 </View>
 
                 {/* Stop card */}
-                <View className="flex-1 bg-gray-50 border border-gray-100 rounded-2xl p-3.5 mb-2">
-                  {editing ? (
-                    <TextInput
-                      value={stop.name}
-                      onChangeText={(t) => updateStop(di, si, { name: t })}
-                      className="text-[14px] font-bold text-gray-900 bg-white rounded-lg px-2 py-1 mb-1.5 border border-gray-200"
-                    />
-                  ) : (
-                    <Text className="text-[14px] font-bold text-gray-900 mb-0.5">{stop.name}</Text>
-                  )}
-
-                  {editing ? (
-                    <TextInput
-                      value={stop.activity}
-                      onChangeText={(t) => updateStop(di, si, { activity: t })}
-                      className="text-[12.5px] text-gray-700 bg-white rounded-lg px-2 py-1 mb-2 border border-gray-200"
-                    />
-                  ) : (
-                    <Text className="text-[12.5px] text-gray-600 mb-2">{stop.activity}</Text>
-                  )}
-
-                  <View className="flex-row items-center flex-wrap">
-                    <View className="flex-row items-center bg-white rounded-full px-2.5 py-1 mr-2 border border-gray-200">
-                      <ClockIcon size={12} color="#2D6A4F" />
-                      {editing ? (
-                        <TextInput
-                          value={String(stop.stayHours)}
-                          onChangeText={(t) => updateStop(di, si, { stayHours: Number(t) || 0 })}
-                          keyboardType="numeric"
-                          className="text-[11px] text-gray-700 ml-1 min-w-[24px] py-0"
-                        />
-                      ) : (
-                        <Text className="text-[11px] text-gray-700 ml-1">อยู่ ~{stop.stayHours} ชม.</Text>
-                      )}
+                <View
+                  className="flex-1 rounded-2xl mb-3 overflow-hidden"
+                  style={{ borderWidth: 1, borderColor: cfg.dotColor + "30", backgroundColor: "#FAFAFA" }}
+                >
+                  {/* Header — time + type badge */}
+                  <View
+                    className="flex-row items-center justify-between px-3.5 py-2"
+                    style={{ backgroundColor: cfg.dotColor + "10" }}
+                  >
+                    <View className="flex-row items-center">
+                      <ClockIcon size={13} color={cfg.dotColor} />
+                      <Text style={{ color: cfg.dotColor, fontSize: 12, fontWeight: "700", marginLeft: 4 }}>
+                        {stop.startTime ?? ""}
+                      </Text>
                     </View>
-                    {stop.driveToNextMins > 0 && (
-                      <View className="flex-row items-center bg-white rounded-full px-2.5 py-1 border border-gray-200">
-                        <TruckIcon size={12} color="#D47A3A" />
-                        <Text className="text-[11px] text-gray-700 ml-1">{driveLabel(stop.driveToNextMins)}</Text>
-                      </View>
-                    )}
+                    <View className="flex-row items-center rounded-full px-2.5 py-0.5" style={{ backgroundColor: cfg.badgeBg }}>
+                      <cfg.Icon size={11} color={cfg.badgeText} />
+                      <Text style={{ color: cfg.badgeText, fontSize: 10, fontWeight: "700", marginLeft: 3 }}>
+                        {cfg.label}
+                      </Text>
+                    </View>
                   </View>
 
-                  {/* Post check-in button if trip is completed or active */}
+                  {/* Body */}
+                  <View className="px-3.5 py-2.5">
+                    {editing ? (
+                      <TextInput
+                        value={stop.name}
+                        onChangeText={(t) => updateStop(di, si, { name: t })}
+                        className="text-[14px] font-bold text-gray-900 bg-white rounded-lg px-2 py-1 mb-1.5 border border-gray-200"
+                      />
+                    ) : (
+                      <Text className="text-[14px] font-bold text-gray-900 mb-0.5">{stop.name}</Text>
+                    )}
+                    {editing ? (
+                      <TextInput
+                        value={stop.activity}
+                        onChangeText={(t) => updateStop(di, si, { activity: t })}
+                        className="text-[12.5px] text-gray-700 bg-white rounded-lg px-2 py-1 mb-2 border border-gray-200"
+                      />
+                    ) : (
+                      <Text className="text-[12.5px] text-gray-500 mb-2">{stop.activity}</Text>
+                    )}
+
+                    {/* Tags */}
+                    <View className="flex-row flex-wrap items-center">
+                      {stop.stayHours > 0 && (
+                        <View className="flex-row items-center bg-white rounded-full px-2.5 py-1 mr-1.5 mb-1 border border-gray-200">
+                          <ClockIcon size={11} color="#6B7280" />
+                          <Text className="text-[11px] text-gray-600 ml-1">{stop.stayHours} ชม.</Text>
+                        </View>
+                      )}
+                      {(stop.estimatedCost ?? 0) > 0 && (
+                        <View className="flex-row items-center bg-white rounded-full px-2.5 py-1 mr-1.5 mb-1 border border-gray-200">
+                          <BanknotesIcon size={11} color="#6B7280" />
+                          <Text className="text-[11px] text-gray-600 ml-1">~{stop.estimatedCost!.toLocaleString()} ฿</Text>
+                        </View>
+                      )}
+                      {stop.verified === false && (
+                        <View className="bg-amber-50 rounded-full px-2.5 py-1 mr-1.5 mb-1 border border-amber-200">
+                          <Text className="text-[10px] text-amber-700">ข้อมูลประมาณการ</Text>
+                        </View>
+                      )}
+                    </View>
+                    {stop.note ? <Text className="text-[11px] text-gray-400 mt-0.5 italic">{stop.note}</Text> : null}
+                  </View>
+
+                  {/* Drive to next */}
+                  {stop.driveToNextMins > 0 && (
+                    <View className="flex-row items-center px-3.5 py-2 border-t border-dashed" style={{ borderColor: cfg.dotColor + "25" }}>
+                      <TruckIcon size={12} color={cfg.dotColor} />
+                      <Text style={{ color: cfg.dotColor, fontSize: 11, marginLeft: 5 }}>{driveLabel(stop.driveToNextMins)}</Text>
+                    </View>
+                  )}
+
+                  {/* Post check-in */}
                   {(trip.status === "completed" || trip.status === "active") && (
                     <TouchableOpacity
                       onPress={() => {
                         if (onPostCheckin) {
-                          onPostCheckin({
-                            placeName: stop.name,
-                            community: stop.community || stop.name,
-                            province: stop.province,
-                            district: stop.district,
-                            coords: stop.coordinates,
-                          });
+                          onPostCheckin({ placeName: stop.name, community: stop.community || stop.name, province: stop.province, district: stop.district, coords: stop.coordinates });
                         } else {
-                          Alert.alert(
-                            "โพสต์เช็คอิน",
-                            `ระบบจะเปิดหน้าโพสต์คลิปพร้อมดึงสถานที่ "${stop.name}" ให้อัตโนมัติ`
-                          );
+                          Alert.alert("โพสต์เช็คอิน", `ระบบจะเปิดหน้าโพสต์คลิปพร้อมดึงสถานที่ "${stop.name}" ให้อัตโนมัติ`);
                         }
                       }}
-                      activeOpacity={0.8}
-                      className="mt-2.5 bg-violet-600 rounded-xl py-2 px-3 flex-row items-center justify-center self-start"
+                      activeOpacity={0.85}
+                      className="flex-row items-center justify-center px-3.5 py-2 border-t"
+                      style={{ borderColor: cfg.dotColor + "25", backgroundColor: cfg.dotColor + "08" }}
                     >
-                      <VideoCameraIcon size={14} color="#FFFFFF" />
-                      <Text className="text-white text-[11.5px] font-bold ml-1.5">
-                        โพสต์คลิปที่นี่ 📹
-                      </Text>
+                      <VideoCameraIcon size={14} color={cfg.dotColor} />
+                      <Text style={{ color: cfg.dotColor, fontSize: 12, fontWeight: "700", marginLeft: 5 }}>โพสต์คลิป ณ ที่นี้</Text>
                     </TouchableOpacity>
                   )}
                 </View>
               </View>
-            ))}
+              );
+            })}
           </View>
         ))}
       </ScrollView>
