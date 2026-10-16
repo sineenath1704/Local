@@ -59,28 +59,40 @@ interface CreatePostScreenProps {
 
 export default function CreatePostScreen({ onPosted, onCancel, initialLocation }: CreatePostScreenProps) {
   const insets = useSafeAreaInsets();
-  const { session } = useAuth();
+  const { session, user } = useAuth();
+
+  // Pre-fill location for OTOP hosts from their verified profile (no need to search).
+  const isHost = user?.role === "host" && user?.otop_verified;
+  const hostLocation = isHost ? {
+    locationName: user?.otop_village || user?.otop_nawatwithi || "",
+    community: user?.otop_village || "",
+    subdistrict: user?.otop_tambol || "",
+    district: user?.otop_amphur || "",
+    province: user?.otop_province || "",
+  } : null;
 
   const [videoUri, setVideoUri] = useState<string | null>(null);
   const [caption, setCaption] = useState("");
   const [hashtags, setHashtags] = useState("");
-  const [province, setProvince] = useState(initialLocation?.province || "");
-  const [district, setDistrict] = useState(initialLocation?.district || "");
-  const [subdistrict, setSubdistrict] = useState(initialLocation?.subdistrict || "");
-  const [community, setCommunity] = useState(initialLocation?.community || "");
-  const [placeName, setPlaceName] = useState(initialLocation?.placeName || ""); // specific place (ร้าน/จุด)
+  const [province, setProvince] = useState(hostLocation?.province || initialLocation?.province || "");
+  const [district, setDistrict] = useState(hostLocation?.district || initialLocation?.district || "");
+  const [subdistrict, setSubdistrict] = useState(hostLocation?.subdistrict || initialLocation?.subdistrict || "");
+  const [community, setCommunity] = useState(hostLocation?.community || initialLocation?.community || "");
+  const [placeName, setPlaceName] = useState(initialLocation?.placeName || "");
   const [locationName, setLocationName] = useState(
-    initialLocation?.placeName || initialLocation?.community || ""
+    hostLocation?.locationName || initialLocation?.placeName || initialLocation?.community || ""
   );
   const [locationQuery, setLocationQuery] = useState(
     initialLocation?.placeName || initialLocation?.community || ""
   );
+  // Host location is pre-confirmed (from OTOP profile), tourist needs to verify.
+  const [locationConfirmedInit] = useState(isHost && !!hostLocation?.province);
   const [uploading, setUploading] = useState(false);
 
   // Location verification (offline + Local places store).
   const [verify, setVerify] = useState<VerifyResult | null>(null);
   const [localPlaceCandidates, setLocalPlaceCandidates] = useState<LocalPlace[]>([]);
-  const [locationConfirmed, setLocationConfirmed] = useState(false);
+  const [locationConfirmed, setLocationConfirmed] = useState(locationConfirmedInit);
   const [googleCandidates, setGoogleCandidates] = useState<PlaceCandidate[]>([]);
   const [googleLoading, setGoogleLoading] = useState(false);
   // Single Google result pending confirmation (with editable fields).
@@ -134,7 +146,8 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     );
 
     // Verify the location the AI extracted (offline + Local places store).
-    if (result?.place) await runLocationVerify(result.place);
+    // For OTOP hosts, location is already confirmed from their profile — skip verify.
+    if (result?.place && !isHost) await runLocationVerify(result.place);
 
     if (!result) {
       Alert.alert("สรุปไม่สำเร็จ", "ตอนนี้ให้ AI สรุปวิดีโอไม่ได้ ลองกดสรุปใหม่อีกครั้งได้เลย");
@@ -833,9 +846,31 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
         <View className="flex-row items-center mb-1.5">
           <MapPinIcon size={14} color="#EF4444" />
           <Text className="text-gray-700 font-bold text-[13px] ml-1">สถานที่ / ชุมชน</Text>
+          {isHost && (
+            <View className="ml-2 bg-emerald-100 rounded-full px-2 py-0.5">
+              <Text className="text-[#2D6A4F] text-[10px] font-bold">ชุมชน OTOP ของคุณ</Text>
+            </View>
+          )}
         </View>
 
-        {verify && !locationConfirmed ? (
+        {/* Host: show OTOP location chip (pre-filled, editable via clear) */}
+        {isHost && locationName && locationConfirmed && !verify ? (
+          <View className="flex-row items-center bg-emerald-50 border border-emerald-200 rounded-xl px-3.5 py-3 mb-4">
+            <MapPinIcon size={16} color="#2D6A4F" />
+            <View className="flex-1 ml-2">
+              <Text className="text-[#1B4332] font-bold text-[14px]">{locationName}</Text>
+              <Text className="text-gray-500 text-[12px]">
+                {[subdistrict && `ต.${subdistrict}`, district && `อ.${district}`, province && `จ.${province}`]
+                  .filter(Boolean)
+                  .join(" • ")}
+              </Text>
+              <Text className="text-emerald-600 text-[10px] mt-0.5">📋 จากทะเบียน OTOP ของคุณ • แก้ไขได้ด้านล่าง</Text>
+            </View>
+            <TouchableOpacity onPress={clearLocation} className="p-1">
+              <XMarkIcon size={18} color="#6B7280" />
+            </TouchableOpacity>
+          </View>
+        ) : verify && !locationConfirmed ? (
           // While verifying, the verification card above handles the choice.
           <Text className="text-gray-400 text-[12px] mb-4 px-1">
             ตรวจสอบสถานที่จาก AI ด้านบน หรือเลือก "ค้นหา/แก้เอง"
