@@ -147,9 +147,13 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     const aiPlaceName = place.place_name ?? null;
     const aiCommunity = (place as any).community ?? null;
     const loc = place.location ?? ({} as any);
+    // Backend may have already run Google Places enrichment.
+    const backendCandidates: PlaceCandidate[] = (place as any).google_candidates ?? [];
+    const backendGps: string | null = (place as any).gps ?? null;
 
     console.log("[verify] aiPlaceName =", aiPlaceName, "community =", aiCommunity,
-      "province =", loc.province, "district =", loc.district);
+      "province =", loc.province, "district =", loc.district,
+      "backendCandidates =", backendCandidates.length, "backendGps =", backendGps);
 
     const res = verifyLocationOffline({
       placeName: aiPlaceName,
@@ -168,19 +172,46 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     if (n.subdistrict) setSubdistrict(n.subdistrict);
     if (n.district) setDistrict(n.district);
     if (n.province) setProvince(n.province);
-    // locationName shown in the picker chip = specific place or community.
     const label = aiPlaceName || n.community || "";
     if (label) setLocationName(label);
 
     setGoogleCandidates([]);
     setCoords(null);
+    setPendingConfirm(null);
 
-    console.log("[verify] offline result status =", res.status,
+    console.log("[verify] offline status =", res.status,
       "candidates =", res.communityCandidates.length,
-      "adminValid =", res.adminValid
-    );
+      "adminValid =", res.adminValid);
 
-    // If the AI named a specific place, see if we've confirmed it before.
+    // ── Priority 1: use Google Places results from backend (already fetched) ──
+    if (backendCandidates.length > 1) {
+      // Multiple locations from backend → show picker immediately
+      console.log("[verify] using", backendCandidates.length, "backend Google candidates");
+      setGoogleCandidates(backendCandidates);
+      return;
+    }
+    if (backendCandidates.length === 1) {
+      // Single location from backend → show confirmation card
+      console.log("[verify] single backend candidate →", backendCandidates[0].name);
+      setPendingConfirm(backendCandidates[0]);
+      setPendingName(backendCandidates[0].name);
+      setPendingAddress(backendCandidates[0].address);
+      // Pre-fill province/district from Google result
+      if (backendCandidates[0].province) setProvince(backendCandidates[0].province);
+      if (backendCandidates[0].district) setDistrict(backendCandidates[0].district);
+      if (backendCandidates[0].subdistrict) setSubdistrict(backendCandidates[0].subdistrict);
+      return;
+    }
+    if (backendGps) {
+      // Backend already confirmed single result + filled location → auto-confirm
+      const [lat, lng] = backendGps.split(",").map(Number);
+      console.log("[verify] backend GPS confirmed → lat:", lat, "lng:", lng);
+      setCoords({ lat, lng });
+      setLocationConfirmed(true);
+      return;
+    }
+
+    // ── Priority 2: check our local confirmed places store ──
     if (aiPlaceName) {
       const local = await findLocalPlaces({
         name: aiPlaceName,
@@ -188,13 +219,11 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
         district: n.district,
       });
       setLocalPlaceCandidates(local);
-      // Exactly one previously-confirmed place → treat as verified.
       if (local.length === 1 && res.status !== "needs_choice") {
         applyLocalPlace(local[0]);
         return;
       }
-      // Not in our store yet → look it up on Google Maps to find WHERE it is
-      // (province/district/subdistrict + coordinates). User still chooses.
+      // ── Priority 3: call Google ourselves (backend had no key / no result) ──
       if (local.length === 0) {
         void lookupOnGoogle(aiPlaceName, n.community, n.district, n.province);
       }
