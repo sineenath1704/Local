@@ -3,6 +3,7 @@ import { generateSummary } from "../aiClient";
 import { getSummary, saveSummary, hasSummary } from "../summaryStore";
 import { VideoAnalysisInput } from "../prompt";
 import { enrichWithGooglePlaces } from "./places";
+import { transcribeVideo } from "../transcribe";
 
 const router = Router();
 
@@ -29,9 +30,32 @@ function readInput(body: any): VideoAnalysisInput {
  */
 router.post("/preview", async (req: Request, res: Response) => {
   try {
-    const rawSummary = await generateSummary(readInput(req.body));
-    // Auto-enrich with Google Places to fill province/district/coords
-    // that M3 couldn't see from video frames alone.
+    const input = readInput(req.body);
+
+    // Step 1: If we have a video URL, transcribe audio + describe visuals first.
+    // Gemini handles this in one call without needing ffmpeg.
+    if (input.videoUrl) {
+      // eslint-disable-next-line no-console
+      console.log("[preview] transcribing video →", input.videoUrl.slice(-40));
+      const tr = await transcribeVideo(input.videoUrl).catch(() => null);
+      if (tr) {
+        // eslint-disable-next-line no-console
+        console.log("[preview] transcript hasAudio =", tr.hasAudio,
+          "len =", tr.transcript?.length ?? 0,
+          "onScreen =", tr.onScreenText.length);
+        // Merge transcription into the input (transcript = primary, visual = secondary).
+        if (tr.transcript) input.transcript = tr.transcript;
+        if (tr.visualDescription) input.visualDescription = tr.visualDescription;
+        if (tr.onScreenText.length > 0) input.onScreenText = tr.onScreenText;
+        // Set audioType based on what Gemini found.
+        input.audioType = tr.hasAudio ? "speech" : "none";
+      }
+    }
+
+    // Step 2: M3 summarizes from transcript (primary) + visual (secondary).
+    const rawSummary = await generateSummary(input);
+
+    // Step 3: Google Places fills province/district/coords.
     const summary = await enrichWithGooglePlaces(rawSummary).catch(() => rawSummary);
     return res.json(summary);
   } catch (err: any) {
