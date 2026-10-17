@@ -154,25 +154,47 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
       if (isHost && hostLocation) {
         const aiName = result.place.place_name ?? (result.place as any).community ?? "";
         const otopName = hostLocation.locationName;
-        // Fuzzy match: normalize Thai (remove spaces, lowercase)
         const norm = (s: string) => s.replace(/\s/g, "").toLowerCase();
         const nameMatches = aiName && otopName && (
           norm(aiName).includes(norm(otopName)) ||
           norm(otopName).includes(norm(aiName))
         );
-        if (nameMatches || !aiName) {
-          // AI agrees with OTOP or found nothing → keep OTOP location
-          console.log("[summary] host: AI name matches OTOP → keep OTOP location");
+        if (nameMatches) {
+          // AI name matches OTOP village → keep OTOP location (authoritative)
+          console.log("[summary] host: AI matches OTOP → keep OTOP location");
+        } else if (aiName) {
+          // AI found a different specific place → use AI location (verify via Google)
+          console.log("[summary] host: AI found different place:", aiName, "→ verify with Google");
+          // Reset OTOP pre-fill so runLocationVerify can fill from AI/Google
+          setLocationName("");
+          setPlaceName("");
+          setCommunity("");
+          setSubdistrict("");
+          setDistrict("");
+          setProvince("");
+          setLocationConfirmed(false);
+          await runLocationVerify(result.place);
         } else {
-          // AI found a different specific place inside the community
-          // → update locationName to AI's name, but keep province/district
-          console.log("[summary] host: AI found different place:", aiName, "→ update name");
-          setLocationName(aiName);
-          setPlaceName(aiName);
-          // Keep province/district/subdistrict from OTOP (not changing)
+          // AI found nothing → clear location, let user search manually
+          console.log("[summary] host: AI found nothing → clear location");
+          setLocationName("");
+          setPlaceName("");
+          setCommunity("");
+          setSubdistrict("");
+          setDistrict("");
+          setProvince("");
+          setLocationConfirmed(false);
+          setVerify(null);
         }
       } else {
         await runLocationVerify(result.place);
+      }
+    } else {
+      // No place from AI at all → clear for user to fill
+      if (!isHost) {
+        setLocationName("");
+        setPlaceName("");
+        setVerify(null);
       }
     }
 
