@@ -75,7 +75,7 @@ export async function transcribeVideo(videoUrl: string): Promise<TranscriptionRe
             },
           ],
           generationConfig: {
-            temperature: 0.1,
+            temperature: 0.0,
             maxOutputTokens: 2048,
           },
         }),

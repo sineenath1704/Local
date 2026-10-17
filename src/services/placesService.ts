@@ -15,6 +15,13 @@ export interface PlaceCandidate {
   district: string | null;
   subdistrict: string | null;
   types: string[];
+  phone?: string | null;
+  openingHours?: string | null;
+  rating?: number | null;
+  userRatingCount?: number | null;
+  website?: string | null;
+  googleMapsUri?: string | null;
+  businessStatus?: string | null;
 }
 
 export interface VerifyPlacesResult {

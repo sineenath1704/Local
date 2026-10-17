@@ -48,6 +48,16 @@ export interface AppUser {
   otop_nawatwithi?: string | null;
   otop_for_tourism?: string | null;
   otop_cbt_village?: string | null;
+  // Host business profile (Ground truth for posts)
+  business_place_name?: string | null;
+  business_price_info?: string | null;
+  business_phone?: string | null;
+  business_lat?: number | null;
+  business_lng?: number | null;
+  business_address?: string | null;
+  business_subdistrict?: string | null;
+  business_district?: string | null;
+  business_province?: string | null;
 }
 
 export interface OtopRegInfo {
@@ -72,6 +82,16 @@ export interface OnboardingInput {
   role?: "tourist" | "host";
   /** Verified OTOP community info (only for host role). */
   otop?: OtopRegInfo | null;
+  /** Host business info */
+  businessPlaceName?: string;
+  businessPriceInfo?: string;
+  businessPhone?: string;
+  businessLat?: number | null;
+  businessLng?: number | null;
+  businessAddress?: string | null;
+  businessSubdistrict?: string | null;
+  businessDistrict?: string | null;
+  businessProvince?: string | null;
 }
 
 interface AuthState {
@@ -90,6 +110,18 @@ interface AuthState {
   completeOnboarding: (input: OnboardingInput) => Promise<{ error: string | null }>;
   /** Update editable profile fields (name/bio/avatar) back to Supabase. */
   updateProfile: (patch: { displayName?: string; bio?: string; avatarUri?: string }) => Promise<{ error: string | null }>;
+  /** Update host business profile */
+  updateBusinessProfile: (patch: {
+    businessPlaceName?: string;
+    businessPriceInfo?: string;
+    businessPhone?: string;
+    businessLat?: number | null;
+    businessLng?: number | null;
+    businessAddress?: string | null;
+    businessSubdistrict?: string | null;
+    businessDistrict?: string | null;
+    businessProvince?: string | null;
+  }) => Promise<{ error: string | null }>;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -280,6 +312,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         patch.otop_for_tourism = o.otopForTourism;
         patch.otop_cbt_village = o.cbtVillage;
         patch.otop_raw = o.raw ?? null;
+
+        // Host business profile
+        if (input.businessPlaceName?.trim()) patch.business_place_name = input.businessPlaceName.trim();
+        if (input.businessPriceInfo?.trim()) patch.business_price_info = input.businessPriceInfo.trim();
+        if (input.businessPhone?.trim()) patch.business_phone = input.businessPhone.trim();
+        if (input.businessLat != null) patch.business_lat = input.businessLat;
+        if (input.businessLng != null) patch.business_lng = input.businessLng;
+        if (input.businessAddress?.trim()) patch.business_address = input.businessAddress.trim();
+        if (input.businessSubdistrict?.trim()) patch.business_subdistrict = input.businessSubdistrict.trim();
+        if (input.businessDistrict?.trim()) patch.business_district = input.businessDistrict.trim();
+        if (input.businessProvince?.trim()) patch.business_province = input.businessProvince.trim();
       }
 
       const { error } = await supabase.from("users").update(patch).eq("id", uid);
@@ -331,6 +374,42 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [session, loadUserRow]
   );
 
+  const updateBusinessProfile = useCallback(
+    async (patch: {
+      businessPlaceName?: string;
+      businessPriceInfo?: string;
+      businessPhone?: string;
+      businessLat?: number | null;
+      businessLng?: number | null;
+      businessAddress?: string | null;
+      businessSubdistrict?: string | null;
+      businessDistrict?: string | null;
+      businessProvince?: string | null;
+    }): Promise<{ error: string | null }> => {
+      const uid = session?.user?.id;
+      if (!uid) return { error: "ยังไม่ได้เข้าสู่ระบบ" };
+
+      const row: Record<string, any> = {};
+      if (patch.businessPlaceName !== undefined) row.business_place_name = patch.businessPlaceName.trim();
+      if (patch.businessPriceInfo !== undefined) row.business_price_info = patch.businessPriceInfo.trim();
+      if (patch.businessPhone !== undefined) row.business_phone = patch.businessPhone.trim();
+      if (patch.businessLat !== undefined) row.business_lat = patch.businessLat;
+      if (patch.businessLng !== undefined) row.business_lng = patch.businessLng;
+      if (patch.businessAddress !== undefined) row.business_address = patch.businessAddress?.trim() ?? null;
+      if (patch.businessSubdistrict !== undefined) row.business_subdistrict = patch.businessSubdistrict?.trim() ?? null;
+      if (patch.businessDistrict !== undefined) row.business_district = patch.businessDistrict?.trim() ?? null;
+      if (patch.businessProvince !== undefined) row.business_province = patch.businessProvince?.trim() ?? null;
+
+      if (Object.keys(row).length === 0) return { error: null };
+
+      const { error } = await supabase.from("users").update(row).eq("id", uid);
+      if (error) return { error: error.message };
+      await loadUserRow(uid);
+      return { error: null };
+    },
+    [session, loadUserRow]
+  );
+
   const signOut = useCallback(async () => {
     await supabase.auth.signOut();
     setUser(null);
@@ -357,8 +436,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       isUsernameAvailable,
       completeOnboarding,
       updateProfile,
+      updateBusinessProfile,
     }),
-    [loading, session, user, needsOnboarding, signInWithGoogle, signOut, refreshUser, isUsernameAvailable, completeOnboarding, updateProfile]
+    [loading, session, user, needsOnboarding, signInWithGoogle, signOut, refreshUser, isUsernameAvailable, completeOnboarding, updateProfile, updateBusinessProfile]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -7,6 +7,8 @@ import {
   CAPTION_SYSTEM_PROMPT,
   buildCaptionPrompt,
   CaptionInput,
+  SUMMARY_NARRATION_PROMPT,
+  buildNarrationPrompt,
 } from "./prompt";
 
 /** Structured place data extracted from the clip (Video Content Analyzer). */
@@ -20,6 +22,7 @@ export interface PlaceData {
     subdistrict?: string | null;
     gps?: string | null;
   };
+  atmosphere?: string | null;
   category: string[];
   activities: string[];
   price_info: { weekday: string | null; weekend: string | null; currency?: string };
@@ -94,15 +97,15 @@ export async function generateSummary(
     };
   }
 
-  // Mode A — analyze the VIDEO directly (image frames + on-screen text), no
-  // caption/transcript. Falls back to the text-only prompt when no videoUrl.
-  const useVideo = Boolean(input.videoUrl);
-  const messageContent: any = useVideo
+  // Build comprehensive prompt containing transcript from Speech-to-Text,
+  // on-screen text, visual description, and anti-hallucination rules.
+  const promptText = buildSummaryPrompt(input);
+  const messageContent: any = input.videoUrl
     ? [
-        { type: "text", text: VIDEO_PROMPT },
+        { type: "text", text: promptText },
         { type: "video", source: { type: "url", url: input.videoUrl, fps: 1 } },
       ]
-    : buildSummaryPrompt(input);
+    : promptText;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.ai.timeoutMs);
@@ -119,7 +122,7 @@ export async function generateSummary(
       body: JSON.stringify({
         model: config.ai.model,
         max_tokens: config.ai.maxTokens,
-        temperature: 0.1,
+        temperature: 0.0,
         system: SYSTEM_PROMPT,
         messages: [{ role: "user", content: messageContent }],
       }),
@@ -141,12 +144,21 @@ export async function generateSummary(
 
     const parsed = extractJson(rawText);
 
+    if (parsed) {
+      // Diagnostic logging of reasoning and extracted fields
+      // eslint-disable-next-line no-console
+      console.log("[generateSummary] reasoning =", parsed.reasoning);
+      // eslint-disable-next-line no-console
+      console.log("[generateSummary] place_name =", parsed.place_name, "community =", parsed.community, "location =", parsed.location);
+    }
+
     // New structured format: has a "summary" string.
     if (parsed && typeof parsed.summary === "string") {
       const place: PlaceData = {
         place_name: parsed.place_name ?? null,
         community: parsed.community ?? null,
         location: parsed.location ?? { province: null, district: null },
+        atmosphere: parsed.atmosphere ?? null,
         category: parsed.category ?? [],
         activities: parsed.activities ?? [],
         price_info: parsed.price_info ?? { weekday: null, weekend: null, currency: "THB" },
@@ -236,6 +248,93 @@ export async function generateCaptions(input: CaptionInput): Promise<string[]> {
       .map((l) => l.replace(/^[-*\d.\s]+/, "").trim())
       .filter(Boolean)
       .slice(0, 3);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Stage 2: Turn structured JSON into an engaging 2-paragraph narrative
+ * for display in the AI summary panel.
+ */
+export async function generateNarration(analysisJson: any): Promise<string> {
+  const place = analysisJson?.place ?? analysisJson;
+  const placeName = place?.place_name ?? null;
+  const province = place?.location?.province ?? null;
+  const district = place?.location?.district ?? null;
+  const atmosphere = place?.atmosphere ?? analysisJson?.atmosphere ?? null;
+  const activities: string[] = place?.activities ?? [];
+  const highlights: string[] = place?.highlights ?? analysisJson?.highlights ?? [];
+
+  const locationText = [district, province].filter(Boolean).join(" ");
+  const fallbackPin = placeName
+    ? `📍 ${placeName}${locationText ? ` | ${locationText}` : ""}`
+    : "📍 ท่องเที่ยวชุมชนและวิถีชีวิตไทย";
+
+  const fallbackBody =
+    atmosphere ||
+    "คลิปนี้พามาสัมผัสบรรยากาศความสวยงามและเสน่ห์ของชุมชนท้องถิ่นที่อบอุ่น ชวนแวะมาพักผ่อน สัมผัสวิถีชีวิตเป็นกันเอง และช้อปสินค้า OTOP ชุมชนด้วยตัวเองสักครั้งนะคะ!";
+
+  const fallbackText = `${fallbackPin}\n\n${fallbackBody}`;
+
+  if (!isAiConfigured()) {
+    return fallbackText;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), config.ai.timeoutMs);
+  try {
+    const res = await fetch(`${config.ai.baseUrl}/v1/messages`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": config.ai.authToken,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: config.ai.model,
+        max_tokens: 512,
+        temperature: 0.6,
+        system: SUMMARY_NARRATION_PROMPT,
+        messages: [{ role: "user", content: buildNarrationPrompt(analysisJson) }],
+      }),
+    });
+
+    if (!res.ok) {
+      console.warn("[generateNarration] AI returned status", res.status, "→ fallback");
+      return fallbackText;
+    }
+
+    const data: any = await res.json();
+    const rawText: string = Array.isArray(data?.content)
+      ? data.content.map((c: any) => c?.text ?? "").join("\n").trim()
+      : typeof data?.content === "string"
+      ? data.content.trim()
+      : "";
+
+    // Guards:
+    // 1. If AI accidentally returned JSON
+    const trimmed = rawText.trimStart();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      console.warn("[generateNarration] AI returned JSON → using fallback");
+      return fallbackText;
+    }
+
+    // 2. If AI replied with "ไม่มีข้อมูล" or similar
+    if (
+      rawText.includes("ไม่มีข้อมูลเพียงพอ") ||
+      rawText.includes("ไม่พบข้อมูล") ||
+      rawText.includes("ขอรอคลิป")
+    ) {
+      console.warn("[generateNarration] AI returned no-data phrase → using fallback");
+      return fallbackText;
+    }
+
+    return rawText || fallbackText;
+  } catch (err) {
+    console.warn("[generateNarration] error:", err);
+    return fallbackText;
   } finally {
     clearTimeout(timer);
   }

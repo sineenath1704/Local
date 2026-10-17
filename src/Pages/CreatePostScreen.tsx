@@ -61,15 +61,22 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
   const insets = useSafeAreaInsets();
   const { session, user } = useAuth();
 
-  // Pre-fill location for OTOP hosts from their verified profile (no need to search).
-  const isHost = user?.role === "host" && user?.otop_verified;
+  // Pre-fill location for OTOP hosts from their verified business profile.
+  const isHost = user?.role === "host" && Boolean(user?.otop_verified);
+  const hostBusinessName = user?.business_place_name || user?.otop_village || user?.otop_nawatwithi || "";
   const hostLocation = isHost ? {
-    locationName: user?.otop_village || user?.otop_nawatwithi || "",
+    locationName: hostBusinessName,
+    placeName: hostBusinessName,
     community: user?.otop_village || "",
-    subdistrict: user?.otop_tambol || "",
-    district: user?.otop_amphur || "",
-    province: user?.otop_province || "",
+    subdistrict: user?.business_subdistrict || user?.otop_tambol || "",
+    district: user?.business_district || user?.otop_amphur || "",
+    province: user?.business_province || user?.otop_province || "",
+    lat: user?.business_lat ?? null,
+    lng: user?.business_lng ?? null,
   } : null;
+
+  // Host mode: "own_business" (locked to own shop) or "community_spot" (within own tambol/village)
+  const [hostPostMode, setHostPostMode] = useState<"own_business" | "community_spot">("own_business");
 
   const [videoUri, setVideoUri] = useState<string | null>(null);
   const [caption, setCaption] = useState("");
@@ -78,7 +85,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
   const [district, setDistrict] = useState(hostLocation?.district || initialLocation?.district || "");
   const [subdistrict, setSubdistrict] = useState(hostLocation?.subdistrict || initialLocation?.subdistrict || "");
   const [community, setCommunity] = useState(hostLocation?.community || initialLocation?.community || "");
-  const [placeName, setPlaceName] = useState(initialLocation?.placeName || "");
+  const [placeName, setPlaceName] = useState(hostLocation?.placeName || initialLocation?.placeName || "");
   const [locationName, setLocationName] = useState(
     hostLocation?.locationName || initialLocation?.placeName || initialLocation?.community || ""
   );
@@ -87,6 +94,9 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
   );
   // Host location is pre-confirmed (from OTOP profile), tourist needs to verify.
   const [locationConfirmedInit] = useState(isHost && !!hostLocation?.province);
+  const [locationSource, setLocationSource] = useState<"otop" | "ai" | "manual">(
+    isHost && hostLocation ? "otop" : "manual"
+  );
   const [uploading, setUploading] = useState(false);
 
   // Location verification (offline + Local places store).
@@ -99,11 +109,43 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
   const [pendingConfirm, setPendingConfirm] = useState<PlaceCandidate | null>(null);
   const [pendingName, setPendingName] = useState("");
   const [pendingAddress, setPendingAddress] = useState("");
-  // coordinates captured when a Google candidate is chosen
-  const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
+  // coordinates captured when a Google candidate is chosen or from host registration
+  const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(
+    hostLocation?.lat != null && hostLocation?.lng != null ? { lat: hostLocation.lat, lng: hostLocation.lng } : null
+  );
 
   const [captionIdeas, setCaptionIdeas] = useState<string[]>([]);
   const [captionLoading, setCaptionLoading] = useState(false);
+
+  // Switch functions for host post modes
+  const applyHostOwnBusiness = () => {
+    setHostPostMode("own_business");
+    if (hostLocation) {
+      setPlaceName(hostLocation.placeName);
+      setLocationName(hostLocation.locationName);
+      setCommunity(hostLocation.community);
+      setSubdistrict(hostLocation.subdistrict);
+      setDistrict(hostLocation.district);
+      setProvince(hostLocation.province);
+      if (hostLocation.lat != null && hostLocation.lng != null) {
+        setCoords({ lat: hostLocation.lat, lng: hostLocation.lng });
+      }
+      setLocationSource("otop");
+      setLocationConfirmed(true);
+      setVerify(null);
+    }
+  };
+
+  const applyHostCommunitySpot = () => {
+    setHostPostMode("community_spot");
+    setLocationConfirmed(false);
+    setLocationSource("manual");
+    setPlaceName("");
+    setLocationName("");
+    setLocationQuery("");
+    setVerify(null);
+    setCoords(null);
+  };
 
   // --- AI summary (generated at upload time, before posting) ---
   const [summary, setSummary] = useState<AiSummaryResult | null>(null);
@@ -118,7 +160,11 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     p.muted = true;
   });
 
-  const placeResults = locationQuery.trim().length >= 1 ? searchPlaces(locationQuery) : [];
+  const rawPlaceResults = locationQuery.trim().length >= 1 ? searchPlaces(locationQuery) : [];
+  // For host in community spot mode, restrict results to their own province
+  const placeResults = isHost && hostPostMode === "community_spot" && user?.otop_province
+    ? rawPlaceResults.filter(p => p.provinceName === user.otop_province)
+    : rawPlaceResults;
 
   // Generate the AI summary from the VIDEO itself (video-only, no caption).
   const runSummary = async (overrides?: { videoUrl?: string }) => {
@@ -130,8 +176,14 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setSummaryEditing(false);
     const result = await generatePreviewSummary({
       videoUrl: url,
-      audioType: "none",
-      uploaderType: "tourist",
+      audioType: "speech",
+      // In own_business mode for hosts, pass their registered place as context
+      // so AI summarizes atmosphere only, NOT guessing location.
+      uploaderType: isHost && hostPostMode === "own_business" ? "community" : "tourist",
+      location: isHost && hostPostMode === "own_business" && hostLocation
+        ? [hostLocation.placeName, hostLocation.community, hostLocation.subdistrict,
+           hostLocation.district, hostLocation.province].filter(Boolean).join(" ")
+        : undefined,
     });
     setSummary(result);
     setSummaryDraft(result?.text ?? "");
@@ -145,56 +197,56 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
       "province =", result?.place?.location?.province ?? "null"
     );
 
-    // Verify the location the AI extracted (offline + Local places store).
-    // For OTOP hosts: compare AI result with OTOP profile.
-    //   - AI name matches OTOP village → keep OTOP location (authoritative)
-    //   - AI name differs → update locationName to what AI found, but keep
-    //     province/district/tambol from OTOP (we know where the community is)
-    if (result?.place) {
-      if (isHost && hostLocation) {
-        const aiName = result.place.place_name ?? (result.place as any).community ?? "";
-        const otopName = hostLocation.locationName;
-        const norm = (s: string) => s.replace(/\s/g, "").toLowerCase();
-        const nameMatches = aiName && otopName && (
-          norm(aiName).includes(norm(otopName)) ||
-          norm(otopName).includes(norm(aiName))
-        );
-        if (nameMatches) {
-          // AI name matches OTOP village → keep OTOP location (authoritative)
-          console.log("[summary] host: AI matches OTOP → keep OTOP location");
-        } else if (aiName) {
-          // AI found a different specific place → use AI location (verify via Google)
-          console.log("[summary] host: AI found different place:", aiName, "→ verify with Google");
-          // Reset OTOP pre-fill so runLocationVerify can fill from AI/Google
-          setLocationName("");
-          setPlaceName("");
-          setCommunity("");
-          setSubdistrict("");
-          setDistrict("");
-          setProvince("");
-          setLocationConfirmed(false);
+    // ── Host in own_business mode: location is ALWAYS locked to registered business ──
+    // AI is only used for atmosphere summary, never for location extraction.
+    if (isHost && hostLocation && hostPostMode === "own_business") {
+      console.log("[summary] host own_business → keeping OTOP location locked");
+      setLocationSource("otop");
+      setLocationConfirmed(true);
+      setVerify(null);
+      // Restore host coords in case they were cleared
+      if (hostLocation.lat != null && hostLocation.lng != null) {
+        setCoords({ lat: hostLocation.lat, lng: hostLocation.lng });
+      }
+      setPlaceName(hostLocation.placeName);
+      setLocationName(hostLocation.locationName);
+      setCommunity(hostLocation.community);
+      setSubdistrict(hostLocation.subdistrict);
+      setDistrict(hostLocation.district);
+      setProvince(hostLocation.province);
+    } else if (result?.place) {
+      // Tourist or host in community_spot mode: verify AI location normally
+      const aiPlaceName = result.place.place_name ?? null;
+      const aiCommunity = (result.place as any).community ?? null;
+      const aiLoc = result.place.location ?? ({} as any);
+      const aiProvince = aiLoc.province ?? null;
+      const aiName = aiPlaceName || aiCommunity || "";
+
+      if (isHost && hostLocation && hostPostMode === "community_spot") {
+        // community_spot: AI may suggest a nearby place — still verify but scoped to tambol
+        console.log("[summary] host community_spot → AI location verify (scoped to tambol)");
+        setLocationSource("ai");
+        if (aiName || aiProvince) {
           await runLocationVerify(result.place);
-        } else {
-          // AI found nothing → clear location, let user search manually
-          console.log("[summary] host: AI found nothing → clear location");
-          setLocationName("");
-          setPlaceName("");
-          setCommunity("");
-          setSubdistrict("");
-          setDistrict("");
-          setProvince("");
-          setLocationConfirmed(false);
-          setVerify(null);
         }
       } else {
+        setLocationSource("ai");
         await runLocationVerify(result.place);
       }
     } else {
-      // No place from AI at all → clear for user to fill
-      if (!isHost) {
+      // No place from AI → clear location (tourist/community_spot mode only)
+      if (!(isHost && hostPostMode === "own_business")) {
+        console.log("[summary] AI found no place → clearing location");
         setLocationName("");
         setPlaceName("");
+        setCommunity("");
+        setSubdistrict("");
+        setDistrict("");
+        setProvince("");
+        setCoords(null);
+        setLocationConfirmed(false);
         setVerify(null);
+        setLocationSource("manual");
       }
     }
 
@@ -227,23 +279,9 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setVerify(res);
     setLocationConfirmed(false);
 
-    // Prefill the fields from the normalized guess (user can still change).
-    const n = res.normalized;
-    if (aiPlaceName) setPlaceName(aiPlaceName);
-    if (n.community) setCommunity(n.community);
-    if (n.subdistrict) setSubdistrict(n.subdistrict);
-    if (n.district) setDistrict(n.district);
-    if (n.province) setProvince(n.province);
-    const label = aiPlaceName || n.community || "";
-    if (label) setLocationName(label);
-
     setGoogleCandidates([]);
     setCoords(null);
     setPendingConfirm(null);
-
-    console.log("[verify] offline status =", res.status,
-      "candidates =", res.communityCandidates.length,
-      "adminValid =", res.adminValid);
 
     // ── Priority 1: use Google Places results from backend (already fetched) ──
     if (backendCandidates.length > 1) {
@@ -253,41 +291,55 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
       return;
     }
     if (backendCandidates.length === 1) {
-      // Single location from backend → show confirmation card
-      console.log("[verify] single backend candidate →", backendCandidates[0].name);
-      setPendingConfirm(backendCandidates[0]);
-      setPendingName(backendCandidates[0].name);
-      setPendingAddress(backendCandidates[0].address);
-      // Pre-fill province/district from Google result
-      if (backendCandidates[0].province) setProvince(backendCandidates[0].province);
-      if (backendCandidates[0].district) setDistrict(backendCandidates[0].district);
-      if (backendCandidates[0].subdistrict) setSubdistrict(backendCandidates[0].subdistrict);
+      const c = backendCandidates[0];
+      console.log("[verify] single backend candidate →", c.name, "province:", c.province, "district:", c.district);
+      setPendingConfirm(c);
+      setPendingName(c.name);
+      setPendingAddress(c.address);
+      if (c.name) {
+        setPlaceName(c.name);
+        setLocationName(c.name);
+      }
+      if (c.province) setProvince(c.province);
+      if (c.district) setDistrict(c.district);
+      if (c.subdistrict) setSubdistrict(c.subdistrict);
+      if (c.latitude != null && c.longitude != null) {
+        setCoords({ lat: c.latitude, lng: c.longitude });
+      }
       return;
     }
     if (backendGps) {
-      // Backend already confirmed single result + filled location → auto-confirm
       const [lat, lng] = backendGps.split(",").map(Number);
-      console.log("[verify] backend GPS confirmed → lat:", lat, "lng:", lng);
-      setCoords({ lat, lng });
-      setLocationConfirmed(true);
-      return;
+      console.log("[verify] backend GPS received → lat:", lat, "lng:", lng);
+      if (!isNaN(lat) && !isNaN(lng)) {
+        setCoords({ lat, lng });
+      }
     }
+
+    // Prefill fields from AI place extraction
+    if (aiPlaceName) setPlaceName(aiPlaceName);
+    if (aiCommunity) setCommunity(aiCommunity);
+    if (loc.subdistrict) setSubdistrict(loc.subdistrict);
+    if (loc.district) setDistrict(loc.district);
+    if (loc.province) setProvince(loc.province);
+    const label = aiPlaceName || aiCommunity || "";
+    if (label) setLocationName(label);
 
     // ── Priority 2: check our local confirmed places store ──
     if (aiPlaceName) {
       const local = await findLocalPlaces({
         name: aiPlaceName,
-        province: n.province,
-        district: n.district,
+        province: loc.province,
+        district: loc.district,
       });
       setLocalPlaceCandidates(local);
       if (local.length === 1 && res.status !== "needs_choice") {
         applyLocalPlace(local[0]);
         return;
       }
-      // ── Priority 3: call Google ourselves (backend had no key / no result) ──
+      // ── Priority 3: call Google ourselves if backend didn't enrich ──
       if (local.length === 0) {
-        void lookupOnGoogle(aiPlaceName, n.community, n.district, n.province);
+        void lookupOnGoogle(aiPlaceName);
       }
     } else {
       setLocalPlaceCandidates([]);
@@ -295,23 +347,35 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
   };
 
   const lookupOnGoogle = async (
-    name: string,
-    comm?: string | null,
-    dist?: string | null,
-    prov?: string | null
+    name: string
   ) => {
-    console.log("[google] lookupOnGoogle name =", name, "comm =", comm, "dist =", dist, "prov =", prov);
+    console.log("[google] lookupOnGoogle name =", name);
     setGoogleLoading(true);
     setPendingConfirm(null);
     setGoogleCandidates([]);
-    const r = await verifyPlaceOnGoogle({ placeName: name, community: comm, district: dist, province: prov });
+    const r = await verifyPlaceOnGoogle({
+      placeName: name,
+      community: community.trim() || undefined,
+      district: district.trim() || undefined,
+      province: province.trim() || undefined,
+    });
     console.log("[google] result configured =", r.configured, "candidates =", r.candidates.length);
     setGoogleLoading(false);
     if (r.candidates.length === 1) {
-      // Exactly one result → show confirmation card (user can edit before confirming).
-      setPendingConfirm(r.candidates[0]);
-      setPendingName(r.candidates[0].name);
-      setPendingAddress(r.candidates[0].address);
+      const c = r.candidates[0];
+      setPendingConfirm(c);
+      setPendingName(c.name);
+      setPendingAddress(c.address);
+      if (c.name) {
+        setPlaceName(c.name);
+        setLocationName(c.name);
+      }
+      if (c.province) setProvince(c.province);
+      if (c.district) setDistrict(c.district);
+      if (c.subdistrict) setSubdistrict(c.subdistrict);
+      if (c.latitude != null && c.longitude != null) {
+        setCoords({ lat: c.latitude, lng: c.longitude });
+      }
     } else {
       setGoogleCandidates(r.candidates);
     }
@@ -350,6 +414,8 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setLocationConfirmed(true);
     setPendingConfirm(null);
     setGoogleCandidates([]);
+    setLocationSource("ai");
+    setVerify(null);
   };
 
   const applyLocalPlace = (p: LocalPlace) => {
@@ -360,6 +426,8 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     if (p.province) setProvince(p.province);
     setLocationName(p.name);
     setLocationConfirmed(true);
+    setLocationSource("ai");
+    setVerify(null);
   };
 
   const selectPlace = (p: PlaceItem) => {
@@ -371,6 +439,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setLocationQuery("");
     setCaptionIdeas([]);
     setLocationConfirmed(true);
+    setLocationSource("manual");
     setVerify(null);
   };
   const clearLocation = () => {
@@ -387,6 +456,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setLocationConfirmed(false);
     setGoogleCandidates([]);
     setPendingConfirm(null);
+    setLocationSource("manual");
   };
 
   const pickVideo = async () => {
@@ -436,6 +506,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
       setVerify(null);
       setGoogleCandidates([]);
       setPendingConfirm(null);
+      setLocationSource("otop");
     } else {
       setLocationName("");
       setPlaceName("");
@@ -837,14 +908,14 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
                     activeOpacity={0.85}
                     className="flex-1 bg-[#2D6A4F] rounded-xl py-2.5 items-center mr-1.5"
                   >
-                    <Text className="text-white font-bold text-[12px]">✓ ยืนยันสถานที่นี้</Text>
+                    <Text className="text-white font-bold text-[12px]">✓ ถูกต้อง (ยืนยัน)</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    onPress={() => { setPendingConfirm(null); lookupOnGoogle(placeName, community, district, province); }}
+                    onPress={clearLocation}
                     activeOpacity={0.8}
-                    className="flex-1 bg-gray-100 rounded-xl py-2.5 items-center"
+                    className="flex-1 bg-gray-100 border border-gray-200 rounded-xl py-2.5 items-center"
                   >
-                    <Text className="text-gray-600 font-bold text-[12px]">ค้นหาใหม่</Text>
+                    <Text className="text-gray-600 font-bold text-[12px]">✕ ไม่ถูกต้อง (ค้นหาเอง)</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -886,7 +957,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
             {/* Manual Google search trigger (if auto lookup found nothing) */}
             {placeName && !googleLoading && googleCandidates.length === 0 && !pendingConfirm && (
               <TouchableOpacity
-                onPress={() => lookupOnGoogle(placeName, community, district, province)}
+                onPress={() => lookupOnGoogle(placeName)}
                 activeOpacity={0.8}
                 className="flex-row items-center justify-center bg-blue-100 rounded-xl py-2.5 mb-1 mt-1"
               >
@@ -898,7 +969,10 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
             {/* Confirm the AI's reconciled location as-is, or search below */}
             <View className="flex-row mt-2">
               <TouchableOpacity
-                onPress={() => setLocationConfirmed(true)}
+                onPress={() => {
+                  setLocationConfirmed(true);
+                  setVerify(null);
+                }}
                 disabled={!locationName}
                 activeOpacity={0.85}
                 className={`flex-1 items-center justify-center rounded-xl py-2.5 mr-2 ${locationName ? "bg-[#2D6A4F]" : "bg-gray-200"}`}
@@ -918,38 +992,84 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
           </View>
         )}
 
+        {/* Host mode selector: 🏠 own business vs 📍 community spot */}
+        {isHost && (
+          <View className="mb-4">
+            <Text className="text-gray-700 font-bold text-[13px] mb-2">📍 โพสต์นี้เป็นสถานที่ไหน?</Text>
+            <View className="flex-row gap-x-2">
+              <TouchableOpacity
+                onPress={applyHostOwnBusiness}
+                activeOpacity={0.8}
+                className={`flex-1 py-3 rounded-xl border items-center ${
+                  hostPostMode === "own_business"
+                    ? "bg-[#2D6A4F] border-[#2D6A4F]"
+                    : "bg-white border-gray-300"
+                }`}
+              >
+                <Text className={`text-[13px] font-bold ${
+                  hostPostMode === "own_business" ? "text-white" : "text-gray-600"
+                }`}>🏠 สถานที่ของตัวเอง</Text>
+                {hostPostMode === "own_business" && (
+                  <Text className="text-white/80 text-[10px] mt-0.5">🔒 ตำแหน่งล็อกจากทะเบียน</Text>
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={applyHostCommunitySpot}
+                activeOpacity={0.8}
+                className={`flex-1 py-3 rounded-xl border items-center ${
+                  hostPostMode === "community_spot"
+                    ? "bg-blue-600 border-blue-600"
+                    : "bg-white border-gray-300"
+                }`}
+              >
+                <Text className={`text-[13px] font-bold ${
+                  hostPostMode === "community_spot" ? "text-white" : "text-gray-600"
+                }`}>📍 ภายในหมู่บ้าน/ตำบล</Text>
+                {hostPostMode === "community_spot" && (
+                  <Text className="text-white/80 text-[10px] mt-0.5">ค้นหาจุดในตำบลตนเอง</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
         {/* 1) Location — searchable OTOP place picker */}
         <View className="flex-row items-center mb-1.5">
           <MapPinIcon size={14} color="#EF4444" />
           <Text className="text-gray-700 font-bold text-[13px] ml-1">สถานที่ / ชุมชน</Text>
-          {isHost && (
+          {isHost && locationSource === "otop" && (
             <View className="ml-2 bg-emerald-100 rounded-full px-2 py-0.5">
               <Text className="text-[#2D6A4F] text-[10px] font-bold">ชุมชน OTOP ของคุณ</Text>
             </View>
           )}
+          {locationSource === "ai" && locationConfirmed && (
+            <View className="ml-2 bg-blue-100 rounded-full px-2 py-0.5">
+              <Text className="text-blue-700 text-[10px] font-bold">สถานที่จาก AI</Text>
+            </View>
+          )}
         </View>
 
-        {/* Host: show OTOP location chip (pre-filled, editable via clear) */}
-        {isHost && locationName && locationConfirmed && !verify ? (
-          <View className="flex-row items-center bg-emerald-50 border border-emerald-200 rounded-xl px-3.5 py-3 mb-4">
-            <MapPinIcon size={16} color="#2D6A4F" />
-            <View className="flex-1 ml-2">
-              <Text className="text-[#1B4332] font-bold text-[14px]">{locationName}</Text>
-              <Text className="text-gray-500 text-[12px]">
-                {[subdistrict && `ต.${subdistrict}`, district && `อ.${district}`, province && `จ.${province}`]
-                  .filter(Boolean)
-                  .join(" • ")}
-              </Text>
-              <Text className="text-emerald-600 text-[10px] mt-0.5">📋 จากทะเบียน OTOP ของคุณ • แก้ไขได้ด้านล่าง</Text>
+        {/* Host own_business: LOCKED card 🔒 — no X button, read-only */}
+        {isHost && hostPostMode === "own_business" && locationSource === "otop" && locationName && locationConfirmed && !verify ? (
+          <View className="bg-emerald-50 border-2 border-emerald-300 rounded-xl px-3.5 py-3 mb-4">
+            <View className="flex-row items-center mb-1">
+              <MapPinIcon size={16} color="#2D6A4F" />
+              <Text className="text-[#1B4332] font-bold text-[14px] flex-1 ml-2">{locationName}</Text>
+              <View className="bg-emerald-200 rounded-full px-2 py-0.5">
+                <Text className="text-[#1B4332] text-[10px] font-bold">🔒 ล็อก</Text>
+              </View>
             </View>
-            <TouchableOpacity onPress={clearLocation} className="p-1">
-              <XMarkIcon size={18} color="#6B7280" />
-            </TouchableOpacity>
+            <Text className="text-gray-500 text-[12px] ml-6">
+              {[subdistrict && `ต.${subdistrict}`, district && `อ.${district}`, province && `จ.${province}`]
+                .filter(Boolean)
+                .join(" • ")}
+            </Text>
+            <Text className="text-emerald-600 text-[10px] mt-1 ml-6">📋 ตำแหน่งนี้ดึงจากทะเบียน OTOP ของคุณ — แก้ไขได้ในหน้าโปรไฟล์</Text>
           </View>
         ) : verify && !locationConfirmed ? (
           // While verifying, the verification card above handles the choice.
           <Text className="text-gray-400 text-[12px] mb-4 px-1">
-            ตรวจสอบสถานที่จาก AI ด้านบน หรือเลือก "ค้นหา/แก้เอง"
+            {'ตรวจสอบสถานที่จาก AI ด้านบน หรือเลือก "ค้นหา/แก้เอง"'}
           </Text>
         ) : locationName ? (
           <View className="flex-row items-center bg-emerald-50 border border-emerald-200 rounded-xl px-3.5 py-3 mb-4">
@@ -961,6 +1081,9 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
                   .filter(Boolean)
                   .join(" • ")}
               </Text>
+              {locationSource === "ai" && (
+                <Text className="text-blue-600 text-[10px] mt-0.5">✨ จากการสรุปของ AI & Google Maps • แตะกากบาทเพื่อเปลี่ยน</Text>
+              )}
             </View>
             <TouchableOpacity onPress={clearLocation} className="p-1">
               <XMarkIcon size={18} color="#6B7280" />
@@ -992,8 +1115,17 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
                 ))}
               </View>
             )}
-            {locationQuery.trim().length >= 1 && placeResults.length === 0 && (
-              <Text className="text-gray-400 text-[12px] mb-4 px-1">ไม่พบชุมชนที่ค้นหา</Text>
+            {locationQuery.trim().length >= 1 && (
+              <TouchableOpacity
+                onPress={() => lookupOnGoogle(locationQuery.trim())}
+                activeOpacity={0.8}
+                className="flex-row items-center justify-center bg-blue-50 border border-blue-200 rounded-xl py-2.5 mb-3"
+              >
+                <MapPinIcon size={16} color="#2563EB" />
+                <Text className="text-blue-700 font-bold text-[13px] ml-1.5">
+                  {`ค้นหา "${locationQuery.trim()}" ใน Google Maps`}
+                </Text>
+              </TouchableOpacity>
             )}
           </>
         )}

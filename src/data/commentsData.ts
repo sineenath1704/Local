@@ -67,6 +67,7 @@ export interface AiPlaceData {
     subdistrict?: string | null;
     gps?: string | null;
   };
+  atmosphere?: string | null;
   category: string[];
   activities: string[];
   price_info: { weekday: string | null; weekend: string | null; currency?: string };

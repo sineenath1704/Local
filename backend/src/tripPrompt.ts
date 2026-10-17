@@ -146,9 +146,45 @@ export interface FolderContext {
   places: string[];
 }
 
-export function buildChatSystemPrompt(folder?: FolderContext): string {
-  if (!folder || folder.places.length === 0) return CHAT_SYSTEM_PROMPT;
-  return `${CHAT_SYSTEM_PROMPT}
+/** บริบทของสถานที่เฉพาะ (ที่ดึงมาจาก Google Maps / community_places / host business profile) */
+export interface PlaceContext {
+  placeName: string;
+  address?: string;
+  phone?: string;
+  openingHours?: string;
+  priceInfo?: string;
+  googleMapsUrl?: string;
+  province?: string;
+  district?: string;
+  subdistrict?: string;
+  village?: string;
+  rating?: number;
+  userRatingsTotal?: number;
+}
+
+export function buildChatSystemPrompt(folder?: FolderContext, place?: PlaceContext): string {
+  let prompt = CHAT_SYSTEM_PROMPT;
+
+  if (place && place.placeName) {
+    prompt += `
+
+[ข้อมูลสถานที่ยืนยันจากชุมชนและ Google Maps (Verified Ground Truth - ใช้ตอบคำถามได้ทันที)]:
+ชื่อสถานที่: ${place.placeName}
+ที่ตั้ง: ${[place.village, place.subdistrict && `ต.${place.subdistrict}`, place.district && `อ.${place.district}`, place.province && `จ.${place.province}`].filter(Boolean).join(" ") || place.address || "ไม่ระบุ"}
+${place.address ? `ที่อยู่เต็ม: ${place.address}` : ""}
+${place.phone ? `เบอร์โทรศัพท์ติดต่อ: ${place.phone}` : ""}
+${place.openingHours ? `เวลาเปิด-ปิดทำการ: ${place.openingHours}` : ""}
+${place.priceInfo ? `อัตราค่าบริการ/ราคา: ${place.priceInfo}` : ""}
+${place.googleMapsUrl ? `ลิงก์ Google Maps: ${place.googleMapsUrl}` : ""}
+${place.rating ? `คะแนนรีวิว: ${place.rating} ดาว (${place.userRatingsTotal || 0} รีวิว)` : ""}
+
+* คำสั่งสำคัญ: เมื่อผู้ใช้ถามเกี่ยวกับสถานที่นี้ เช่น เวลาเปิดปิด, ค่าบริการ/ราคา, วันหยุดประจำร้าน หรือวิธีการเดินทาง:
+- ให้ยึดข้อมูลที่ยืนยันแล้วข้างต้นเป็นข้อเท็จจริงหลัก และตอบได้อย่างชัดเจนมั่นใจ ห้ามบอกว่าไม่มีข้อมูล
+- หากข้อมูลมีระบุแยกวันธรรมดา วันหยุดสุดสัปดาห์/เทศกาล หรือวันหยุดประจำร้าน ให้แยกตอบให้นักท่องเที่ยวทราบอย่างชัดเจน (เช่น เวลาและราคาของวันธรรมดา vs วันหยุด และวันที่ร้านไม่เปิดบริการ) *`;
+  }
+
+  if (folder && folder.places.length > 0) {
+    prompt += `
 
 [Context จากระบบ — ใช้เป็นแหล่งข้อมูลหลัก]
 ผู้ใช้กำลังคุยจากโฟลเดอร์คลิปที่บันทึกไว้ชื่อ "${folder.folderName}"
@@ -156,6 +192,9 @@ export function buildChatSystemPrompt(folder?: FolderContext): string {
 ${folder.places.map((p, i) => `${i + 1}. ${p}`).join("\n")}
 
 เมื่อแนะนำหรือวางแผน ให้ยึดสถานที่เหล่านี้เป็นหลัก และอย่าแต่งข้อมูลราคา/เบอร์/ที่อยู่ที่ไม่มีอยู่จริง`;
+  }
+
+  return prompt;
 }
 
 // ---------- 2) TRIP PLANNER ----------

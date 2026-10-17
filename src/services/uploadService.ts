@@ -141,5 +141,43 @@ export async function uploadVideo(input: NewVideoInput): Promise<UploadResult> {
   }
   console.log("[upload] 5/insert OK id =", row.id);
 
+  // 6) Also store structured AI analysis in video_ai_analyses table (non-blocking)
+  if (hasSummary && input.aiSummary) {
+    const s = input.aiSummary;
+    const p = s.place;
+    supabase
+      .from("video_ai_analyses")
+      .insert({
+        post_id: row.id,
+        place_name: p?.place_name ?? input.placeName ?? null,
+        community: p?.community ?? input.community ?? null,
+        province: p?.location?.province ?? input.province ?? null,
+        district: p?.location?.district ?? input.district ?? null,
+        subdistrict: p?.location?.subdistrict ?? null,
+        latitude: input.latitude ?? null,
+        longitude: input.longitude ?? null,
+        atmosphere: p?.atmosphere ?? null,
+        category: p?.category ?? [],
+        activities: p?.activities ?? [],
+        highlights: s.highlights ?? p?.highlights ?? [],
+        otop_products: p?.otop_products ?? [],
+        tags: s.tags ?? p?.tags ?? [],
+        price_info: p?.price_info ?? null,
+        contact: p?.contact ?? null,
+        opening_hours: p?.opening_hours ?? null,
+        confidence: p?.confidence ?? null,
+        raw_analysis: s,
+        display_summary: s.text,
+        location_status: input.latitude ? "verified" : "pending",
+      })
+      .then(({ error: analysisErr }) => {
+        if (analysisErr) {
+          console.warn("[upload] save to video_ai_analyses warning:", analysisErr.message);
+        } else {
+          console.log("[upload] saved to video_ai_analyses OK");
+        }
+      });
+  }
+
   return { videoId: row.id as string, videoUrl };
 }

@@ -103,13 +103,13 @@ export function verifyLocationOffline(input: AiLocationInput): VerifyResult {
   province = canonicalProvince(province) ?? province;
   if (adminValid) district = canonicalDistrict(district) ?? district;
 
-  // 3) Match a known OTOP community (by community name, then place name),
-  //    scoped to the province/district when we have them.
-  const matchKey = community || placeName;
+  // 3) Match a known OTOP community ONLY when an explicit community name is provided
+  // (Do NOT try to match arbitrary place names like cafes or attractions to OTOP villages).
+  const matchKey = community || (placeName && /^(ชุมชน|หมู่บ้าน)/.test(placeName) ? placeName : null);
   let candidates: PlaceItem[] = [];
   if (matchKey) {
     candidates = ALL_PLACES.filter((p) => {
-      const nameHit = nameMatches(p.name, matchKey) || (community ? nameMatches(p.name, community) : false);
+      const nameHit = nameMatches(p.name, matchKey);
       if (!nameHit) return false;
       // If we have a valid province, keep only candidates in it.
       if (province && isValidProvince(province)) {
@@ -121,15 +121,15 @@ export function verifyLocationOffline(input: AiLocationInput): VerifyResult {
 
   const normalized: VerifiedLocation = {
     placeName,
-    community: community ?? (candidates[0]?.name ?? null),
-    subdistrict: subdistrict ?? (candidates[0]?.subdistrict ?? null),
+    community: community ?? null,
+    subdistrict,
     district,
     province,
   };
 
   // Decide status.
   let status: VerifyStatus;
-  if (candidates.length === 1 && adminValid) {
+  if (candidates.length === 1 && adminValid && community) {
     // One confident community + admin consistent → fill from it.
     const c = candidates[0];
     normalized.community = c.name;

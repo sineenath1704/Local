@@ -1,5 +1,5 @@
 import { Router, Request, Response } from "express";
-import { generateSummary } from "../aiClient";
+import { generateSummary, generateNarration } from "../aiClient";
 import { getSummary, saveSummary, hasSummary } from "../summaryStore";
 import { VideoAnalysisInput } from "../prompt";
 import { enrichWithGooglePlaces } from "./places";
@@ -60,8 +60,13 @@ router.post("/preview", async (req: Request, res: Response) => {
       : rawSummary;
 
     // Step 3: Google Places fills province/district/coords.
-    const summary = await enrichWithGooglePlaces(summaryWithCtx).catch(() => rawSummary);
-    return res.json(summary);
+    const enriched = await enrichWithGooglePlaces(summaryWithCtx).catch(() => rawSummary);
+
+    // Step 4: Stage 2 Storytelling Narration
+    const narrationText = await generateNarration(enriched).catch(() => enriched.text);
+    const finalSummary = { ...enriched, text: narrationText };
+
+    return res.json(finalSummary);
   } catch (err: any) {
     const message =
       err?.name === "AbortError" ? "หมดเวลาเชื่อมต่อ AI endpoint" : err?.message || "สร้างสรุปไม่สำเร็จ";
@@ -93,9 +98,12 @@ router.get("/:postId", async (req: Request, res: Response) => {
 router.post("/:postId/generate", async (req: Request, res: Response) => {
   const { postId } = req.params;
   try {
-    const summary = await generateSummary(readInput(req.body));
-    await saveSummary(postId, summary);
-    return res.status(201).json(summary);
+    const rawSummary = await generateSummary(readInput(req.body));
+    const enriched = await enrichWithGooglePlaces(rawSummary).catch(() => rawSummary);
+    const narrationText = await generateNarration(enriched).catch(() => enriched.text);
+    const finalSummary = { ...enriched, text: narrationText };
+    await saveSummary(postId, finalSummary);
+    return res.status(201).json(finalSummary);
   } catch (err: any) {
     const message =
       err?.name === "AbortError" ? "หมดเวลาเชื่อมต่อ AI endpoint" : err?.message || "สร้างสรุปด้วย AI ไม่สำเร็จ";

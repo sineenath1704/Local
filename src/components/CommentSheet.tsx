@@ -296,193 +296,38 @@ function AiSummaryPanel({
         </View>
       </View>
 
-      {/* Main summary */}
-      <View className="bg-amber-50 border border-amber-200/70 rounded-2xl p-4">
-        <Text className="text-gray-800 text-[13.5px] leading-6">{summary.text}</Text>
+      {/* Main summary — 2-paragraph friendly narrative */}
+      <View className="bg-amber-50/90 border border-amber-200/80 rounded-2xl p-4 shadow-sm">
+        <Text className="text-gray-800 text-[14px] leading-6 font-normal">
+          {summary.text}
+        </Text>
       </View>
+
+      {/* Google Maps button — opens map if GPS link exists */}
+      {summary.place?.location?.gps && (
+        <TouchableOpacity
+          onPress={() => Linking.openURL(summary.place!.location.gps!)}
+          activeOpacity={0.8}
+          className="mt-3 bg-blue-50 border border-blue-200 rounded-2xl py-3 px-4 flex-row items-center justify-center shadow-sm"
+        >
+          <Text className="text-[14px]">🗺️</Text>
+          <Text className="text-blue-700 font-bold text-[13.5px] ml-2">ดูพิกัดบน Google Maps</Text>
+        </TouchableOpacity>
+      )}
 
       {/* Continue the conversation about this clip in the AI chat */}
       {onContinueInChat && (
         <TouchableOpacity
           onPress={onContinueInChat}
           activeOpacity={0.85}
-          className="mt-3 bg-violet-600 rounded-2xl py-3.5 flex-row items-center justify-center"
+          className="mt-3 bg-violet-600 rounded-2xl py-3.5 flex-row items-center justify-center shadow-sm"
         >
           <ChatBubbleLeftRightIcon size={17} color="#FFFFFF" />
           <Text className="text-white font-bold text-[14px] ml-2">คุยต่อกับ AI เรื่องนี้</Text>
         </TouchableOpacity>
       )}
 
-      {/* Structured place info (Video Content Analyzer) */}
-      {summary.place && (
-        <View className="mt-4 bg-white border border-gray-200 rounded-2xl p-4">
-          {summary.place.place_name && (
-            <Text className="text-gray-900 font-black text-[15px] mb-0.5">
-              📍 {summary.place.place_name}
-            </Text>
-          )}
-          {(summary.place.location.district || summary.place.location.province) && (
-            <Text className="text-gray-500 text-[12px] mb-1.5">
-              {[summary.place.location.subdistrict, summary.place.location.district, summary.place.location.province]
-                .filter(Boolean)
-                .join(" • ")}
-            </Text>
-          )}
-
-          {/* Google Maps link — opens map when tapped */}
-          {summary.place.location.gps && (
-            <TouchableOpacity
-              onPress={() => Linking.openURL(summary.place!.location.gps!)}
-              activeOpacity={0.8}
-              className="flex-row items-center bg-blue-50 border border-blue-200 rounded-xl px-3 py-2 mb-2 self-start"
-            >
-              <Text className="text-[12px]">🗺️</Text>
-              <Text className="text-blue-700 text-[12px] font-semibold ml-1.5">ดูบน Google Maps</Text>
-            </TouchableOpacity>
-          )}
-
-          {!!summary.place.category?.length && (
-            <View className="flex-row flex-wrap mb-1">
-              {summary.place.category.map((c, i) => (
-                <View key={i} className="bg-emerald-50 border border-emerald-200 rounded-full px-2.5 py-0.5 mr-1.5 mb-1.5">
-                  <Text className="text-[#2D6A4F] text-[11px] font-semibold">{c}</Text>
-                </View>
-              ))}
-            </View>
-          )}
-
-          {/* Price */}
-          {(summary.place.price_info?.weekday || summary.place.price_info?.weekend) && (
-            <View className="flex-row items-start mt-1.5">
-              <Text className="text-gray-500 text-[12px] w-16">ราคา</Text>
-              <Text className="text-gray-800 text-[12.5px] flex-1 font-medium">
-                {[
-                  summary.place.price_info.weekday && `วันธรรมดา ${summary.place.price_info.weekday}`,
-                  summary.place.price_info.weekend && `วันหยุด ${summary.place.price_info.weekend}`,
-                ]
-                  .filter(Boolean)
-                  .join(" • ")}
-              </Text>
-            </View>
-          )}
-
-          {/* Opening hours */}
-          {summary.place.opening_hours && (
-            <View className="flex-row items-start mt-1.5">
-              <Text className="text-gray-500 text-[12px] w-16">เวลา</Text>
-              <Text className="text-gray-800 text-[12.5px] flex-1">{summary.place.opening_hours}</Text>
-            </View>
-          )}
-
-          {/* Contact */}
-          {(summary.place.contact?.phone || summary.place.contact?.facebook || summary.place.contact?.line) && (
-            <View className="flex-row items-start mt-1.5">
-              <Text className="text-gray-500 text-[12px] w-16">ติดต่อ</Text>
-              <Text className="text-gray-800 text-[12.5px] flex-1">
-                {[summary.place.contact.phone, summary.place.contact.facebook, summary.place.contact.line]
-                  .filter(Boolean)
-                  .join(" • ")}
-              </Text>
-            </View>
-          )}
-
-          {/* Activities */}
-          {!!summary.place.activities?.length && (
-            <View className="flex-row items-start mt-1.5">
-              <Text className="text-gray-500 text-[12px] w-16">กิจกรรม</Text>
-              <Text className="text-gray-800 text-[12.5px] flex-1">
-                {summary.place.activities.join(", ")}
-              </Text>
-            </View>
-          )}
-
-          {/* OTOP products */}
-          {!!summary.place.otop_products?.length && (
-            <View className="flex-row items-start mt-1.5">
-              <Text className="text-gray-500 text-[12px] w-16">OTOP</Text>
-              <Text className="text-gray-800 text-[12.5px] flex-1">
-                {summary.place.otop_products.join(", ")}
-              </Text>
-            </View>
-          )}
-
-          {/* Confidence warning */}
-          {summary.place.confidence?.warning && (
-            <Text className="text-amber-600 text-[11px] mt-2.5">
-              ⚠️ {summary.place.confidence.warning}
-            </Text>
-          )}
-        </View>
-      )}
-
-      {/* Highlights */}
-      {!!summary.highlights?.length && (
-        <View className="mt-4">
-          <Text className="text-gray-900 font-bold text-[13px] mb-2">✨ จุดเด่น</Text>
-          {summary.highlights.map((h, i) => (
-            <View key={i} className="flex-row mb-1.5">
-              <Text className="text-amber-600 mr-2">•</Text>
-              <Text className="text-gray-700 text-[12.5px] leading-5 flex-1">{h}</Text>
-            </View>
-          ))}
-        </View>
-      )}
-
-      {/* Tags */}
-      {!!summary.tags?.length && (
-        <View className="mt-3 flex-row flex-wrap">
-          {summary.tags.map((t, i) => (
-            <View key={i} className="bg-violet-50 rounded-full px-2.5 py-1 mr-1.5 mb-1.5">
-              <Text className="text-violet-700 text-[11px] font-semibold">{t}</Text>
-            </View>
-          ))}
-        </View>
-      )}
-
-      {/* Transcript highlights (เสียง → Text) */}
-      {!!summary.transcriptHighlights?.length && (
-        <View className="mt-4">
-          <Text className="text-gray-900 font-bold text-[13px] mb-2">
-            🎙️ ประเด็นจากเสียงพูด
-          </Text>
-          {summary.transcriptHighlights.map((h, i) => (
-            <View key={i} className="flex-row mb-1.5">
-              <Text className="text-amber-600 mr-2">•</Text>
-              <Text className="text-gray-700 text-[12.5px] leading-5 flex-1">{h}</Text>
-            </View>
-          ))}
-        </View>
-      )}
-
-      {/* Visual tags (ภาพ → Visual info) */}
-      {!!summary.visualTags?.length && (
-        <View className="mt-4">
-          <Text className="text-gray-900 font-bold text-[13px] mb-2">👀 สิ่งที่เห็นในวิดีโอ</Text>
-          <View className="flex-row flex-wrap">
-            {summary.visualTags.map((t, i) => (
-              <View key={i} className="bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1 mr-2 mb-2">
-                <Text className="text-[#2D6A4F] text-[11px] font-semibold">{t}</Text>
-              </View>
-            ))}
-          </View>
-        </View>
-      )}
-
-      {/* On-screen text */}
-      {!!summary.onScreenText?.length && (
-        <View className="mt-2">
-          <Text className="text-gray-900 font-bold text-[13px] mb-2">🔤 ข้อความบนหน้าจอ</Text>
-          <View className="flex-row flex-wrap">
-            {summary.onScreenText.map((t, i) => (
-              <View key={i} className="bg-gray-100 rounded-lg px-2.5 py-1 mr-2 mb-2">
-                <Text className="text-gray-600 text-[11px]">“{t}”</Text>
-              </View>
-            ))}
-          </View>
-        </View>
-      )}
-
-      <Text className="text-gray-300 text-[10px] text-center mt-5">
+      <Text className="text-gray-400 text-[10.5px] text-center mt-5">
         สรุปนี้สร้างโดย AI อาจมีความคลาดเคลื่อนได้
       </Text>
     </ScrollView>

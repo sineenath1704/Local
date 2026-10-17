@@ -64,9 +64,9 @@ const MOCK_COMMUNITIES: Record<string, any> = {
     amphur: "แม่ลาน้อย",
     tambol: "ห้วยห้อม",
     village: "บ้านห้วยห้อม",
-    otopNawatwithi: "ชุมชนท่องเที่ยว OTOP นวัตวิถี บ้านห้วยห้อม",
-    otopForTourism: "กาแฟอาราบิกาอินทรีย์ ผ้าทอขนแกะ",
-    cbtVillage: "หมู่บ้านท่องเที่ยวโดยชุมชน",
+    otopNawatwithi: "ชุมชนบ้านห้วยห้อม",
+    otopForTourism: "กาแฟอาราบิกาอินทรีย์ ผ้าทอขนแกะ โฮมสเตย์",
+    cbtVillage: "หมู่บ้านท่องเที่ยวโดยชุมชนบ้านห้วยห้อม",
     raw: { note: "mock — replace with real OTOP_API_TOKEN" },
   },
   DEMO002: {
