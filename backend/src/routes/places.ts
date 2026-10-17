@@ -112,10 +112,34 @@ export async function enrichWithGooglePlaces(
   const place = summary.place;
   if (!place) return summary;
 
-  // Build search query from what M3 found (place name, community, admin hints).
+  // Build search query — priority: place_name > community > transcript keywords.
   const nameParts = [place.place_name, (place as any).community]
     .filter((x): x is string => typeof x === "string" && x.trim() !== "");
-  if (nameParts.length === 0) return summary; // nothing to search
+
+  // Fallback: extract location keywords from transcript when M3 didn't find place_name.
+  if (nameParts.length === 0) {
+    const transcript: string = (summary as any)._transcript ?? "";
+    const onScreen: string[] = (summary as any)._onScreenText ?? [];
+    // Look for community/village name patterns in Thai text
+    const patterns = [
+      /บ้าน[\u0E00-\u0E7F]{2,20}/g,   // บ้าน...
+      /ชุมชน[\u0E00-\u0E7F]{2,20}/g,  // ชุมชน...
+      /หมู่บ้าน[\u0E00-\u0E7F]{2,20}/g, // หมู่บ้าน...
+    ];
+    const allText = transcript + " " + onScreen.join(" ");
+    for (const re of patterns) {
+      const found = allText.match(re);
+      if (found) { nameParts.push(...found.slice(0, 2)); break; }
+    }
+    // If still nothing, use first 3 nouns from transcript as a last resort.
+    if (nameParts.length === 0 && transcript.length > 5) {
+      // Take up to 10 words of Thai from the transcript as the query seed.
+      const thaiWords = transcript.match(/[\u0E00-\u0E7F]+/g) ?? [];
+      if (thaiWords.length > 0) nameParts.push(thaiWords.slice(0, 6).join(" "));
+    }
+  }
+
+  if (nameParts.length === 0) return summary; // still nothing
 
   const adminHint = [place.location?.district, place.location?.province]
     .filter((x): x is string => typeof x === "string" && x.trim() !== "")
@@ -160,12 +184,14 @@ export async function enrichWithGooglePlaces(
     console.log("[places] multiple matches —", pool.length, "candidates stored for user choice");
   }
 
+  // Clean up internal fields before returning.
+  const { _transcript, _onScreenText, ...cleanSummary } = summary as any;
+  void _transcript; void _onScreenText;
   return {
-    ...summary,
+    ...cleanSummary,
     place: {
       ...place,
       location: enrichedLocation,
-      // Attach candidates + coordinates as extra fields the app can read.
       ...(enrichedLatLng ? { gps: `${enrichedLatLng.lat},${enrichedLatLng.lng}` } : {}),
       ...(pool.length > 1 ? { google_candidates: pool } : {}),
     } as PlaceData & { gps?: string; google_candidates?: PlaceCandidate[] },

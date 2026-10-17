@@ -31,32 +31,36 @@ function readInput(body: any): VideoAnalysisInput {
 router.post("/preview", async (req: Request, res: Response) => {
   try {
     const input = readInput(req.body);
+    let transcriptionResult: Awaited<ReturnType<typeof transcribeVideo>> | null = null;
 
     // Step 1: If we have a video URL, transcribe audio + describe visuals first.
-    // Gemini handles this in one call without needing ffmpeg.
     if (input.videoUrl) {
       // eslint-disable-next-line no-console
       console.log("[preview] transcribing video →", input.videoUrl.slice(-40));
       const tr = await transcribeVideo(input.videoUrl).catch(() => null);
+      transcriptionResult = tr;
       if (tr) {
         // eslint-disable-next-line no-console
         console.log("[preview] transcript hasAudio =", tr.hasAudio,
           "len =", tr.transcript?.length ?? 0,
           "onScreen =", tr.onScreenText.length);
-        // Merge transcription into the input (transcript = primary, visual = secondary).
         if (tr.transcript) input.transcript = tr.transcript;
         if (tr.visualDescription) input.visualDescription = tr.visualDescription;
         if (tr.onScreenText.length > 0) input.onScreenText = tr.onScreenText;
-        // Set audioType based on what Gemini found.
         input.audioType = tr.hasAudio ? "speech" : "none";
       }
     }
 
-    // Step 2: M3 summarizes from transcript (primary) + visual (secondary).
+    // Step 2: M3 summarizes.
     const rawSummary = await generateSummary(input);
 
+    // Pass transcript to enricher for a better Google search query.
+    const summaryWithCtx = transcriptionResult?.transcript
+      ? { ...rawSummary, _transcript: transcriptionResult.transcript, _onScreenText: transcriptionResult.onScreenText }
+      : rawSummary;
+
     // Step 3: Google Places fills province/district/coords.
-    const summary = await enrichWithGooglePlaces(rawSummary).catch(() => rawSummary);
+    const summary = await enrichWithGooglePlaces(summaryWithCtx).catch(() => rawSummary);
     return res.json(summary);
   } catch (err: any) {
     const message =
