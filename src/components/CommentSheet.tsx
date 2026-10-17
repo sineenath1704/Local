@@ -7,6 +7,7 @@ import {
   TouchableWithoutFeedback,
   Modal,
   TextInput,
+  Linking,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
@@ -321,11 +322,23 @@ function AiSummaryPanel({
             </Text>
           )}
           {(summary.place.location.district || summary.place.location.province) && (
-            <Text className="text-gray-500 text-[12px] mb-2">
+            <Text className="text-gray-500 text-[12px] mb-1.5">
               {[summary.place.location.subdistrict, summary.place.location.district, summary.place.location.province]
                 .filter(Boolean)
                 .join(" • ")}
             </Text>
+          )}
+
+          {/* Google Maps link — opens map when tapped */}
+          {summary.place.location.gps && (
+            <TouchableOpacity
+              onPress={() => Linking.openURL(summary.place!.location.gps!)}
+              activeOpacity={0.8}
+              className="flex-row items-center bg-blue-50 border border-blue-200 rounded-xl px-3 py-2 mb-2 self-start"
+            >
+              <Text className="text-[12px]">🗺️</Text>
+              <Text className="text-blue-700 text-[12px] font-semibold ml-1.5">ดูบน Google Maps</Text>
+            </TouchableOpacity>
           )}
 
           {!!summary.place.category?.length && (

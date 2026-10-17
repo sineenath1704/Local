@@ -167,19 +167,30 @@ export async function enrichWithGooglePlaces(
   // Single unambiguous result → auto-fill missing fields.
   const enrichedLocation: PlaceData["location"] = { ...place.location };
   let enrichedLatLng: { lat: number; lng: number } | undefined;
+  let googlePlaceName: string | null = null;
+  let googleCommunity: string | null = null;
+  let googleMapsLink: string | null = null;
 
   if (pool.length === 1) {
     const c = pool[0];
+    // Fill admin fields that were missing.
     if (!enrichedLocation.province && c.province) enrichedLocation.province = c.province;
     if (!enrichedLocation.district && c.district) enrichedLocation.district = c.district;
     if (!enrichedLocation.subdistrict && c.subdistrict) enrichedLocation.subdistrict = c.subdistrict;
+    // Use Google's verified name (more accurate than M3's guess).
+    if (c.name) googlePlaceName = c.name;
+    // Subdistrict / tambol can serve as community context.
+    if (c.subdistrict) googleCommunity = c.subdistrict;
     if (c.latitude != null && c.longitude != null) {
       enrichedLatLng = { lat: c.latitude, lng: c.longitude };
+      // Google Maps link that opens the pin on the map.
+      googleMapsLink = `https://www.google.com/maps?q=${c.latitude},${c.longitude}`;
+    } else if (c.placeId) {
+      googleMapsLink = `https://www.google.com/maps/place/?q=place_id:${c.placeId}`;
     }
     // eslint-disable-next-line no-console
-    console.log("[places] single match — enriched:", c.name, c.address);
+    console.log("[places] single match →", c.name, c.address, "link:", googleMapsLink);
   } else {
-    // Multiple candidates — store for the app to show a picker (not auto-picked).
     // eslint-disable-next-line no-console
     console.log("[places] multiple matches —", pool.length, "candidates stored for user choice");
   }
@@ -191,10 +202,17 @@ export async function enrichWithGooglePlaces(
     ...cleanSummary,
     place: {
       ...place,
-      location: enrichedLocation,
-      ...(enrichedLatLng ? { gps: `${enrichedLatLng.lat},${enrichedLatLng.lng}` } : {}),
+      // Override place_name with Google's verified name when available.
+      place_name: googlePlaceName ?? place.place_name,
+      // Add community from Google subdistrict if M3 didn't find one.
+      community: (place as any).community || googleCommunity || null,
+      location: {
+        ...enrichedLocation,
+        // Add Google Maps link as gps field (clickable in the app).
+        gps: googleMapsLink ?? enrichedLocation.gps ?? null,
+      },
       ...(pool.length > 1 ? { google_candidates: pool } : {}),
-    } as PlaceData & { gps?: string; google_candidates?: PlaceCandidate[] },
+    } as PlaceData & { community?: string | null; google_candidates?: PlaceCandidate[] },
   };
 }
 
