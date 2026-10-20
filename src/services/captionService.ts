@@ -1,4 +1,5 @@
 import { API_BASE_URL, API_TIMEOUT_MS } from "./apiConfig";
+import { aiFetch, AiError, toastAiError } from "./aiHttp";
 
 /**
  * Caption helper + pre-upload AI summary.
@@ -71,55 +72,73 @@ export interface CaptionRequest {
 
 /**
  * Generate the FULL AI summary for a clip before posting (no DB row yet).
+ *
  * Returns the whole summary object so the UI can show it and we can persist
- * it verbatim with the video. Returns null on failure.
+ * it verbatim with the video.
+ *
+ * Throws `AiError` on failure — this used to return `null`, which the caller
+ * could not tell apart from "AI ran fine but found no location". A null used
+ * to make the create-post screen wipe the user's typed-in location fields.
  */
-export async function generatePreviewSummary(input: SummaryInput): Promise<AiSummaryResult | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS * 6);
-  try {
-    const res = await fetch(`${API_BASE_URL}/ai-summary/preview`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify({
-        caption: input.caption ?? "",
-        location: input.location ?? "",
-        audioType: input.audioType ?? "none",
-        uploaderType: input.uploaderType ?? "tourist",
-        videoUrl: input.videoUrl,
-      }),
+export async function generatePreviewSummary(
+  input: SummaryInput
+): Promise<AiSummaryResult> {
+  const data = await aiFetch<AiSummaryResult>({
+    label: "ai-summary/preview",
+    path: "/ai-summary/preview",
+    method: "POST",
+    body: {
+      caption: input.caption ?? "",
+      location: input.location ?? "",
+      audioType: input.audioType ?? "none",
+      uploaderType: input.uploaderType ?? "tourist",
+      videoUrl: input.videoUrl,
+    },
+    timeoutMs: API_TIMEOUT_MS * 6,
+    onSettled: (ok, error) => {
+      if (!ok && error) toastAiError(error);
+    },
+  });
+
+  if (!data || typeof data.text !== "string") {
+    throw new AiError({
+      kind: "bad-shape",
+      status: 200,
+      body: JSON.stringify(data ?? null),
+      requestId: null,
+      label: "ai-summary/preview",
+      url: `${API_BASE_URL}/ai-summary/preview`,
+      durationMs: 0,
+      timeoutMs: API_TIMEOUT_MS * 6,
     });
-    if (!res.ok) return null;
-    const data = (await res.json()) as AiSummaryResult;
-    if (!data || typeof data.text !== "string") return null;
-    return data;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
   }
+  return data;
 }
 
-/** Returns 2–3 caption suggestions, or [] on failure. */
+/** Returns 2–3 caption suggestions. Throws `AiError` on failure (was: `[]`). */
 export async function suggestCaptions(req: CaptionRequest): Promise<string[]> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS * 3);
-  try {
-    const res = await fetch(`${API_BASE_URL}/ai-caption`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify(req),
+  const data = await aiFetch<{ captions?: unknown }>({
+    label: "ai-caption",
+    path: "/ai-caption",
+    method: "POST",
+    body: req,
+    timeoutMs: API_TIMEOUT_MS * 3,
+    onSettled: (ok, error) => {
+      if (!ok && error) toastAiError(error);
+    },
+  });
+
+  if (!Array.isArray(data?.captions)) {
+    throw new AiError({
+      kind: "bad-shape",
+      status: 200,
+      body: JSON.stringify(data ?? null),
+      requestId: null,
+      label: "ai-caption",
+      url: `${API_BASE_URL}/ai-caption`,
+      durationMs: 0,
+      timeoutMs: API_TIMEOUT_MS * 3,
     });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return Array.isArray(data?.captions)
-      ? data.captions.filter((c: unknown) => typeof c === "string")
-      : [];
-  } catch {
-    return [];
-  } finally {
-    clearTimeout(timer);
   }
+  return data.captions.filter((c: unknown): c is string => typeof c === "string");
 }

@@ -1,6 +1,7 @@
 import { AiSummary, getPostCommentData } from "../data/commentsData";
 import { API_BASE_URL, API_TIMEOUT_MS } from "./apiConfig";
 import { supabase, isSupabaseConfigured } from "../lib/supabase";
+import { aiFetch, AiError, toastAiError } from "./aiHttp";
 
 /**
  * AI Summary service
@@ -24,31 +25,36 @@ import { supabase, isSupabaseConfigured } from "../lib/supabase";
  * ever talks to OUR backend (API_BASE_URL), which holds the secret.
  */
 
-/** Fetch with a timeout so a slow/unreachable backend doesn't hang the UI. */
-async function fetchWithTimeout(url: string, ms: number): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ms);
-  try {
-    return await fetch(url, { signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 /** Local fallback used when the backend is unreachable in development. */
 function localFallback(postId: string): AiSummary | null {
   return getPostCommentData(postId).aiSummary;
 }
 
 /**
- * Fetch the stored AI summary for a post from the backend.
- *
- * Returns:
- *   - the summary (status "ready")                when the backend has it
- *   - { status: "processing" }                    when the backend returns 404
- *   - local JSON fallback                          when the backend is unreachable
+ * Three genuinely different outcomes, previously collapsed into one value.
+ * -------------------------------------------------------------
+ * "Not ready yet" (404 / row pending) and "the call failed" (502, 401,
+ * timeout, dead host) used to return the same `"ระบบกำลังประมวลผล…"`
+ * object, which told the user to wait forever for something that was never
+ * going to arrive. The comment sheet now gets enough information to show a
+ * real error with a Retry button.
  */
-export async function fetchAiSummary(postId: string): Promise<AiSummary | null> {
+export type FetchAiSummaryResult =
+  | { kind: "ready"; summary: AiSummary }
+  | { kind: "pending"; summary: AiSummary }
+  | { kind: "error"; summary: AiSummary | null; error: AiError };
+
+const PENDING_SUMMARY: AiSummary = {
+  status: "processing",
+  text: "ระบบกำลังประมวลผลวิดีโอนี้ด้วย AI (ถอดเสียง + วิเคราะห์ภาพ) โปรดกลับมาดูสรุปอีกครั้งภายหลัง",
+} as AiSummary;
+
+/**
+ * Fetch the stored AI summary for a post.
+ * Never throws — returns a discriminated result so the caller can render
+ * each state differently.
+ */
+export async function fetchAiSummary(postId: string): Promise<FetchAiSummaryResult> {
   // Primary: read the summary straight from the video row in Supabase (it was
   // persisted at post time). Works with the app's anon key via RLS — no
   // dependency on the backend/service_role for display.
@@ -60,11 +66,8 @@ export async function fetchAiSummary(postId: string): Promise<AiSummary | null> 
         .eq("id", postId)
         .maybeSingle();
       if (!error && data) {
-        if (data.ai_summary) return data.ai_summary as AiSummary;
-        return {
-          status: "processing",
-          text: "ระบบกำลังประมวลผลวิดีโอนี้ด้วย AI โปรดกลับมาดูสรุปอีกครั้งภายหลัง",
-        };
+        if (data.ai_summary) return { kind: "ready", summary: data.ai_summary as AiSummary };
+        return { kind: "pending", summary: PENDING_SUMMARY };
       }
     } catch {
       /* fall through to backend */
@@ -72,28 +75,43 @@ export async function fetchAiSummary(postId: string): Promise<AiSummary | null> 
   }
 
   // Fallback: backend (used by demo ids post-1/2/3 held in memory).
-  const url = `${API_BASE_URL}/ai-summary/${encodeURIComponent(postId)}`;
+  const path = `/ai-summary/${encodeURIComponent(postId)}`;
 
   try {
-    const res = await fetchWithTimeout(url, API_TIMEOUT_MS);
+    const data = await aiFetch<AiSummary>({
+      label: "ai-summary/get",
+      path,
+      method: "GET",
+      timeoutMs: API_TIMEOUT_MS,
+      onSettled: (ok, error) => {
+        if (!ok && error) toastAiError(error);
+      },
+    });
 
-    if (res.status === 404) {
-      // Backend reachable but summary not generated yet.
-      return {
-        status: "processing",
-        text: "ระบบกำลังประมวลผลวิดีโอนี้ด้วย AI โปรดกลับมาดูสรุปอีกครั้งภายหลัง",
-      };
+    if (data?.status === "processing") return { kind: "pending", summary: data };
+    if (data && typeof data.text === "string") return { kind: "ready", summary: data };
+    return {
+      kind: "error",
+      summary: null,
+      error: new AiError({
+        kind: "bad-shape",
+        status: 200,
+        body: JSON.stringify(data ?? null),
+        requestId: null,
+        label: "ai-summary/get",
+        url: `${API_BASE_URL}${path}`,
+        durationMs: 0,
+        timeoutMs: API_TIMEOUT_MS,
+      }),
+    };
+  } catch (err: any) {
+    // 404 genuinely means "not generated yet" — that's not an error.
+    if (err instanceof AiError && err.status === 404) {
+      return { kind: "pending", summary: PENDING_SUMMARY };
     }
-
-    if (!res.ok) {
-      // Any other backend error → fall back to whatever we have locally.
-      return localFallback(postId);
+    if (err instanceof AiError) {
+      return { kind: "error", summary: localFallback(postId), error: err };
     }
-
-    const data = (await res.json()) as AiSummary;
-    return data;
-  } catch {
-    // Network/timeout error (e.g. backend not running) → local fallback.
-    return localFallback(postId);
+    throw err;
   }
 }

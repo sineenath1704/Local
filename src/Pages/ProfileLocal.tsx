@@ -13,6 +13,7 @@ import {
   ActivityIndicator,
   Alert,
   Linking,
+  KeyboardAvoidingView,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -27,6 +28,8 @@ import {
   BuildingStorefrontIcon,
   CheckCircleIcon,
   MapPinIcon,
+  PlusIcon,
+  ChevronDownIcon,
 } from "react-native-heroicons/outline";
 import {
   MapPinIcon as MapPinSolid,
@@ -45,10 +48,33 @@ import type { VideoPost } from "../data/homeFeedData";
 import { getVideoById } from "../data/profilesData";
 import { resolveSavedVideo } from "../data/tripsData";
 import { verifyPlaceOnGoogle, type PlaceCandidate } from "../services/placesService";
-import { supabase } from "../lib/supabase";
+import {
+  BIZ_TYPE_OPTIONS,
+  PRICE_UNITS,
+  detectBusinessProfile,
+  formatClosedDaysStr,
+  formatDayGroupLabel,
+  formatHourRange,
+  formatPriceStr,
+  parseDayGroupFromLabel,
+  parseHourRange,
+  parsePriceStr,
+  profileFor,
+  resolvePriceUnit,
+  splitPriceUnit,
+  parseStoredHours,
+  formatStoredHours,
+  composeHoursJson,
+  composePricingJson,
+  type BizType,
+} from "../lib/businessProfile";
+import { upsertMyPlace, syntheticPlaceId, mapsUrlFor } from "../services/hostPlaceService";
 import EditProfileSheet from "../components/EditProfileSheet";
 import SettingsSheet from "../components/SettingsSheet";
 import MyVideoViewer from "../components/MyVideoViewer";
+import EditableValueRow from "../components/EditableValueRow";
+import DayPickerSheet from "../components/DayPickerSheet";
+import TimeRangeSheet from "../components/TimeRangeSheet";
 
 type ProfileTabKey = "videos" | "saved" | "liked";
 
@@ -62,7 +88,7 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
   const { width: screenWidth } = useWindowDimensions();
 
   const { name, username, bio, avatar, location, registeredInfo } = useMyProfile();
-  const { user, updateBusinessProfile } = useAuth();
+  const { user, refreshUser } = useAuth();
   const { followingCount, likedVideoIds, savedVideoIds, folders, createFolder } = useInteractions();
 
   const isOtopHost = user?.role === "host" && user?.otop_verified;
@@ -81,16 +107,75 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
 
-  // Business Profile Edit state
-  type BizType = "homestay" | "activity" | "cafe" | "custom";
+  // Business Profile Edit state (Smart Ergonomics)
   const [bizType, setBizType] = useState<BizType>("homestay");
-  const [bizWeekdayLabel, setBizWeekdayLabel] = useState("วันธรรมดา (อา.-พฤ.)");
-  const [bizWeekendLabel, setBizWeekendLabel] = useState("วันหยุดสุดสัปดาห์ (ศ.-ส. & นักขัตฤกษ์)");
-  const [bizWeekdayHours, setBizWeekdayHours] = useState("");
-  const [bizWeekendHours, setBizWeekendHours] = useState("");
-  const [bizClosedDays, setBizClosedDays] = useState("เปิดทุกวัน");
+  // Day arrays — labels are derived from these via formatDayGroupLabel, so
+  // there is no setter for a "label string". Day labels come from the homestay
+  // default so the modal opens with something meaningful even before the host
+  // picks a Google place.
+  const [bizWeekdayDays, setBizWeekdayDays] = useState<string[]>(
+    () => parseDayGroupFromLabel(profileFor("homestay").weekdayLabel)?.days ?? []
+  );
+  const [bizWeekendDays, setBizWeekendDays] = useState<string[]>(
+    () => parseDayGroupFromLabel(profileFor("homestay").weekendLabel)?.days ?? []
+  );
+  const [bizWeekendNote, setBizWeekendNote] = useState<string | null>(null);
+  // Hours stay as text inputs from the modal's perspective; TimeRangeSheet
+  // writes the formatted string back. Parsers may hand us e.g. "เปิด 24 ชม."
+  // or "เช็คอิน 14:00 / เช็คเอาท์ 11:00" via parseHourRange / formatHourRange.
+  const [bizWeekdayHoursText, setBizWeekdayHoursText] = useState("");
+  const [bizWeekendHoursText, setBizWeekendHoursText] = useState("");
+  const [bizDayOffs, setBizDayOffs] = useState<string[]>([]);
   const [bizWeekdayPrice, setBizWeekdayPrice] = useState("");
   const [bizWeekendPrice, setBizWeekendPrice] = useState("");
+  const [bizPriceUnit, setBizPriceUnit] = useState("/ คืน");
+  const [bizCustomUnit, setBizCustomUnit] = useState("");
+
+  // Labels are rebuilt from the day arrays on every render so the displayed
+  // label never drifts from what the host just picked in the picker.
+  const bizWeekdayLabel = formatDayGroupLabel("วันธรรมดา", bizWeekdayDays);
+  const bizWeekendLabel = formatDayGroupLabel(
+    "วันหยุดสุดสัปดาห์",
+    bizWeekendDays,
+    bizWeekendNote
+  );
+
+  // Per-section editing, same shape as the registration wizard: the modal opens
+  // showing what Google gave us, and each row reveals its inputs only after the
+  // host asks to change that one thing.
+  const [bizEditing, setBizEditing] = useState({
+    type: false,
+    weekday: false,
+    weekend: false,
+    closed: false,
+    price: false,
+  });
+  const toggleBizEditing = (key: keyof typeof bizEditing) =>
+    setBizEditing((prev) => ({ ...prev, [key]: !prev[key] }));
+  const [bizDaySheetOpen, setBizDaySheetOpen] = useState(false);
+  // Each picker is its own state so opening one doesn't accidentally close
+  // another; weekday + weekend sheets hide the "เปิดทุกวัน" reset because for
+  // groups "no specific days" is the legitimate default state.
+  const [bizWeekdaySheetOpen, setBizWeekdaySheetOpen] = useState(false);
+  const [bizWeekendSheetOpen, setBizWeekendSheetOpen] = useState(false);
+  // One TimeRangeSheet serves both rows. `which` decides on confirm which
+  // string to write back; the sheet itself only needs the open/close/allDay
+  // triple.
+  const [bizTimeSheet, setBizTimeSheet] = useState<
+    | null
+    | {
+      which: "weekday" | "weekend";
+      range: { open: string | null; close: string | null; allDay: boolean };
+    }
+  >(null);
+
+  // Hybrid secondary service (e.g. on-site Cafe or Activity)
+  const [hasSecondaryBiz, setHasSecondaryBiz] = useState(false);
+  const [secondaryBizType, setSecondaryBizType] = useState<"cafe" | "activity" | "shop">("cafe");
+  const [secondaryInheritSchedule, setSecondaryInheritSchedule] = useState(true);
+  const [secondaryHours, setSecondaryHours] = useState("08:30 - 17:00");
+  const [secondaryPrice, setSecondaryPrice] = useState("");
+  const [secondaryPriceUnit, setSecondaryPriceUnit] = useState("/ เมนู");
 
   const [showEditBusiness, setShowEditBusiness] = useState(false);
   const [bizPlaceName, setBizPlaceName] = useState("");
@@ -102,78 +187,100 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
 
   const handleSelectBizType = (type: BizType) => {
     setBizType(type);
-    if (type === "homestay") {
-      setBizWeekdayLabel("วันธรรมดา (อา.-พฤ.)");
-      setBizWeekendLabel("วันหยุดสุดสัปดาห์ (ศ.-ส. & นักขัตฤกษ์)");
-    } else if (type === "activity") {
-      setBizWeekdayLabel("วันธรรมดา (จ.-ศ.)");
-      setBizWeekendLabel("วันหยุดสุดสัปดาห์ (ส.-อา. & นักขัตฤกษ์)");
-    } else if (type === "cafe") {
-      setBizWeekdayLabel("วันธรรมดา (จ.-ศ.)");
-      setBizWeekendLabel("วันหยุดสุดสัปดาห์ (ส.-อา.)");
-    } else {
-      setBizWeekdayLabel("วันธรรมดา");
-      setBizWeekendLabel("วันหยุด / เทศกาล");
-    }
+    setBizEditing((prev) => ({ ...prev, type: false }));
+    const p = profileFor(type);
+    // Day sets come from the new default labels — empty when the profile
+    // doesn't pin a specific day list ("วันธรรมดา" alone for "custom").
+    const wdParsed = parseDayGroupFromLabel(p.weekdayLabel);
+    const weParsed = parseDayGroupFromLabel(p.weekendLabel);
+    setBizWeekdayDays(wdParsed?.days ?? []);
+    setBizWeekendDays(weParsed?.days ?? []);
+    setBizWeekendNote(weParsed?.note ?? null);
+    setBizPriceUnit(p.priceUnit);
+    // Leave hours alone if the host already set them — switching type
+    // shouldn't silently overwrite something they chose.
+    if (!bizWeekdayHoursText.trim()) setBizWeekdayHoursText(p.defaultWeekdayHours);
+    if (!bizWeekendHoursText.trim()) setBizWeekendHoursText(p.defaultWeekendHours);
   };
 
-  const parseGoogleHours = (openingHoursStr?: string | null) => {
-    if (!openingHoursStr) return;
-    const parts = openingHoursStr.split("|").map((p) => p.trim());
-    const closedDayNames: string[] = [];
-    parts.forEach((p) => {
-      if (p.includes("ปิดทำการ") || p.toLowerCase().includes("closed")) {
-        const dayName = p.split(":")[0]?.trim();
-        if (dayName) closedDayNames.push(dayName.replace("วัน", ""));
-      }
-    });
+  /**
+   * Seed the TimeRangeSheet from whatever hours string we currently hold. If
+   * the parser bailed (AM/PM, ambiguous text) we hand the sheet a clean
+   * starting pair so the host can re-pick rather than re-type.
+   */
+  const seedBizTimeSheet = (text: string) => {
+    if (!text) return { open: null, close: null, allDay: false };
+    const range = parseHourRange(text);
+    return {
+      open: range.allDay ? null : range.open,
+      close: range.allDay ? null : range.close,
+      allDay: range.allDay,
+    };
+  };
 
-    if (closedDayNames.length > 0) {
-      setBizClosedDays(`ปิดทุกวัน${closedDayNames.join(", ")}`);
-    } else {
-      setBizClosedDays("เปิดทุกวัน");
-    }
-
-    const openPart = parts.find(
-      (p) => !p.includes("ปิดทำการ") && !p.toLowerCase().includes("closed") && p.includes(":")
-    );
-    if (openPart) {
-      const timeIdx = openPart.indexOf(":");
-      if (timeIdx !== -1) {
-        const timeStr = openPart.slice(timeIdx + 1).trim();
-        setBizWeekdayHours(timeStr);
-        setBizWeekendHours(timeStr);
-      }
-    }
+  const parsePrimaryPriceStr = (rawPrice: string) => {
+    const { weekdayPrice, weekendPrice, unit } = parsePriceStr(rawPrice);
+    const { chipId, customUnit } = splitPriceUnit(unit);
+    setBizWeekdayPrice(weekdayPrice);
+    setBizWeekendPrice(weekendPrice);
+    setBizPriceUnit(chipId);
+    setBizCustomUnit(customUnit);
   };
 
   const openEditBusiness = () => {
-    setBizPlaceName(user?.business_place_name || user?.otop_village || "");
+    const pName = user?.business_place_name || user?.otop_village || "";
+    setBizPlaceName(pName);
     setBizPhone(user?.business_phone || user?.phone_number || "");
+    setBizEditing({ type: false, weekday: false, weekend: false, closed: false, price: false });
+
+    // 1. Deconstruct Price Info
     const rawPrice = user?.business_price_info || "";
-    if (rawPrice.includes("|")) {
-      const parts = rawPrice.split("|").map((x: string) => x.trim());
-      setBizWeekdayPrice(parts[0] || "");
-      setBizWeekendPrice(parts[1] || "");
+    if (rawPrice.includes("||")) {
+      const [priP, secP] = rawPrice.split("||").map((x: string) => x.trim());
+      parsePrimaryPriceStr(priP);
+
+      setHasSecondaryBiz(true);
+      if (secP.includes("คาเฟ่")) {
+        setSecondaryBizType("cafe");
+        setSecondaryPriceUnit("/ เมนู");
+      } else if (secP.includes("กิจกรรม")) {
+        setSecondaryBizType("activity");
+        setSecondaryPriceUnit("/ ท่าน");
+      } else {
+        setSecondaryBizType("shop");
+        setSecondaryPriceUnit("/ ชิ้น");
+      }
+
+      const secPriceMatch = secP.match(/\d+(?:-\d+)?/);
+      if (secPriceMatch) setSecondaryPrice(secPriceMatch[0]);
     } else {
-      setBizWeekdayPrice(rawPrice);
-      setBizWeekendPrice("");
+      setHasSecondaryBiz(false);
+      setSecondaryPrice("");
+      parsePrimaryPriceStr(rawPrice);
     }
 
-    const rawHours = (user as any)?.business_opening_hours || "";
-    if (rawHours.includes("|")) {
-      const parts = rawHours.split("|").map((x: string) => x.trim());
-      setBizWeekdayHours(parts[0] || "");
-      setBizWeekendHours(parts[1] || "");
-      setBizClosedDays(parts[2]?.replace("วันหยุดร้าน:", "").trim() || "เปิดทุกวัน");
-    } else if (rawHours) {
-      setBizWeekdayHours(rawHours);
-      setBizWeekendHours(rawHours);
-      setBizClosedDays("เปิดทุกวัน");
+    // 2. Deconstruct Opening Hours via the shared parser. Cuts off at the
+    //    "||" if a secondary service is attached, so the weekdays/weekends
+    //    here only ever come from the primary service.
+    const rawHours = user?.business_opening_hours || "";
+    const primaryHours = rawHours.split("||")[0]?.trim() ?? "";
+    const parsed = parseStoredHours(primaryHours);
+
+    {
+      const wd = parseDayGroupFromLabel(parsed.weekday?.label ?? "");
+      const we = parseDayGroupFromLabel(parsed.weekend?.label ?? "");
+      setBizWeekdayDays(wd?.days ?? []);
+      setBizWeekendDays(we?.days ?? []);
+      setBizWeekendNote(we?.note ?? null);
     }
+    setBizWeekdayHoursText(parsed.weekday?.hours ?? "");
+    setBizWeekendHoursText(parsed.weekend?.hours ?? "");
+    setBizDayOffs(parsed.closed?.dayKeys ?? []);
+
+    // 3. Pin coordinates & initial auto-detect
     setBizGpsCandidates([]);
     if (user?.business_place_name && user?.business_lat && user?.business_lng) {
-      setBizConfirmedPlace({
+      const cand: PlaceCandidate = {
         name: user.business_place_name,
         address: user.business_address || "",
         placeId: "",
@@ -183,7 +290,15 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
         district: user.business_district || user.otop_amphur || null,
         subdistrict: user.business_subdistrict || user.otop_tambol || null,
         types: [],
-      });
+      };
+      setBizConfirmedPlace(cand);
+      const detected = detectBusinessProfile([], cand.name);
+      setBizType(detected.bizType);
+      const wdParsed = parseDayGroupFromLabel(detected.weekdayLabel);
+      const weParsed = parseDayGroupFromLabel(detected.weekendLabel);
+      setBizWeekdayDays(wdParsed?.days ?? []);
+      setBizWeekendDays(weParsed?.days ?? []);
+      setBizWeekendNote(weParsed?.note ?? null);
     } else {
       setBizConfirmedPlace(null);
     }
@@ -194,7 +309,28 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
     setBizConfirmedPlace(c);
     setBizPlaceName(c.name);
     if (c.phone) setBizPhone(c.phone);
-    if (c.openingHours) parseGoogleHours(c.openingHours);
+
+    const detected = detectBusinessProfile(c.types, c.name, c.primaryType);
+    setBizType(detected.bizType);
+    const wdParsed = parseDayGroupFromLabel(detected.weekdayLabel);
+    const weParsed = parseDayGroupFromLabel(detected.weekendLabel);
+    setBizWeekdayDays(wdParsed?.days ?? []);
+    setBizWeekendDays(weParsed?.days ?? []);
+    setBizWeekendNote(weParsed?.note ?? null);
+    setBizPriceUnit(detected.priceUnit);
+    if (!bizWeekdayHoursText) setBizWeekdayHoursText(detected.defaultWeekdayHours);
+    if (!bizWeekendHoursText) setBizWeekendHoursText(detected.defaultWeekendHours);
+
+    // Google's weekday_text is its own shape ("จันทร์: 08:00 – 17:00 | …") —
+    // the shared parser now handles that too, so we feed it through the same
+    // path as a previously-saved host row.
+    if (c.openingHours) {
+      const parsed = parseStoredHours(c.openingHours);
+      if (parsed.weekday?.hours) setBizWeekdayHoursText(parsed.weekday.hours);
+      if (parsed.weekend?.hours) setBizWeekendHoursText(parsed.weekend.hours);
+      if (parsed.closed?.dayKeys) setBizDayOffs(parsed.closed.dayKeys);
+    }
+
     setBizGpsCandidates([]);
   };
 
@@ -261,88 +397,136 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
       return;
     }
     setBizSaving(true);
-    const compOpening = [
-      bizWeekdayHours.trim() ? `${bizWeekdayLabel}: ${bizWeekdayHours.trim()}` : "",
-      bizWeekendHours.trim() ? `${bizWeekendLabel}: ${bizWeekendHours.trim()}` : "",
-      bizClosedDays.trim() ? `วันหยุดร้าน: ${bizClosedDays.trim()}` : "",
-    ]
-      .filter(Boolean)
-      .join(" | ");
+    // Round-trip through the shared parser/format pair — same path the wizard
+    // uses, so a re-edit pulls back exactly what the host just saved.
+    const primaryOpening = formatStoredHours({
+      weekday:
+        bizWeekdayDays.length > 0 || bizWeekdayHoursText.trim()
+          ? { label: bizWeekdayLabel || "วันธรรมดา", hours: bizWeekdayHoursText.trim() }
+          : undefined,
+      weekend:
+        bizWeekendDays.length > 0 || bizWeekendHoursText.trim()
+          ? {
+            label: bizWeekendLabel || "วันหยุดสุดสัปดาห์",
+            hours: bizWeekendHoursText.trim(),
+          }
+          : undefined,
+      closed: { isAllDays: bizDayOffs.length === 0, dayKeys: bizDayOffs },
+      hasUnknown: false,
+      unknownSegments: [],
+    });
 
-    const compPrice = [
-      bizWeekdayPrice.trim() ? `${bizWeekdayLabel}: ${bizWeekdayPrice.trim()}` : "",
-      bizWeekendPrice.trim() ? `${bizWeekendLabel}: ${bizWeekendPrice.trim()}` : "",
-    ]
-      .filter(Boolean)
-      .join(" | ");
+    let compOpening = primaryOpening;
+    if (hasSecondaryBiz) {
+      const secName =
+        secondaryBizType === "cafe"
+          ? "คาเฟ่/เครื่องดื่ม"
+          : secondaryBizType === "activity"
+            ? "กิจกรรม"
+            : "ร้านค้าชุมชน";
+      const detectedInfo = detectBusinessProfile(bizConfirmedPlace?.types, bizPlaceName, bizConfirmedPlace?.primaryType);
+      let secSchedule = "";
+      if (secondaryInheritSchedule) {
+        secSchedule = `วัน-เวลาเปิดเดียวกับ${detectedInfo.badgeLabel}`;
+      } else {
+        secSchedule = `เวลา ${secondaryHours.trim() || "08:30 - 17:00"}`;
+      }
+      compOpening = `${primaryOpening} || ${secName}: ${secSchedule}`;
+    }
+
+    const effectiveUnit = resolvePriceUnit(bizPriceUnit, bizCustomUnit);
+    const primaryPrice = formatPriceStr(bizWeekdayPrice, bizWeekendPrice, effectiveUnit);
+
+    let compPrice = primaryPrice;
+    if (hasSecondaryBiz && secondaryPrice.trim()) {
+      const secName =
+        secondaryBizType === "cafe" ? "คาเฟ่" : secondaryBizType === "activity" ? "กิจกรรม" : "สินค้า";
+      compPrice = `${primaryPrice || "ตามตกลง"} || ${secName}: ${secondaryPrice.trim()} บาท${secondaryPriceUnit}`;
+    }
 
     try {
-      const { error } = await updateBusinessProfile({
-        businessPlaceName: bizPlaceName.trim(),
-        businessPriceInfo: compPrice,
-        businessPhone: bizPhone.trim(),
-        businessLat: bizConfirmedPlace?.latitude ?? user?.business_lat ?? null,
-        businessLng: bizConfirmedPlace?.longitude ?? user?.business_lng ?? null,
-        businessAddress: bizConfirmedPlace?.address ?? user?.business_address ?? null,
-        businessSubdistrict: bizConfirmedPlace?.subdistrict ?? user?.business_subdistrict ?? user?.otop_tambol ?? null,
-        businessDistrict: bizConfirmedPlace?.district ?? user?.business_district ?? user?.otop_amphur ?? null,
-        businessProvince: bizConfirmedPlace?.province ?? user?.business_province ?? user?.otop_province ?? null,
+      // One transaction covers the profile AND the community_places row the AI
+      // reads. Previously these were two round-trips and the second was
+      // fire-and-forget, so a rejected write left the host looking saved while
+      // the AI had nothing to ground its answers on.
+      await upsertMyPlace({
+        users: {
+          businessPlaceName: bizPlaceName.trim(),
+          businessPriceInfo: compPrice,
+          // Was computed above and then dropped on the floor — the hours a host
+          // set here vanished the next time they opened this modal.
+          businessOpeningHours: compOpening,
+          businessPhone: bizPhone.trim(),
+          businessLat: bizConfirmedPlace?.latitude ?? user?.business_lat ?? null,
+          businessLng: bizConfirmedPlace?.longitude ?? user?.business_lng ?? null,
+          businessAddress: bizConfirmedPlace?.address ?? user?.business_address ?? null,
+          businessSubdistrict: bizConfirmedPlace?.subdistrict ?? user?.business_subdistrict ?? user?.otop_tambol ?? null,
+          businessDistrict: bizConfirmedPlace?.district ?? user?.business_district ?? user?.otop_amphur ?? null,
+          businessProvince: bizConfirmedPlace?.province ?? user?.business_province ?? user?.otop_province ?? null,
+        },
+        // Skipped when the host hasn't confirmed a location on the map — their
+        // profile still saves, and they can add the place later.
+        place: bizConfirmedPlace && user?.id
+          ? {
+            placeId: bizConfirmedPlace.placeId || syntheticPlaceId(user.id),
+            placeName: bizPlaceName.trim(),
+            province: bizConfirmedPlace.province || user?.otop_province || "",
+            formattedAddress: bizConfirmedPlace.address || null,
+            district: bizConfirmedPlace.district || user?.otop_amphur || null,
+            subdistrict: bizConfirmedPlace.subdistrict || user?.otop_tambol || null,
+            village: user?.otop_village || null,
+            latitude: bizConfirmedPlace.latitude ?? null,
+            longitude: bizConfirmedPlace.longitude ?? null,
+            googleMapsUrl: mapsUrlFor(
+              bizConfirmedPlace.googleMapsUri,
+              bizConfirmedPlace.latitude,
+              bizConfirmedPlace.longitude
+            ),
+            phone: bizPhone.trim() || null,
+            openingHours: compOpening || null,
+            priceInfo: compPrice || null,
+            rating: bizConfirmedPlace.rating ?? null,
+            userRatingsTotal: bizConfirmedPlace.userRatingCount ?? null,
+            website: bizConfirmedPlace.website ?? null,
+            // Machine-readable twins of the two strings above — this is what
+            // lets the AI answer "เปิดวันอาทิตย์ไหม" without re-parsing prose.
+            businessHours: composeHoursJson({
+              weekdayDays: bizWeekdayDays,
+              weekdayHours: bizWeekdayHoursText,
+              weekendDays: bizWeekendDays,
+              weekendHours: bizWeekendHoursText,
+              dayOffs: bizDayOffs,
+            }),
+            businessPricing: composePricingJson(
+              bizWeekdayPrice,
+              bizWeekendPrice,
+              effectiveUnit,
+              hasSecondaryBiz && secondaryPrice.trim()
+                ? {
+                  label:
+                    secondaryBizType === "cafe"
+                      ? "คาเฟ่"
+                      : secondaryBizType === "activity"
+                        ? "กิจกรรม"
+                        : "สินค้า",
+                  amount: secondaryPrice.trim(),
+                  unit: secondaryPriceUnit,
+                }
+                : null
+            ),
+          }
+          : undefined,
       });
 
-      // Upsert into community_places master table for AI chat & search
-      if (bizConfirmedPlace) {
-        const pId = bizConfirmedPlace.placeId || `otop-${user?.otop_village_id || user?.id || Date.now()}-${Date.now()}`;
-        const gUrl =
-          bizConfirmedPlace.googleMapsUri ||
-          (bizConfirmedPlace.latitude != null && bizConfirmedPlace.longitude != null
-            ? `https://www.google.com/maps?q=${bizConfirmedPlace.latitude},${bizConfirmedPlace.longitude}`
-            : null);
-
-        supabase
-          .from("community_places")
-          .upsert(
-            {
-              place_id: pId,
-              place_name: bizPlaceName.trim(),
-              formatted_address: bizConfirmedPlace.address || null,
-              province: bizConfirmedPlace.province || user?.otop_province || "",
-              district: bizConfirmedPlace.district || user?.otop_amphur || null,
-              subdistrict: bizConfirmedPlace.subdistrict || user?.otop_tambol || null,
-              village: user?.otop_village || null,
-              latitude: bizConfirmedPlace.latitude ?? null,
-              longitude: bizConfirmedPlace.longitude ?? null,
-              google_maps_url: gUrl,
-              phone: bizPhone.trim() || null,
-              opening_hours: compOpening || null,
-              price_info: compPrice || null,
-              rating: bizConfirmedPlace.rating ?? null,
-              user_ratings_total: bizConfirmedPlace.userRatingCount ?? null,
-              website: bizConfirmedPlace.website ?? null,
-              source: "host_verified",
-              owner_id: user?.id,
-            },
-            { onConflict: "place_id" }
-          )
-          .then(({ error: cErr }: any) => {
-            if (cErr) console.warn("[ProfileLocal] community_places upsert error:", cErr.message);
-          });
-      }
-
+      await refreshUser();
       setBizSaving(false);
-      if (error) {
-        Alert.alert(
-          "บันทึกไม่สำเร็จ (Database Error)",
-          `ไม่สามารถบันทึกข้อมูลลงระบบได้ สาเหตุ: ${error}\n\nกรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ตหรือสิทธิ์การเข้าถึงฐานข้อมูล Supabase`
-        );
-      } else {
-        setShowEditBusiness(false);
-        Alert.alert("สำเร็จ", "อัปเดตข้อมูลสถานที่ประกอบการเรียบร้อยแล้ว");
-      }
+      setShowEditBusiness(false);
+      Alert.alert("สำเร็จ", "อัปเดตข้อมูลสถานที่ประกอบการเรียบร้อยแล้ว");
     } catch (e: any) {
       setBizSaving(false);
       Alert.alert(
-        "บันทึกไม่สำเร็จ (Network/System Error)",
-        `เกิดข้อผิดพลาดในการส่งข้อมูล: ${e?.message ?? String(e)}`
+        "บันทึกไม่สำเร็จ",
+        `${e?.message ?? String(e)}\n\nข้อมูลจะยังไม่ถูกบันทึก กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองอีกครั้ง`
       );
     }
   };
@@ -742,7 +926,7 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
       {/* Edit Business Profile Modal */}
       <Modal visible={showEditBusiness} animationType="slide" transparent onRequestClose={() => setShowEditBusiness(false)}>
         <View className="flex-1 bg-black/50 justify-end">
-          <View className="bg-white rounded-t-3xl p-5 max-h-[88%]">
+          <View className="bg-white rounded-t-3xl p-5" style={{ height: "50%" }}>
             <View className="flex-row items-center justify-between pb-3 border-b border-gray-100 mb-3">
               <View className="flex-row items-center">
                 <BuildingStorefrontIcon size={20} color="#2D6A4F" />
@@ -753,335 +937,575 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
               </TouchableOpacity>
             </View>
 
-            <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-              {/* OTOP Community Location (Read-only) */}
-              <View className="bg-emerald-50 rounded-xl p-3 border border-emerald-200 mb-4">
-                <Text className="text-[#1B4332] text-xs font-bold mb-0.5">ที่ตั้งชุมชน OTOP (ล็อกตามทะเบียน)</Text>
-                <Text className="text-gray-700 text-xs">
-                  {[user?.otop_village, user?.otop_tambol && `ต.${user.otop_tambol}`,
+            <KeyboardAvoidingView
+              style={{ flex: 1, minHeight: 0 }}
+              behavior={Platform.OS === "ios" ? "padding" : undefined}
+            >
+              <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+                {/* OTOP Community Location (Read-only) */}
+                <View className="bg-emerald-50 rounded-xl p-3 border border-emerald-200 mb-4">
+                  <Text className="text-[#1B4332] text-[13px] font-bold mb-0.5">ที่ตั้งชุมชน OTOP (ล็อกตามทะเบียน)</Text>
+                  <Text className="text-gray-700 text-[13px]">
+                    {[user?.otop_village, user?.otop_tambol && `ต.${user.otop_tambol}`,
                     user?.otop_amphur && `อ.${user.otop_amphur}`, user?.otop_province && `จ.${user.otop_province}`]
-                    .filter(Boolean)
-                    .join(" • ") || "-"}
-                </Text>
-              </View>
-
-              {/* 1. Place name & Auto GPS Pin */}
-              <View className="flex-row items-center justify-between mb-1">
-                <Text className="text-gray-700 font-bold text-xs">
-                  ชื่อสถานประกอบการ / ร้านค้า <Text className="text-red-500">*</Text>
-                </Text>
-                {bizGpsLoading && (
-                  <View className="flex-row items-center">
-                    <ActivityIndicator size="small" color="#2D6A4F" />
-                    <Text className="text-emerald-700 text-[11px] font-medium ml-1">กำลังค้นหาพิกัด...</Text>
-                  </View>
-                )}
-              </View>
-              <TextInput
-                value={bizPlaceName}
-                onChangeText={(t) => {
-                  setBizPlaceName(t);
-                  setBizConfirmedPlace(null);
-                }}
-                placeholder="เช่น โฮมสเตย์ป้าสมศรี, กาแฟบ้านห้วยห้อม"
-                placeholderTextColor="#9CA3AF"
-                className="bg-gray-100 rounded-xl px-3.5 py-2.5 text-sm text-gray-900 mb-2"
-              />
-
-              {/* Candidates found on Google Maps within community scope */}
-              {bizGpsCandidates.length > 0 && !bizConfirmedPlace && (
-                <View className="bg-blue-50 border border-blue-200 rounded-2xl p-3.5 mb-4">
-                  <Text className="text-blue-900 font-bold text-[12px] mb-2">
-                    📍 พบสถานที่ในเขต {user?.otop_amphur || user?.otop_province} — เลือกเพื่อดึงข้อมูลอัตโนมัติ:
+                      .filter(Boolean)
+                      .join(" • ") || "-"}
                   </Text>
-                  {bizGpsCandidates.map((c, idx) => (
-                    <View key={idx} className="bg-white border border-blue-100 rounded-xl p-3 mb-2.5 shadow-sm">
-                      <Text className="text-gray-900 font-bold text-[13.5px]">📍 {c.name}</Text>
-                      <Text className="text-gray-500 text-[11px] mt-0.5" numberOfLines={2}>{c.address}</Text>
-
-                      {(c.phone || c.openingHours) && (
-                        <View className="mt-1.5 pt-1.5 border-t border-gray-100">
-                          {c.phone && <Text className="text-gray-600 text-[11px]">📞 {c.phone}</Text>}
-                          {c.openingHours && (
-                            <Text className="text-gray-600 text-[11px] mt-0.5" numberOfLines={1}>
-                              🕒 {c.openingHours}
-                            </Text>
-                          )}
-                        </View>
-                      )}
-
-                      <View className="flex-row items-center justify-between mt-2.5">
-                        {c.googleMapsUri ? (
-                          <TouchableOpacity
-                            onPress={() => Linking.openURL(c.googleMapsUri!)}
-                            activeOpacity={0.7}
-                            className="flex-row items-center px-2 py-1 bg-gray-100 rounded-lg"
-                          >
-                            <Text className="text-[11px] text-blue-700 font-semibold">🗺️ ดูบน Google Maps</Text>
-                          </TouchableOpacity>
-                        ) : <View />}
-
-                        <TouchableOpacity
-                          onPress={() => selectBizCandidate(c)}
-                          activeOpacity={0.85}
-                          className="bg-[#2D6A4F] py-1.5 px-3.5 rounded-lg"
-                        >
-                          <Text className="text-white font-bold text-[11px]">✓ เลือกสถานที่นี้</Text>
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-                  ))}
                 </View>
-              )}
 
-              {/* Fallback button when not found on Google Maps */}
-              {bizGpsCandidates.length === 0 &&
-                bizPlaceName.trim().length >= 2 &&
-                !bizGpsLoading &&
-                !bizConfirmedPlace && (
-                  <View className="bg-amber-50 border border-amber-200 rounded-2xl p-3.5 mb-4">
-                    <Text className="text-amber-900 font-semibold text-[12px] mb-1">
-                      ไม่พบหมุดร้าน "{bizPlaceName.trim()}" บน Google Maps ในเขต {user?.otop_amphur}
-                    </Text>
-                    <Text className="text-gray-500 text-[11px] mb-2.5 leading-4">
-                      หากเป็นร้านเปิดใหม่หรือยังไม่มีหมุด สามารถกดใช้พิกัดของชุมชน OTOP แทน และกรอกข้อมูลด้วยตนเองได้เลยค่ะ
-                    </Text>
-                    <TouchableOpacity
-                      onPress={applyBizOtopFallback}
-                      activeOpacity={0.85}
-                      className="bg-amber-600 py-2 px-3.5 rounded-xl flex-row items-center justify-center self-start"
-                    >
-                      <MapPinIcon size={15} color="#FFFFFF" />
-                      <Text className="text-white font-bold text-[12px] ml-1.5">
-                        📍 ใช้พิกัดของชุมชน OTOP แทน
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
-
-              {/* Confirmed Pin & Review / Edit Section */}
-              {bizConfirmedPlace && (
-                <View className="mb-2">
-                  <View className="bg-emerald-50 border-2 border-emerald-300 rounded-2xl p-3.5 mb-4">
-                    <View className="flex-row items-center justify-between mb-1">
-                      <View className="flex-row items-center">
-                        <CheckCircleIcon size={18} color="#2D6A4F" />
-                        <Text className="text-[#1B4332] font-black text-[13px] ml-1.5">
-                          ✓ ยืนยันพิกัดเรียบร้อยแล้ว
-                        </Text>
-                      </View>
-                      <TouchableOpacity
-                        onPress={() => setBizConfirmedPlace(null)}
-                        activeOpacity={0.7}
-                        className="px-2 py-0.5 bg-white border border-emerald-200 rounded-lg"
-                      >
-                        <Text className="text-emerald-700 font-semibold text-[10.5px]">เปลี่ยนพิกัด</Text>
-                      </TouchableOpacity>
-                    </View>
-                    <Text className="text-gray-800 font-bold text-[13px] mt-0.5">{bizConfirmedPlace.name}</Text>
-                    <Text className="text-gray-500 text-[11px] mt-0.5">{bizConfirmedPlace.address}</Text>
-
-                    {bizConfirmedPlace.googleMapsUri && (
-                      <TouchableOpacity
-                        onPress={() => Linking.openURL(bizConfirmedPlace.googleMapsUri!)}
-                        activeOpacity={0.7}
-                        className="mt-2 self-start flex-row items-center"
-                      >
-                        <Text className="text-[11px] text-blue-700 font-semibold">🗺️ ดูตำแหน่งบน Google Maps</Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-
-                  {/* Preset Selector */}
-                  <Text className="text-gray-700 font-bold text-xs mb-1.5 mt-1">
-                    เลือกประเภทสถานประกอบการ <Text className="text-gray-400 font-normal text-[10.5px]">(ปรับรอบวันอัตโนมัติ)</Text>
+                {/* 1. Place name & Auto GPS Pin */}
+                <View className="flex-row items-center justify-between mb-1">
+                  <Text className="text-gray-700 font-bold text-[13px]">
+                    ชื่อสถานประกอบการ / ร้านค้า <Text className="text-red-500">*</Text>
                   </Text>
-                  <View className="flex-row flex-wrap gap-1.5 mb-3.5">
-                    {[
-                      { id: "homestay", label: "🏡 โฮมสเตย์ / ที่พัก" },
-                      { id: "activity", label: "🎨 กิจกรรม / ท่องเที่ยว" },
-                      { id: "cafe", label: "☕ ร้านค้า / คาเฟ่" },
-                      { id: "custom", label: "⚙️ กำหนดเอง" },
-                    ].map((p) => (
-                      <TouchableOpacity
-                        key={p.id}
-                        onPress={() => handleSelectBizType(p.id as BizType)}
-                        activeOpacity={0.8}
-                        className={`px-3 py-1.5 rounded-xl border ${
-                          bizType === p.id
-                            ? "bg-[#2D6A4F] border-[#2D6A4F]"
-                            : "bg-gray-100 border-gray-200"
-                        }`}
-                      >
-                        <Text
-                          className={`text-[11.5px] font-bold ${
-                            bizType === p.id ? "text-white" : "text-gray-700"
-                          }`}
-                        >
-                          {p.label}
-                        </Text>
-                      </TouchableOpacity>
+                  {bizGpsLoading && (
+                    <View className="flex-row items-center">
+                      <ActivityIndicator size="small" color="#2D6A4F" />
+                      <Text className="text-emerald-700 text-[13px] font-medium ml-1">กำลังค้นหาพิกัด...</Text>
+                    </View>
+                  )}
+                </View>
+                <TextInput
+                  value={bizPlaceName}
+                  onChangeText={(t) => {
+                    setBizPlaceName(t);
+                    setBizConfirmedPlace(null);
+                  }}
+                  placeholder="เช่น โฮมสเตย์ป้าสมศรี, กาแฟบ้านห้วยห้อม"
+                  placeholderTextColor="#9CA3AF"
+                  className="bg-gray-100 rounded-xl px-3.5 py-2.5 text-[15px] text-gray-900 mb-2"
+                />
+
+                {/* Candidates found on Google Maps within community scope */}
+                {bizGpsCandidates.length > 0 && !bizConfirmedPlace && (
+                  <View className="bg-blue-50 border border-blue-200 rounded-2xl p-3.5 mb-4">
+                    <Text className="text-blue-900 font-bold text-[12px] mb-2">
+                      📍 พบสถานที่ในเขต {user?.otop_amphur || user?.otop_province} — เลือกเพื่อดึงข้อมูลอัตโนมัติ:
+                    </Text>
+                    {bizGpsCandidates.map((c, idx) => (
+                      <View key={idx} className="bg-white border border-blue-100 rounded-xl p-3 mb-2.5 shadow-sm">
+                        <Text className="text-gray-900 font-bold text-[13.5px]">📍 {c.name}</Text>
+                        <Text className="text-gray-500 text-[13px] mt-0.5" numberOfLines={2}>{c.address}</Text>
+
+                        {(c.phone) && (
+                          <View className="mt-1.5 pt-1.5 border-t border-gray-100">
+                            {c.phone && <Text className="text-gray-600 text-[13px]">📞 {c.phone}</Text>}
+                          </View>
+                        )}
+
+                        <View className="flex-row items-center justify-between mt-2.5">
+                          {c.googleMapsUri ? (
+                            <TouchableOpacity
+                              onPress={() => Linking.openURL(c.googleMapsUri!)}
+                              activeOpacity={0.7}
+                              className="flex-row items-center px-2 py-1 bg-gray-100 rounded-lg"
+                            >
+                              <Text className="text-[13px] text-blue-700 font-semibold">🗺️ ดูบน Google Maps</Text>
+                            </TouchableOpacity>
+                          ) : <View />}
+
+                          <TouchableOpacity
+                            onPress={() => selectBizCandidate(c)}
+                            activeOpacity={0.85}
+                            className="bg-[#2D6A4F] py-1.5 px-3.5 rounded-lg"
+                          >
+                            <Text className="text-white font-bold text-[13px]">✓ เลือกสถานที่นี้</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
                     ))}
                   </View>
-
-                  {/* Section 1: Weekday Schedule & Price */}
-                  <View className="bg-gray-50 p-3 rounded-2xl border border-gray-200 mb-3">
-                    <View className="flex-row items-center justify-between mb-1.5">
-                      <Text className="text-[#1B4332] font-bold text-xs">
-                        1. รอบวันธรรมดา / วันปกติ
-                      </Text>
-                      <Text className="text-gray-400 text-[10px]">แตะแก้ไขชื่อวันได้</Text>
-                    </View>
-                    <TextInput
-                      value={bizWeekdayLabel}
-                      onChangeText={setBizWeekdayLabel}
-                      placeholder="เช่น วันธรรมดา (อา.-พฤ.)"
-                      placeholderTextColor="#9CA3AF"
-                      className="bg-white border border-gray-200 rounded-xl px-3 py-2 text-xs text-gray-800 font-semibold mb-2"
-                    />
-                    <Text className="text-gray-600 text-[11px] font-medium mb-1">
-                      เวลาเปิด-ปิดทำการ / Check-in
-                    </Text>
-                    <TextInput
-                      value={bizWeekdayHours}
-                      onChangeText={setBizWeekdayHours}
-                      placeholder={
-                        bizType === "homestay"
-                          ? "เช่น เช็คอิน 14:00 / เช็คเอาท์ 11:00"
-                          : "เช่น 08:30 - 17:00"
-                      }
-                      placeholderTextColor="#9CA3AF"
-                      className="bg-white border border-gray-200 rounded-xl px-3 py-2 text-xs text-gray-900 mb-2"
-                    />
-                    <Text className="text-gray-600 text-[11px] font-medium mb-1">
-                      อัตราค่าบริการ / ราคา
-                    </Text>
-                    <TextInput
-                      value={bizWeekdayPrice}
-                      onChangeText={setBizWeekdayPrice}
-                      placeholder={
-                        bizType === "homestay"
-                          ? "เช่น 500 บาท / คืน"
-                          : "เช่น 50-150 บาท"
-                      }
-                      placeholderTextColor="#9CA3AF"
-                      className="bg-white border border-gray-200 rounded-xl px-3 py-2 text-xs text-gray-900"
-                    />
-                  </View>
-
-                  {/* Section 2: Weekend & Holiday Schedule & Price */}
-                  <View className="bg-amber-50/50 p-3 rounded-2xl border border-amber-200 mb-3">
-                    <View className="flex-row items-center justify-between mb-1.5">
-                      <Text className="text-amber-900 font-bold text-xs">
-                        2. รอบวันหยุด / สุดสัปดาห์ / เทศกาล
-                      </Text>
-                      <Text className="text-gray-400 text-[10px]">แตะแก้ไขชื่อวันได้</Text>
-                    </View>
-                    <TextInput
-                      value={bizWeekendLabel}
-                      onChangeText={setBizWeekendLabel}
-                      placeholder="เช่น วันหยุดสุดสัปดาห์ (ศ.-ส. & นักขัตฤกษ์)"
-                      placeholderTextColor="#9CA3AF"
-                      className="bg-white border border-amber-200 rounded-xl px-3 py-2 text-xs text-gray-800 font-semibold mb-2"
-                    />
-                    <Text className="text-gray-600 text-[11px] font-medium mb-1">
-                      เวลาเปิด-ปิดทำการ / Check-in
-                    </Text>
-                    <TextInput
-                      value={bizWeekendHours}
-                      onChangeText={setBizWeekendHours}
-                      placeholder={
-                        bizType === "homestay"
-                          ? "เช่น เช็คอิน 14:00 / เช็คเอาท์ 11:00"
-                          : "เช่น 08:00 - 18:00"
-                      }
-                      placeholderTextColor="#9CA3AF"
-                      className="bg-white border border-amber-200 rounded-xl px-3 py-2 text-xs text-gray-900 mb-2"
-                    />
-                    <Text className="text-gray-600 text-[11px] font-medium mb-1">
-                      อัตราค่าบริการ / ราคา
-                    </Text>
-                    <TextInput
-                      value={bizWeekendPrice}
-                      onChangeText={setBizWeekendPrice}
-                      placeholder={
-                        bizType === "homestay"
-                          ? "เช่น 750 บาท / คืน"
-                          : "เช่น 80-200 บาท"
-                      }
-                      placeholderTextColor="#9CA3AF"
-                      className="bg-white border border-amber-200 rounded-xl px-3 py-2 text-xs text-gray-900"
-                    />
-                  </View>
-
-                  {/* Section 3: Closed Days */}
-                  <View className="bg-gray-50 p-3 rounded-2xl border border-gray-200 mb-3.5">
-                    <Text className="text-gray-800 font-bold text-xs mb-1.5">
-                      3. วันหยุดประจำร้าน / วันที่ไม่เปิดทำการ
-                    </Text>
-                    <View className="flex-row flex-wrap gap-1.5 mb-2">
-                      {["เปิดทุกวัน", "ปิดวันจันทร์", "ปิดวันพุธ", "ปิดวันอาทิตย์"].map((opt) => (
-                        <TouchableOpacity
-                          key={opt}
-                          onPress={() => setBizClosedDays(opt)}
-                          activeOpacity={0.75}
-                          className={`px-2.5 py-1 rounded-lg border ${
-                            bizClosedDays === opt
-                              ? "bg-red-500 border-red-500"
-                              : "bg-white border-gray-200"
-                          }`}
-                        >
-                          <Text
-                            className={`text-[10.5px] font-semibold ${
-                              bizClosedDays === opt ? "text-white" : "text-gray-600"
-                            }`}
-                          >
-                            {opt}
-                          </Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                    <TextInput
-                      value={bizClosedDays}
-                      onChangeText={setBizClosedDays}
-                      placeholder="เช่น เปิดทุกวัน หรือ ปิดทุกวันจันทร์"
-                      placeholderTextColor="#9CA3AF"
-                      className="bg-white border border-gray-200 rounded-xl px-3 py-2 text-xs text-gray-900"
-                    />
-                  </View>
-                </View>
-              )}
-
-              {/* 3. Phone */}
-              <Text className="text-gray-700 font-bold text-xs mb-1">
-                เบอร์โทรศัพท์ติดต่อ <Text className="text-red-500">*</Text>
-              </Text>
-              <TextInput
-                value={bizPhone}
-                onChangeText={setBizPhone}
-                keyboardType="phone-pad"
-                placeholder="เช่น 081-234-5678"
-                placeholderTextColor="#9CA3AF"
-                className="bg-gray-100 rounded-xl px-3.5 py-2.5 text-sm text-gray-900 mb-4"
-              />
-
-              <TouchableOpacity
-                onPress={handleSaveBusiness}
-                disabled={bizSaving || !bizPhone.trim()}
-                activeOpacity={0.85}
-                className={`py-3.5 rounded-2xl items-center flex-row justify-center mb-6 ${
-                  bizSaving || !bizPhone.trim() ? "bg-gray-200" : "bg-[#2D6A4F]"
-                }`}
-              >
-                {bizSaving ? (
-                  <ActivityIndicator color="#FFFFFF" />
-                ) : (
-                  <Text className={`font-bold text-sm ${bizSaving || !bizPhone.trim() ? "text-gray-400" : "text-white"}`}>
-                    บันทึกข้อมูล
-                  </Text>
                 )}
-              </TouchableOpacity>
-            </ScrollView>
+
+                {/* Fallback button when not found on Google Maps */}
+                {bizGpsCandidates.length === 0 &&
+                  bizPlaceName.trim().length >= 2 &&
+                  !bizGpsLoading &&
+                  !bizConfirmedPlace && (
+                    <View className="bg-amber-50 border border-amber-200 rounded-2xl p-3.5 mb-4">
+                      <Text className="text-amber-900 font-semibold text-[12px] mb-1">
+                        ไม่พบหมุดร้าน &ldquo;{bizPlaceName.trim()}&rdquo; บน Google Maps ในเขต {user?.otop_amphur}
+                      </Text>
+                      <Text className="text-gray-500 text-[13px] mb-2.5 leading-4">
+                        หากเป็นร้านเปิดใหม่หรือยังไม่มีหมุด สามารถกดใช้พิกัดของชุมชน OTOP แทน และกรอกข้อมูลด้วยตนเองได้เลยค่ะ
+                      </Text>
+                      <TouchableOpacity
+                        onPress={applyBizOtopFallback}
+                        activeOpacity={0.85}
+                        className="bg-amber-600 py-2 px-3.5 rounded-xl flex-row items-center justify-center self-start"
+                      >
+                        <MapPinIcon size={15} color="#FFFFFF" />
+                        <Text className="text-white font-bold text-[12px] ml-1.5">
+                          📍 ใช้พิกัดของชุมชน OTOP แทน
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+
+                {/* Confirmed Pin & Review / Edit Section */}
+                {bizConfirmedPlace && (
+                  <View className="mb-2">
+                    <View className="bg-emerald-50 border-2 border-emerald-300 rounded-2xl p-3.5 mb-4">
+                      <View className="flex-row items-center justify-between mb-1">
+                        <View className="flex-row items-center">
+                          <CheckCircleIcon size={18} color="#2D6A4F" />
+                          <Text className="text-[#1B4332] font-black text-[13px] ml-1.5">
+                            ✓ ยืนยันพิกัดเรียบร้อยแล้ว
+                          </Text>
+                        </View>
+                        <TouchableOpacity
+                          onPress={() => setBizConfirmedPlace(null)}
+                          activeOpacity={0.7}
+                          className="px-2 py-0.5 bg-white border border-emerald-200 rounded-lg"
+                        >
+                          <Text className="text-emerald-700 font-semibold text-[13px]">เปลี่ยนพิกัด</Text>
+                        </TouchableOpacity>
+                      </View>
+                      <Text className="text-gray-800 font-bold text-[13px] mt-0.5">{bizConfirmedPlace.name}</Text>
+                      <Text className="text-gray-500 text-[13px] mt-0.5">{bizConfirmedPlace.address}</Text>
+
+                      {bizConfirmedPlace.googleMapsUri && (
+                        <TouchableOpacity
+                          onPress={() => Linking.openURL(bizConfirmedPlace.googleMapsUri!)}
+                          activeOpacity={0.7}
+                          className="mt-2 self-start flex-row items-center"
+                        >
+                          <Text className="text-[13px] text-blue-700 font-semibold">🗺️ ดูตำแหน่งบน Google Maps</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+
+                    {/* Phone input right inside business details */}
+                    <Text className="text-gray-700 font-bold text-[13px] mb-1">
+                      เบอร์โทรศัพท์ติดต่อ <Text className="text-red-500">*</Text>
+                    </Text>
+                    <TextInput
+                      value={bizPhone}
+                      onChangeText={setBizPhone}
+                      keyboardType="phone-pad"
+                      placeholder="เช่น 081-234-5678"
+                      placeholderTextColor="#9CA3AF"
+                      className="bg-gray-100 rounded-xl px-3.5 py-2.5 text-[15px] text-gray-900 mb-3.5"
+                    />
+
+                    {/* ประเภทธุรกิจ — Google เป็นค่าเริ่มต้น แก้เฉพาะจุดที่ผิด */}
+                    <EditableValueRow
+                      label="ประเภทสถานประกอบการ"
+                      icon={profileFor(bizType).icon}
+                      value={profileFor(bizType).badgeLabel}
+                      editing={bizEditing.type}
+                      onToggle={() => toggleBizEditing("type")}
+                    >
+                      {bizConfirmedPlace.primaryTypeDisplayName ? (
+                        <Text className="text-[13px] text-gray-500 mb-2.5">
+                          ตรวจพบจาก Google: &quot;{bizConfirmedPlace.primaryTypeDisplayName}&quot;
+                        </Text>
+                      ) : null}
+                      <View className="flex-row flex-wrap gap-2">
+                        {BIZ_TYPE_OPTIONS.map((p) => (
+                          <TouchableOpacity
+                            key={p.id}
+                            onPress={() => handleSelectBizType(p.id)}
+                            activeOpacity={0.8}
+                            className={`px-3 py-2 rounded-xl border ${bizType === p.id ? "bg-[#2D6A4F] border-[#2D6A4F]" : "bg-white border-gray-200"
+                              }`}
+                          >
+                            <Text
+                              className={`text-[14px] font-bold ${bizType === p.id ? "text-white" : "text-gray-700"
+                                }`}
+                            >
+                              {p.label}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    </EditableValueRow>
+
+                    {/* เวลาเปิด-ปิดวันธรรมดา */}
+                    <EditableValueRow
+                      label={bizWeekdayLabel || "วันธรรมดา"}
+                      icon="🌿"
+                      value={bizWeekdayHoursText}
+                      editing={bizEditing.weekday}
+                      onToggle={() => toggleBizEditing("weekday")}
+                      emptyHint="ยังไม่ได้ระบุเวลาเปิด-ปิด"
+                    >
+                      <Text className="text-[13px] font-medium text-gray-600 mb-1.5">
+                        วันในสัปดาห์
+                      </Text>
+                      <TouchableOpacity
+                        onPress={() => setBizWeekdaySheetOpen(true)}
+                        activeOpacity={0.8}
+                        accessibilityRole="button"
+                        className="flex-row items-center justify-between bg-white border border-gray-200 rounded-xl px-3.5 py-3 mb-3"
+                      >
+                        <Text className="text-[15px] font-bold text-gray-800">
+                          {bizWeekdayLabel || "วันธรรมดา"}
+                        </Text>
+                        <ChevronDownIcon size={20} color="#2D6A4F" />
+                      </TouchableOpacity>
+
+                      <Text className="text-[13px] font-medium text-gray-600 mb-1.5">
+                        {bizType === "homestay" ? "เช็คอิน / เช็คเอาท์" : "เวลาเปิด / เวลาปิด"}
+                      </Text>
+                      <TouchableOpacity
+                        onPress={() =>
+                          setBizTimeSheet({
+                            which: "weekday",
+                            range: seedBizTimeSheet(bizWeekdayHoursText),
+                          })
+                        }
+                        activeOpacity={0.8}
+                        accessibilityRole="button"
+                        className="flex-row items-center justify-between bg-white border border-gray-200 rounded-xl px-3.5 py-3"
+                      >
+                        <Text className="text-[15px] font-bold text-gray-800">
+                          {bizWeekdayHoursText ||
+                            (bizType === "homestay"
+                              ? "เลือกเวลาเช็คอิน / เช็คเอาท์"
+                              : "เลือกเวลาเปิด-ปิด")}
+                        </Text>
+                        <ChevronDownIcon size={20} color="#2D6A4F" />
+                      </TouchableOpacity>
+                    </EditableValueRow>
+
+                    {/* เวลาเปิด-ปิดวันหยุด */}
+                    <EditableValueRow
+                      label={bizWeekendLabel || "วันหยุดสุดสัปดาห์"}
+                      icon="🔥"
+                      tone="amber"
+                      value={bizWeekendHoursText}
+                      editing={bizEditing.weekend}
+                      onToggle={() => toggleBizEditing("weekend")}
+                      emptyHint="ยังไม่ได้ระบุเวลาเปิด-ปิด"
+                    >
+                      <Text className="text-[13px] font-medium text-gray-600 mb-1.5">
+                        วันในสัปดาห์
+                      </Text>
+                      <TouchableOpacity
+                        onPress={() => setBizWeekendSheetOpen(true)}
+                        activeOpacity={0.8}
+                        accessibilityRole="button"
+                        className="flex-row items-center justify-between bg-white border border-amber-200 rounded-xl px-3.5 py-3 mb-3"
+                      >
+                        <Text className="text-[15px] font-bold text-gray-800">
+                          {bizWeekendLabel || "วันหยุดสุดสัปดาห์"}
+                        </Text>
+                        <ChevronDownIcon size={20} color="#2D6A4F" />
+                      </TouchableOpacity>
+
+                      <Text className="text-[13px] font-medium text-gray-600 mb-1.5">
+                        {bizType === "homestay" ? "เช็คอิน / เช็คเอาท์" : "เวลาเปิด / เวลาปิด"}
+                      </Text>
+                      <TouchableOpacity
+                        onPress={() =>
+                          setBizTimeSheet({
+                            which: "weekend",
+                            range: seedBizTimeSheet(bizWeekendHoursText),
+                          })
+                        }
+                        activeOpacity={0.8}
+                        accessibilityRole="button"
+                        className="flex-row items-center justify-between bg-white border border-amber-200 rounded-xl px-3.5 py-3"
+                      >
+                        <Text className="text-[15px] font-bold text-gray-800">
+                          {bizWeekendHoursText ||
+                            (bizType === "homestay"
+                              ? "เลือกเวลาเช็คอิน / เช็คเอาท์"
+                              : "เลือกเวลาเปิด-ปิด")}
+                        </Text>
+                        <ChevronDownIcon size={20} color="#2D6A4F" />
+                      </TouchableOpacity>
+                    </EditableValueRow>
+
+                    {/* วันที่ปิดทำการ */}
+                    <EditableValueRow
+                      label="วันที่ปิดทำการ"
+                      icon="🚫"
+                      tone="amber"
+                      value={formatClosedDaysStr(bizDayOffs)}
+                      editing={bizEditing.closed}
+                      onToggle={() => toggleBizEditing("closed")}
+                    >
+                      <TouchableOpacity
+                        onPress={() => setBizDaySheetOpen(true)}
+                        activeOpacity={0.8}
+                        className="flex-row items-center justify-between bg-gray-50 border border-amber-200 rounded-xl px-3.5 py-3"
+                      >
+                        <Text className="text-[15px] font-bold text-amber-900">
+                          เลือกวันที่ปิดทำการ
+                        </Text>
+                        <ChevronDownIcon size={20} color="#B45309" />
+                      </TouchableOpacity>
+                    </EditableValueRow>
+
+                    {/* 💰 อัตราค่าบริการ */}
+                    <EditableValueRow
+                      label="อัตราค่าบริการเริ่มต้น"
+                      icon="💰"
+                      value={formatPriceStr(
+                        bizWeekdayPrice,
+                        bizWeekendPrice,
+                        resolvePriceUnit(bizPriceUnit, bizCustomUnit)
+                      )}
+                      emptyHint="ยังไม่ได้ระบุราคา"
+                      editing={bizEditing.price}
+                      onToggle={() => toggleBizEditing("price")}
+                    >
+                      <TextInput
+                        value={bizWeekdayPrice}
+                        onChangeText={setBizWeekdayPrice}
+                        keyboardType="numeric"
+                        placeholder="เช่น 500"
+                        placeholderTextColor="#9CA3AF"
+                        className="bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 text-[15px] font-bold text-gray-900"
+                      />
+                      <Text className="text-[12.5px] text-gray-500 mt-1 mb-2.5">
+                        🌿 ราคาวันธรรมดา (เปิดแป้นตัวเลขอัตโนมัติ)
+                      </Text>
+
+                      <TextInput
+                        value={bizWeekendPrice}
+                        onChangeText={setBizWeekendPrice}
+                        keyboardType="numeric"
+                        placeholder="เช่น 750"
+                        placeholderTextColor="#9CA3AF"
+                        className="bg-gray-50 border border-amber-200 rounded-xl px-3 py-2.5 text-[15px] font-bold text-gray-900"
+                      />
+                      <Text className="text-[12.5px] text-gray-500 mt-1 mb-2.5">
+                        🔥 ราคาวันหยุด / เทศกาล (เปิดแป้นตัวเลขอัตโนมัติ)
+                      </Text>
+
+                      <Text className="text-[13px] font-bold text-gray-700 mb-1.5">
+                        หน่วยบริการ
+                      </Text>
+                      <View className="flex-row flex-wrap gap-1.5 mb-2">
+                        {PRICE_UNITS.map((u) => (
+                          <TouchableOpacity
+                            key={u.id}
+                            onPress={() => setBizPriceUnit(u.id)}
+                            activeOpacity={0.8}
+                            className={`px-3 py-2 rounded-xl border ${bizPriceUnit === u.id
+                                ? "bg-[#2D6A4F] border-[#2D6A4F]"
+                                : "bg-white border-gray-200"
+                              }`}
+                          >
+                            <Text
+                              className={`text-[14px] font-bold ${bizPriceUnit === u.id ? "text-white" : "text-gray-700"
+                                }`}
+                            >
+                              {u.label}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+
+                      {bizPriceUnit === "custom" && (
+                        <TextInput
+                          value={bizCustomUnit}
+                          onChangeText={setBizCustomUnit}
+                          placeholder="ระบุหน่วย เช่น ทริป, จาน, ชุด"
+                          placeholderTextColor="#9CA3AF"
+                          className="bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 text-[15px] text-gray-900"
+                        />
+                      )}
+                    </EditableValueRow>
+
+                    {/* Card 4: ☕ บริการเสริมในพื้นที่เดียวกัน (Hybrid Business) */}
+                    {!hasSecondaryBiz ? (
+                      <TouchableOpacity
+                        onPress={() => setHasSecondaryBiz(true)}
+                        activeOpacity={0.8}
+                        className="border border-dashed border-[#2D6A4F] bg-emerald-50/50 rounded-2xl p-2.5 items-center justify-center flex-row mb-3.5"
+                      >
+                        <PlusIcon size={15} color="#2D6A4F" />
+                        <Text className="text-[#2D6A4F] font-bold text-[13px] ml-1.5">
+                          + มีบริการอื่นในพื้นที่เดียวกัน (เช่น คาเฟ่ / กิจกรรม)
+                        </Text>
+                      </TouchableOpacity>
+                    ) : (
+                      <View className="bg-amber-50/40 border border-amber-200 rounded-2xl p-3 mb-3.5 shadow-xs">
+                        <View className="flex-row items-center justify-between mb-2">
+                          <Text className="text-amber-900 font-black text-[13px]">
+                            ☕ บริการเสริมในพื้นที่เดียวกัน
+                          </Text>
+                          <TouchableOpacity
+                            onPress={() => setHasSecondaryBiz(false)}
+                            activeOpacity={0.7}
+                            className="px-2 py-0.5 bg-white border border-red-200 rounded-lg"
+                          >
+                            <Text className="text-red-600 text-[13px] font-semibold">ลบออก</Text>
+                          </TouchableOpacity>
+                        </View>
+
+                        {/* Secondary service type selector */}
+                        <Text className="text-gray-600 text-[13px] font-medium mb-1">ประเภทบริการเสริม:</Text>
+                        <View className="flex-row gap-1 mb-2.5">
+                          {[
+                            { id: "cafe", label: "☕ คาเฟ่ / อาหาร", unit: "/ เมนู" },
+                            { id: "activity", label: "🎨 กิจกรรม", unit: "/ ท่าน" },
+                            { id: "shop", label: "🛍️ ร้านของฝาก", unit: "/ ชิ้น" },
+                          ].map((s) => (
+                            <TouchableOpacity
+                              key={s.id}
+                              onPress={() => {
+                                setSecondaryBizType(s.id as any);
+                                setSecondaryPriceUnit(s.unit);
+                              }}
+                              activeOpacity={0.8}
+                              className={`flex-1 py-1 items-center justify-center rounded-xl border ${secondaryBizType === s.id ? "bg-amber-600 border-amber-600" : "bg-white border-gray-200"
+                                }`}
+                            >
+                              <Text className={`text-[13px] font-bold ${secondaryBizType === s.id ? "text-white" : "text-gray-700"}`}>
+                                {s.label}
+                              </Text>
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+
+                        {/* Schedule Choice */}
+                        <Text className="text-gray-700 font-bold text-[13px] mb-1">
+                          รอบวันและเวลาเปิด-ปิดของบริการเสริม:
+                        </Text>
+                        <View className="bg-white rounded-xl border border-gray-200 p-2 mb-2">
+                          <TouchableOpacity
+                            onPress={() => setSecondaryInheritSchedule(true)}
+                            activeOpacity={0.8}
+                            className="flex-row items-center mb-1.5"
+                          >
+                            <View className={`w-3.5 h-3.5 rounded-full border items-center justify-center mr-2 ${secondaryInheritSchedule ? "border-[#2D6A4F] bg-[#2D6A4F]" : "border-gray-300 bg-white"
+                              }`}>
+                              {secondaryInheritSchedule && <View className="w-1.5 h-1.5 rounded-full bg-white" />}
+                            </View>
+                            <Text className="text-gray-800 text-[13px] font-medium">
+                              ใช้วัน-เวลาเปิดเดียวกับธุรกิจหลัก
+                            </Text>
+                          </TouchableOpacity>
+
+                          <TouchableOpacity
+                            onPress={() => setSecondaryInheritSchedule(false)}
+                            activeOpacity={0.8}
+                            className="flex-row items-center"
+                          >
+                            <View className={`w-3.5 h-3.5 rounded-full border items-center justify-center mr-2 ${!secondaryInheritSchedule ? "border-[#2D6A4F] bg-[#2D6A4F]" : "border-gray-300 bg-white"
+                              }`}>
+                              {!secondaryInheritSchedule && <View className="w-1.5 h-1.5 rounded-full bg-white" />}
+                            </View>
+                            <Text className="text-gray-800 text-[13px] font-medium">
+                              แยกกำหนดเวลาเปิด-ปิดเอง
+                            </Text>
+                          </TouchableOpacity>
+
+                          {!secondaryInheritSchedule && (
+                            <View className="mt-1.5 pt-1.5 border-t border-gray-100">
+                              <Text className="text-gray-500 text-[13px] mb-0.5">เวลาทำการ (เช่น 08:30 - 17:00):</Text>
+                              <TextInput
+                                value={secondaryHours}
+                                onChangeText={setSecondaryHours}
+                                placeholder="เช่น 08:30 - 17:00"
+                                placeholderTextColor="#9CA3AF"
+                                className="bg-gray-50 border border-gray-200 rounded-lg px-2.5 py-2 text-[15px] text-gray-900"
+                              />
+                            </View>
+                          )}
+                        </View>
+
+                        {/* Secondary Price Input */}
+                        <Text className="text-gray-700 font-bold text-[13px] mb-1">
+                          ราคาเริ่มต้นของบริการเสริม (ถ้ามี):
+                        </Text>
+                        <View className="flex-row items-center bg-white border border-gray-200 rounded-xl px-2.5 py-1">
+                          <Text className="text-gray-400 font-bold text-[13px] mr-1">฿</Text>
+                          <TextInput
+                            value={secondaryPrice}
+                            onChangeText={setSecondaryPrice}
+                            keyboardType="numeric"
+                            placeholder="เช่น 45 - 80"
+                            placeholderTextColor="#9CA3AF"
+                            className="flex-1 text-[15px] font-bold text-gray-900 py-0.5"
+                          />
+                          <Text className="text-gray-500 text-[13px] ml-1">บาท {secondaryPriceUnit}</Text>
+                        </View>
+                      </View>
+                    )}
+                  </View>
+                )}
+
+                <TouchableOpacity
+                  onPress={handleSaveBusiness}
+                  disabled={bizSaving || !bizPhone.trim()}
+                  activeOpacity={0.85}
+                  className={`py-3.5 rounded-2xl items-center flex-row justify-center mb-6 ${bizSaving || !bizPhone.trim() ? "bg-gray-200" : "bg-[#2D6A4F]"
+                    }`}
+                >
+                  {bizSaving ? (
+                    <ActivityIndicator color="#FFFFFF" />
+                  ) : (
+                    <Text className={`font-bold text-[15px] ${bizSaving || !bizPhone.trim() ? "text-gray-400" : "text-white"}`}>
+                      บันทึกข้อมูล
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </ScrollView>
+            </KeyboardAvoidingView>
+
+            {/* Nested sheets — mounted inside the modal so they float above it. */}
+            <DayPickerSheet
+              visible={bizDaySheetOpen}
+              selected={bizDayOffs}
+              onCancel={() => setBizDaySheetOpen(false)}
+              onConfirm={(days) => {
+                setBizDayOffs(days);
+                setBizDaySheetOpen(false);
+              }}
+            />
+            <DayPickerSheet
+              visible={bizWeekdaySheetOpen}
+              selected={bizWeekdayDays}
+              title="เลือกวันธรรมดา"
+              resetLabel=""
+              selectedLabel="ใช่"
+              unselectedLabel="ไม่ใช่"
+              onCancel={() => setBizWeekdaySheetOpen(false)}
+              onConfirm={(days) => {
+                setBizWeekdayDays(days);
+                setBizWeekdaySheetOpen(false);
+              }}
+            />
+            <DayPickerSheet
+              visible={bizWeekendSheetOpen}
+              selected={bizWeekendDays}
+              title="เลือกวันหยุดสุดสัปดาห์"
+              resetLabel=""
+              selectedLabel="ใช่"
+              unselectedLabel="ไม่ใช่"
+              onCancel={() => setBizWeekendSheetOpen(false)}
+              onConfirm={(days) => {
+                setBizWeekendDays(days);
+                setBizWeekendSheetOpen(false);
+              }}
+            />
+            <TimeRangeSheet
+              visible={bizTimeSheet !== null}
+              kind={bizType === "homestay" ? "checkin" : "hours"}
+              initialRange={
+                bizTimeSheet?.range ?? { open: null, close: null, allDay: false }
+              }
+              onCancel={() => setBizTimeSheet(null)}
+              onConfirm={(range) => {
+                if (!bizTimeSheet) return;
+                const formatted = formatHourRange(
+                  range,
+                  bizType === "homestay" ? "checkin" : "hours"
+                );
+                if (bizTimeSheet.which === "weekday") {
+                  setBizWeekdayHoursText(formatted);
+                } else {
+                  setBizWeekendHoursText(formatted);
+                }
+                setBizTimeSheet(null);
+              }}
+            />
           </View>
         </View>
       </Modal>

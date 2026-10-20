@@ -1,4 +1,5 @@
 import { config, isAiConfigured } from "./config";
+import { AiUpstreamError } from "./aiErrors";
 import {
   SYSTEM_PROMPT,
   buildSummaryPrompt,
@@ -130,7 +131,7 @@ export async function generateSummary(
 
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
-      throw new Error(`AI endpoint error ${res.status}: ${errText.slice(0, 300)}`);
+      throw new AiUpstreamError(res.status, errText);
     }
 
     const data: any = await res.json();
@@ -229,7 +230,7 @@ export async function generateCaptions(input: CaptionInput): Promise<string[]> {
     });
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
-      throw new Error(`AI endpoint error ${res.status}: ${errText.slice(0, 200)}`);
+      throw new AiUpstreamError(res.status, errText);
     }
     const data: any = await res.json();
     const rawText: string = Array.isArray(data?.content)

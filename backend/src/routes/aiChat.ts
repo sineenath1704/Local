@@ -3,6 +3,8 @@ import { callAi, isAiConfigured, AiMessage } from "../aiCore";
 import { buildChatSystemPrompt, FolderContext, PlaceContext } from "../tripPrompt";
 
 import { getSupabaseAdmin } from "../supabaseAdmin";
+import { requestId } from "../middleware/requestContext";
+import { sendError } from "../middleware/errors";
 
 const router = Router();
 
@@ -25,7 +27,11 @@ router.post("/", async (req: Request, res: Response) => {
   const place: PlaceContext | undefined = body.place;
 
   if (messages.length === 0) {
-    return res.status(400).json({ error: "messages is required" });
+    return res.status(400).json({
+      error: "ต้องส่ง messages อย่างน้อย 1 ข้อความ",
+      code: "BAD_REQUEST",
+      requestId: requestId(req),
+    });
   }
 
   // If no explicit place was passed, check if user mentions any registered community place
@@ -36,20 +42,35 @@ router.post("/", async (req: Request, res: Response) => {
       try {
         const admin = getSupabaseAdmin();
         if (admin) {
+          // business_hours / business_pricing are the structured twins of the
+          // free-text opening_hours / price_info — the AI can answer "เปิดวัน
+          // อาทิตย์ไหม" from them without re-parsing prose on every prompt.
+          // The users embed adds who runs the place, for "ใครเป็นเจ้าของ".
           const { data: places } = await admin
             .from("community_places")
             .select(
-              "place_name, formatted_address, province, district, subdistrict, village, google_maps_url, phone, opening_hours, price_info, rating, user_ratings_total"
+              "place_name, formatted_address, province, district, subdistrict, village, google_maps_url, phone, opening_hours, price_info, rating, user_ratings_total, business_hours, business_pricing, users:owner_id (display_name, bio, avatar_url, total_likes_received, videos(count))"
             )
-            .limit(20);
+            .limit(50);
 
           if (places && places.length > 0) {
-            const matched = places.find(
-              (p) =>
-                p.place_name &&
-                lastUser.content.toLowerCase().includes(p.place_name.toLowerCase())
-            );
+            // Rank instead of take-the-first-hit. Querying "บ้านปายเปิดกี่โมง"
+            // matches both "บ้านปาย" and "บ้านปายใหม่", and the old `.find()`
+            // returned whichever row Postgres happened to order first. The
+            // longer name is the more specific one the traveller wrote, so it
+            // wins; rating only breaks a genuine tie.
+            const query = lastUser.content.toLowerCase();
+            const matched = places
+              .filter((p) => p.place_name && query.includes(p.place_name.toLowerCase()))
+              .sort((a, b) => {
+                const lenDiff = (b.place_name?.length ?? 0) - (a.place_name?.length ?? 0);
+                if (lenDiff !== 0) return lenDiff;
+                return (Number(b.rating) || 0) - (Number(a.rating) || 0);
+              })[0];
             if (matched) {
+              // owner_id is nullable (ON DELETE SET NULL), so a place whose
+              // host deleted their account comes back with no embed at all.
+              const host = Array.isArray(matched.users) ? matched.users[0] : matched.users;
               resolvedPlace = {
                 placeName: matched.place_name,
                 address: matched.formatted_address,
@@ -63,6 +84,17 @@ router.post("/", async (req: Request, res: Response) => {
                 priceInfo: matched.price_info,
                 rating: matched.rating,
                 userRatingsTotal: matched.user_ratings_total,
+                businessHours: matched.business_hours ?? undefined,
+                businessPricing: matched.business_pricing ?? undefined,
+                hostProfile: host
+                  ? {
+                      displayName: host.display_name ?? undefined,
+                      bio: host.bio ?? undefined,
+                      avatarUrl: host.avatar_url ?? undefined,
+                      videoCount: host.videos?.[0]?.count ?? 0,
+                      likesReceived: host.total_likes_received ?? 0,
+                    }
+                  : undefined,
               };
             }
           }
@@ -91,9 +123,7 @@ router.post("/", async (req: Request, res: Response) => {
     const reply = await callAi({ system, messages, maxTokens: 2048 });
     return res.json({ reply });
   } catch (err: any) {
-    const message =
-      err?.name === "AbortError" ? "หมดเวลาเชื่อมต่อ AI" : err?.message || "AI ตอบกลับไม่สำเร็จ";
-    return res.status(502).json({ error: message });
+    return sendError(res, err, req);
   }
 });
 

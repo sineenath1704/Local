@@ -160,6 +160,63 @@ export interface PlaceContext {
   village?: string;
   rating?: number;
   userRatingsTotal?: number;
+  /**
+   * Per-weekday hours keyed mon..sun, each an array of {open, close}.
+   * `[]` means deliberately closed that day; a missing key means the host
+   * never set that day. Authoritative over `openingHours` when present.
+   */
+  businessHours?: Record<string, { open: string; close: string }[]>;
+  /** Structured pricing; authoritative over `priceInfo` when present. */
+  businessPricing?: {
+    weekday?: { amount?: string; currency?: string } | null;
+    weekend?: { amount?: string; currency?: string } | null;
+    unit?: string | null;
+  };
+  /** Who runs the place. Absent once a host deletes their account. */
+  hostProfile?: {
+    displayName?: string;
+    bio?: string;
+    avatarUrl?: string;
+    videoCount?: number;
+    likesReceived?: number;
+  };
+}
+
+const DAY_LABELS: Record<string, string> = {
+  mon: "จันทร์", tue: "อังคาร", wed: "พุธ", thu: "พฤหัสบดี",
+  fri: "ศุกร์", sat: "เสาร์", sun: "อาทิตย์",
+};
+
+/**
+ * "จันทร์: 08:00-17:00 | อังคาร: 08:00-17:00 | … | อาทิตย์: ปิด"
+ *
+ * Readable rather than raw JSON — the model handles a labelled line better
+ * than `{"sun":[]}`, and an empty array becomes "ปิด" instead of nothing,
+ * which is the distinction a traveller actually cares about.
+ */
+function describeBusinessHours(
+  hours: Record<string, { open: string; close: string }[]>
+): string {
+  const lines: string[] = [];
+  for (const [key, label] of Object.entries(DAY_LABELS)) {
+    const ranges = hours[key];
+    if (!ranges) continue;
+    if (ranges.length === 0) {
+      lines.push(`${label}: ปิด`);
+      continue;
+    }
+    lines.push(`${label}: ${ranges.map((r) => `${r.open}-${r.close}`).join(", ")}`);
+  }
+  return lines.join(" | ");
+}
+
+function describeBusinessPricing(
+  p: NonNullable<PlaceContext["businessPricing"]>
+): string {
+  const parts: string[] = [];
+  if (p.weekday?.amount) parts.push(`วันธรรมดา ${p.weekday.amount} บาท${p.unit ?? ""}`);
+  if (p.weekend?.amount) parts.push(`วันหยุด ${p.weekend.amount} บาท${p.unit ?? ""}`);
+  return parts.join(" | ");
 }
 
 export function buildChatSystemPrompt(folder?: FolderContext, place?: PlaceContext): string {
@@ -177,10 +234,35 @@ ${place.openingHours ? `เวลาเปิด-ปิดทำการ: ${pla
 ${place.priceInfo ? `อัตราค่าบริการ/ราคา: ${place.priceInfo}` : ""}
 ${place.googleMapsUrl ? `ลิงก์ Google Maps: ${place.googleMapsUrl}` : ""}
 ${place.rating ? `คะแนนรีวิว: ${place.rating} ดาว (${place.userRatingsTotal || 0} รีวิว)` : ""}
+${place.businessHours ? `เวลาเปิด-ปิดแยกรายวัน: ${describeBusinessHours(place.businessHours)}` : ""}
+${place.businessPricing ? describeBusinessPricing(place.businessPricing) ? `อัตราค่าบริการ: ${describeBusinessPricing(place.businessPricing)}` : "" : ""}
 
 * คำสั่งสำคัญ: เมื่อผู้ใช้ถามเกี่ยวกับสถานที่นี้ เช่น เวลาเปิดปิด, ค่าบริการ/ราคา, วันหยุดประจำร้าน หรือวิธีการเดินทาง:
 - ให้ยึดข้อมูลที่ยืนยันแล้วข้างต้นเป็นข้อเท็จจริงหลัก และตอบได้อย่างชัดเจนมั่นใจ ห้ามบอกว่าไม่มีข้อมูล
+- ถ้ามีบรรทัด "เวลาเปิด-ปิดแยกรายวัน" ให้ตอบตามวันที่ถาม โดย "ปิด" หมายถึงวันนั้นไม่ให้บริการอย่างชัดเจน ห้ามตีความว่าเปิดทั้งวัน
 - หากข้อมูลมีระบุแยกวันธรรมดา วันหยุดสุดสัปดาห์/เทศกาล หรือวันหยุดประจำร้าน ให้แยกตอบให้นักท่องเที่ยวทราบอย่างชัดเจน (เช่น เวลาและราคาของวันธรรมดา vs วันหยุด และวันที่ร้านไม่เปิดบริการ) *`;
+  }
+
+  // Present only while the host still has an account — owner_id is set to
+  // NULL when they delete it, and a block of empty placeholders would only
+  // invite the model to speculate.
+  if (place?.hostProfile) {
+    const h = place.hostProfile;
+    const lines: string[] = [];
+    if (h.displayName) lines.push(`ชื่อเจ้าของ: ${h.displayName}`);
+    if (h.bio) lines.push(`แนะนำตัว: ${h.bio}`);
+    if (h.videoCount) lines.push(`คลิปที่โพสต์ไว้: ${h.videoCount} คลิป`);
+    if (h.likesReceived) lines.push(`ยอดถูกใจรวม: ${h.likesReceived}`);
+    if (lines.length > 0) {
+      prompt += `
+
+[ข้อมูลเจ้าของสถานที่ (Host profile — ผ่านการยืนยันแล้ว)]:
+${lines.join("\n")}
+
+* เมื่อผู้ใช้ถามเกี่ยวกับเจ้าของ เช่น "ใครเป็นเจ้าของ" หรือ "เจ้าของเป็นใคร" ให้ใช้ข้อมูลข้างต้นตอบได้ทันที
+* ใช้จำนวนคลิปเป็นบริบทประกอบ เช่น แนะนำว่าเจ้าของมีคลิปให้ชมในแอป
+* ห้ามแต่งข้อมูลที่ไม่ได้ระบุไว้ข้างต้น`;
+    }
   }
 
   if (folder && folder.places.length > 0) {

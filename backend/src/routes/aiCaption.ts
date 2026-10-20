@@ -1,6 +1,8 @@
 import { Router, Request, Response } from "express";
 import { generateCaptions } from "../aiClient";
 import { CaptionInput } from "../prompt";
+import { errorBody, sendError } from "../middleware/errors";
+import { requestId } from "../middleware/requestContext";
 
 const router = Router();
 
@@ -33,9 +35,9 @@ router.post("/", async (req: Request, res: Response) => {
     const captions = await generateCaptions(input);
     return res.json({ captions });
   } catch (err: any) {
-    const message =
-      err?.name === "AbortError" ? "หมดเวลาเชื่อมต่อ AI" : err?.message || "ขอแคปชันจาก AI ไม่สำเร็จ";
-    return res.status(502).json({ status: "error", message });
+    const body = errorBody(err, req);
+    // Keep `status`/`message` keys so the existing client shape still works.
+    return res.status(502).json({ ...body, status: "error", message: body.error });
   }
 });
 

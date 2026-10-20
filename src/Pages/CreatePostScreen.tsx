@@ -38,6 +38,7 @@ import type { PlaceItem } from "../data/thailandGeographicData";
 import { verifyLocationOffline, type VerifyResult } from "../services/placeVerifyService";
 import { findLocalPlaces, saveVerifiedPlace, type LocalPlace } from "../services/placesLocalService";
 import { verifyPlaceOnGoogle, type PlaceCandidate } from "../services/placesService";
+import { asAiError } from "../services/aiHttp";
 
 export interface InitialPostLocation {
   placeName?: string;
@@ -174,28 +175,41 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     if (!url) return;
     setSummaryLoading(true);
     setSummaryEditing(false);
-    const result = await generatePreviewSummary({
-      videoUrl: url,
-      audioType: "speech",
-      // In own_business mode for hosts, pass their registered place as context
-      // so AI summarizes atmosphere only, NOT guessing location.
-      uploaderType: isHost && hostPostMode === "own_business" ? "community" : "tourist",
-      location: isHost && hostPostMode === "own_business" && hostLocation
-        ? [hostLocation.placeName, hostLocation.community, hostLocation.subdistrict,
-           hostLocation.district, hostLocation.province].filter(Boolean).join(" ")
-        : undefined,
-    });
+
+    let result: Awaited<ReturnType<typeof generatePreviewSummary>> | null = null;
+    try {
+      result = await generatePreviewSummary({
+        videoUrl: url,
+        audioType: "speech",
+        // In own_business mode for hosts, pass their registered place as context
+        // so AI summarizes atmosphere only, NOT guessing location.
+        uploaderType: isHost && hostPostMode === "own_business" ? "community" : "tourist",
+        location: isHost && hostPostMode === "own_business" && hostLocation
+          ? [hostLocation.placeName, hostLocation.community, hostLocation.subdistrict,
+             hostLocation.district, hostLocation.province].filter(Boolean).join(" ")
+          : undefined,
+      });
+    } catch (err) {
+      // The call FAILED — leave every location field exactly as the user left
+      // it. Previously a failure produced `null`, which fell into the
+      // "AI found no place" branch below and silently wiped whatever they had
+      // typed in.
+      const aiErr = asAiError(err);
+      console.warn("[summary] FAIL", aiErr?.status ?? "-", aiErr?.message ?? err);
+      setSummary(null);
+      setSummaryDraft("");
+      Alert.alert(
+        "สรุปไม่สำเร็จ",
+        `${aiErr?.message ?? "เรียก AI ไม่สำเร็จ"}\n\nข้อมูลสถานที่ที่กรอกไว้ไม่ถูกแตะต้อง — กด "สรุปใหม่" เพื่อลองอีกครั้ง`
+      );
+      return;
+    } finally {
+      setSummaryLoading(false);
+    }
+
     setSummary(result);
     setSummaryDraft(result?.text ?? "");
     setAccuracy(0);
-    setSummaryLoading(false);
-
-    // Diagnostic log — check what M3 returned
-    console.log("[summary] status =", result?.status,
-      "place_name =", result?.place?.place_name ?? "null",
-      "community =", (result?.place as any)?.community ?? "null",
-      "province =", result?.place?.location?.province ?? "null"
-    );
 
     // ── Host in own_business mode: location is ALWAYS locked to registered business ──
     // AI is only used for atmosphere summary, never for location extraction.
@@ -233,25 +247,20 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
         setLocationSource("ai");
         await runLocationVerify(result.place);
       }
-    } else {
-      // No place from AI → clear location (tourist/community_spot mode only)
-      if (!(isHost && hostPostMode === "own_business")) {
-        console.log("[summary] AI found no place → clearing location");
-        setLocationName("");
-        setPlaceName("");
-        setCommunity("");
-        setSubdistrict("");
-        setDistrict("");
-        setProvince("");
-        setCoords(null);
-        setLocationConfirmed(false);
-        setVerify(null);
-        setLocationSource("manual");
-      }
-    }
-
-    if (!result) {
-      Alert.alert("สรุปไม่สำเร็จ", "ตอนนี้ให้ AI สรุปวิดีโอไม่ได้ ลองกดสรุปใหม่อีกครั้งได้เลย");
+    } else if (!(isHost && hostPostMode === "own_business")) {
+      // The call SUCCEEDED and AI genuinely found no place → clear location.
+      // (Only reachable now that transport errors return early above.)
+      console.log("[summary] AI found no place → clearing location");
+      setLocationName("");
+      setPlaceName("");
+      setCommunity("");
+      setSubdistrict("");
+      setDistrict("");
+      setProvince("");
+      setCoords(null);
+      setLocationConfirmed(false);
+      setVerify(null);
+      setLocationSource("manual");
     }
   };
 
@@ -541,19 +550,28 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
   const handleAiCaption = async () => {
     setCaptionLoading(true);
     setCaptionIdeas([]);
-    const ideas = await suggestCaptions({
-      draft: caption,
-      locationName,
-      province,
-      district,
-      hashtags: parseHashtags(hashtags),
-      summaryText: summary?.text,
-      highlights: summary?.highlights ?? summary?.place?.highlights,
-    });
-    setCaptionIdeas(ideas);
-    setCaptionLoading(false);
-    if (ideas.length === 0) {
-      Alert.alert("ขออภัย", "ตอนนี้ขอแคปชันจาก AI ไม่สำเร็จ ลองใหม่อีกครั้งนะคะ");
+    try {
+      const ideas = await suggestCaptions({
+        draft: caption,
+        locationName,
+        province,
+        district,
+        hashtags: parseHashtags(hashtags),
+        summaryText: summary?.text,
+        highlights: summary?.highlights ?? summary?.place?.highlights,
+      });
+      setCaptionIdeas(ideas);
+      if (ideas.length === 0) {
+        Alert.alert("ขออภัย", "AI ตอบกลับมาแต่ไม่มีแคปชันให้ใช้ ลองใหม่อีกครั้งนะคะ");
+      }
+    } catch (err) {
+      // Show the actual reason (401 / timeout / unreachable), not a fixed
+      // apology that hid all four from the user.
+      const aiErr = asAiError(err);
+      console.warn("[caption] FAIL", aiErr?.status ?? "-", aiErr?.message ?? err);
+      Alert.alert("ขอแคปชันไม่สำเร็จ", aiErr?.message ?? "เรียก AI ไม่สำเร็จ");
+    } finally {
+      setCaptionLoading(false);
     }
   };
 

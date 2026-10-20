@@ -5,6 +5,7 @@ import * as QueryParams from "expo-auth-session/build/QueryParams";
 import * as WebBrowser from "expo-web-browser";
 import * as Linking from "expo-linking";
 import { supabase, isSupabaseConfigured } from "../lib/supabase";
+import { API_BASE_URL, API_TIMEOUT_MS } from "../services/apiConfig";
 
 /**
  * AuthContext — Supabase Google OAuth (via Expo deep linking).
@@ -51,6 +52,7 @@ export interface AppUser {
   // Host business profile (Ground truth for posts)
   business_place_name?: string | null;
   business_price_info?: string | null;
+  business_opening_hours?: string | null;
   business_phone?: string | null;
   business_lat?: number | null;
   business_lng?: number | null;
@@ -85,6 +87,7 @@ export interface OnboardingInput {
   /** Host business info */
   businessPlaceName?: string;
   businessPriceInfo?: string;
+  businessOpeningHours?: string;
   businessPhone?: string;
   businessLat?: number | null;
   businessLng?: number | null;
@@ -114,6 +117,7 @@ interface AuthState {
   updateBusinessProfile: (patch: {
     businessPlaceName?: string;
     businessPriceInfo?: string;
+    businessOpeningHours?: string;
     businessPhone?: string;
     businessLat?: number | null;
     businessLng?: number | null;
@@ -122,6 +126,8 @@ interface AuthState {
     businessDistrict?: string | null;
     businessProvince?: string | null;
   }) => Promise<{ error: string | null }>;
+  /** Permanently delete the calling account and its data. */
+  deleteAccount: () => Promise<{ error: string | null }>;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -316,6 +322,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // Host business profile
         if (input.businessPlaceName?.trim()) patch.business_place_name = input.businessPlaceName.trim();
         if (input.businessPriceInfo?.trim()) patch.business_price_info = input.businessPriceInfo.trim();
+        if (input.businessOpeningHours?.trim()) patch.business_opening_hours = input.businessOpeningHours.trim();
         if (input.businessPhone?.trim()) patch.business_phone = input.businessPhone.trim();
         if (input.businessLat != null) patch.business_lat = input.businessLat;
         if (input.businessLng != null) patch.business_lng = input.businessLng;
@@ -378,6 +385,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     async (patch: {
       businessPlaceName?: string;
       businessPriceInfo?: string;
+      businessOpeningHours?: string;
       businessPhone?: string;
       businessLat?: number | null;
       businessLng?: number | null;
@@ -392,6 +400,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const row: Record<string, any> = {};
       if (patch.businessPlaceName !== undefined) row.business_place_name = patch.businessPlaceName.trim();
       if (patch.businessPriceInfo !== undefined) row.business_price_info = patch.businessPriceInfo.trim();
+      if (patch.businessOpeningHours !== undefined) row.business_opening_hours = patch.businessOpeningHours.trim();
       if (patch.businessPhone !== undefined) row.business_phone = patch.businessPhone.trim();
       if (patch.businessLat !== undefined) row.business_lat = patch.businessLat;
       if (patch.businessLng !== undefined) row.business_lng = patch.businessLng;
@@ -420,6 +429,54 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (session?.user) await loadUserRow(session.user.id);
   }, [session, loadUserRow]);
 
+  /**
+   * Permanently delete the calling account. Backend cascade covers all
+   * data tables; mobile session is signed out so the AuthGate flips
+   * back to the login screen. Refreshes the session first so a
+   * long-idle token (gap F in the validation review) doesn't fail
+   * with an opaque 401 right at the destructive moment.
+   */
+  const deleteAccount = useCallback(async (): Promise<{ error: string | null }> => {
+    try {
+      const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession();
+      if (refreshErr) {
+        return { error: "เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่แล้วลองอีกครั้ง" };
+      }
+      const token = refreshed?.session?.access_token ?? session?.access_token;
+      if (!token) {
+        return { error: "ยังไม่ได้เข้าสู่ระบบ" };
+      }
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS * 3);
+      try {
+        const res = await fetch(`${API_BASE_URL}/account/delete`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          if (res.status === 401) {
+            return { error: "เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่แล้วลองอีกครั้ง" };
+          }
+          const body = await res.json().catch(() => ({} as any));
+          return { error: body.error ?? "ลบบัญชีไม่สำเร็จ" };
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+
+      // Backend already wiped the row — signOut clears local state.
+      await signOut();
+      return { error: null };
+    } catch (e: any) {
+      if (e?.name === "AbortError") {
+        return { error: "เซิร์ฟเวอร์ตอบช้า กรุณาลองอีกครั้ง" };
+      }
+      return { error: e?.message ?? "ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์" };
+    }
+  }, [session, signOut]);
+
   // Signed in, but no username yet → must finish onboarding.
   const needsOnboarding = Boolean(session?.user && (!user || !user.username));
 
@@ -437,8 +494,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       completeOnboarding,
       updateProfile,
       updateBusinessProfile,
+      deleteAccount,
     }),
-    [loading, session, user, needsOnboarding, signInWithGoogle, signOut, refreshUser, isUsernameAvailable, completeOnboarding, updateProfile, updateBusinessProfile]
+    [loading, session, user, needsOnboarding, signInWithGoogle, signOut, refreshUser, isUsernameAvailable, completeOnboarding, updateProfile, updateBusinessProfile, deleteAccount]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

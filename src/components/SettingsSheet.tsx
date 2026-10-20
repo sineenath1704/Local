@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import {
   View,
   Text,
@@ -13,9 +13,14 @@ import {
   GlobeAltIcon,
   ArrowRightOnRectangleIcon,
   CheckIcon,
+  BugAntIcon,
+  ExclamationTriangleIcon,
 } from "react-native-heroicons/outline";
 import { useSettings, AppLanguage } from "../state/SettingsContext";
 import { useAuth } from "../state/AuthContext";
+import AiDiagnosticsSheet from "./AiDiagnosticsSheet";
+import DeleteAccountSheet from "./DeleteAccountSheet";
+import { describeBaseUrl, useAiDiagnostics } from "../services/aiDiagnostics";
 
 interface SettingsSheetProps {
   visible: boolean;
@@ -30,7 +35,10 @@ const LANGUAGES: { key: AppLanguage; label: string; flag: string }[] = [
 export default function SettingsSheet({ visible, onClose }: SettingsSheetProps) {
   const insets = useSafeAreaInsets();
   const { language, setLanguage } = useSettings();
-  const { signOut } = useAuth();
+  const { signOut, user } = useAuth();
+  const diagnostics = useAiDiagnostics();
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [showDeleteAccount, setShowDeleteAccount] = useState(false);
 
   const confirmLogout = () => {
     Alert.alert("ออกจากระบบ", "ต้องการออกจากระบบใช่ไหม?", [
@@ -93,6 +101,35 @@ export default function SettingsSheet({ visible, onClose }: SettingsSheetProps) 
           })}
         </View>
 
+        {/* AI diagnostics — which URL the app hits, and what failed */}
+        <View className="px-5 pt-4">
+          <TouchableOpacity
+            onPress={() => setShowDiagnostics(true)}
+            activeOpacity={0.8}
+            className="flex-row items-center justify-between bg-gray-900 rounded-2xl px-4 py-3"
+          >
+            <View className="flex-1 pr-3">
+              <View className="flex-row items-center">
+                <BugAntIcon size={16} color="#A3E635" />
+                <Text className="text-white font-bold text-[14px] ml-2">
+                  AI Diagnostics
+                </Text>
+                {diagnostics.some((d) => d.outcome === "error") ? (
+                  <View className="ml-2 px-1.5 py-0.5 rounded-md bg-red-500">
+                    <Text className="text-white text-[10px] font-bold">
+                      {diagnostics.filter((d) => d.outcome === "error").length}
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+              <Text className="text-gray-400 text-[10px] font-mono mt-1" numberOfLines={1}>
+                {describeBaseUrl()}
+              </Text>
+            </View>
+            <Text className="text-gray-400 text-[12px] font-bold">ดู ›</Text>
+          </TouchableOpacity>
+        </View>
+
         {/* Logout */}
         <View className="px-5 pt-3">
           <TouchableOpacity
@@ -104,7 +141,42 @@ export default function SettingsSheet({ visible, onClose }: SettingsSheetProps) 
             <Text className="text-red-600 font-bold text-[14px] ml-2">ออกจากระบบ</Text>
           </TouchableOpacity>
         </View>
+
+        {/* Danger Zone — kept visually separate so it isn't mistaken for
+            a routine toggle. Opens a type-to-confirm bottom sheet. */}
+        <View className="px-5 pt-6 pb-2">
+          <View className="flex-row items-center mb-2">
+            <ExclamationTriangleIcon size={14} color="#DC2626" />
+            <Text className="text-red-600 font-bold text-[12px] ml-1.5 uppercase tracking-wider">
+              โซนอันตราย
+            </Text>
+          </View>
+          <TouchableOpacity
+            onPress={() => setShowDeleteAccount(true)}
+            activeOpacity={0.8}
+            className="flex-row items-center justify-center bg-white border-2 border-red-200 py-3.5 rounded-2xl"
+          >
+            <ExclamationTriangleIcon size={18} color="#DC2626" />
+            <Text className="text-red-600 font-bold text-[14px] ml-2">
+              ลบบัญชีถาวร
+            </Text>
+          </TouchableOpacity>
+          <Text className="text-[11px] text-gray-500 mt-1.5 px-1 leading-[16px]">
+            ลบบัญชี คลิป คอมเมนต์ แชท และข้อมูลทั้งหมดที่เชื่อมกับบัญชีนี้ ไม่สามารถกู้คืนได้
+          </Text>
+        </View>
       </View>
+
+      {/* Full-screen siblings — Modals nest poorly on iOS. */}
+      <AiDiagnosticsSheet
+        visible={showDiagnostics}
+        onClose={() => setShowDiagnostics(false)}
+      />
+      <DeleteAccountSheet
+        visible={showDeleteAccount}
+        onClose={() => setShowDeleteAccount(false)}
+        isHost={Boolean(user?.otop_verified)}
+      />
     </Modal>
   );
 }

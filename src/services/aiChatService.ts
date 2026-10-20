@@ -1,4 +1,5 @@
-import { API_BASE_URL, API_TIMEOUT_MS } from "./apiConfig";
+import { API_TIMEOUT_MS } from "./apiConfig";
+import { aiFetch, AiError, AiFetchOptions, toastAiError } from "./aiHttp";
 
 export interface ChatTurn {
   role: "user" | "assistant";
@@ -10,37 +11,44 @@ export interface FolderContext {
   places: string[];
 }
 
-async function postJson(path: string, body: any, ms: number): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ms);
-  try {
-    return await fetch(`${API_BASE_URL}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
+/** Every call raises a toast on failure, then rethrows for the caller to render. */
+function withToast<T>(opts: AiFetchOptions): Promise<T> {
+  return aiFetch<T>({
+    ...opts,
+    onSettled: (ok, error) => {
+      if (!ok && error) toastAiError(error);
+    },
+  });
 }
 
 /**
  * Send the running conversation to the backend AI chat endpoint.
- * Returns the assistant's reply text, or a friendly fallback on failure.
+ *
+ * Throws `AiError` on failure. This used to return a fixed Thai sentence
+ * ("ระบบ AI ขัดข้องชั่วคราว") which the chat screen appended as if it were a
+ * real assistant reply — so a 401, a timeout and a dead backend were
+ * indistinguishable. The screen now catches and styles it separately.
  */
-export async function sendChat(
-  messages: ChatTurn[],
-  folder?: FolderContext
-): Promise<string> {
-  try {
-    const res = await postJson("/ai-chat", { messages, folder }, API_TIMEOUT_MS * 3);
-    if (!res.ok) {
-      return "ขออภัย ระบบ AI ขัดข้องชั่วคราว ลองใหม่อีกครั้งนะครับ";
-    }
-    const data = await res.json();
-    return typeof data.reply === "string" ? data.reply : "ขออภัย ไม่สามารถตอบได้ในตอนนี้";
-  } catch {
-    return "เชื่อมต่อเซิร์ฟเวอร์ AI ไม่ได้ ตรวจสอบว่า backend กำลังรันอยู่หรือไม่";
+export async function sendChat(messages: ChatTurn[], folder?: FolderContext): Promise<string> {
+  const data = await withToast<{ reply?: unknown }>({
+    label: "ai-chat",
+    path: "/ai-chat",
+    method: "POST",
+    body: { messages, folder },
+    timeoutMs: API_TIMEOUT_MS * 3,
+  });
+  if (typeof data?.reply !== "string") {
+    // 2xx but the payload isn't what we expect — record it rather than guess.
+    throw new AiError({
+      kind: "bad-shape",
+      status: 200,
+      body: JSON.stringify(data ?? null),
+      requestId: null,
+      label: "ai-chat",
+      url: "",
+      durationMs: 0,
+      timeoutMs: API_TIMEOUT_MS * 3,
+    });
   }
+  return data.reply;
 }

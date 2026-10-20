@@ -19,11 +19,33 @@ import {
   CameraIcon,
   ArrowRightIcon,
   MapPinIcon,
+  ChevronDownIcon,
 } from "react-native-heroicons/outline";
 import { useAuth } from "../../state/AuthContext";
 import { verifyOtop, type OtopProfile } from "../../services/otopService";
 import { verifyPlaceOnGoogle, type PlaceCandidate } from "../../services/placesService";
-import { supabase } from "../../lib/supabase";
+import {
+  BIZ_TYPE_OPTIONS,
+  PRICE_UNITS,
+  detectBusinessProfile,
+  formatClosedDaysStr,
+  formatDayGroupLabel,
+  formatHourRange,
+  formatPriceStr,
+  parseDayGroupFromLabel,
+  parseHourRange,
+  parseOpeningHours,
+  profileFor,
+  resolvePriceUnit,
+  composeHoursJson,
+  composePricingJson,
+  type BizType,
+  type ParsedGoogleHours,
+} from "../../lib/businessProfile";
+import EditableValueRow from "../../components/EditableValueRow";
+import DayPickerSheet from "../../components/DayPickerSheet";
+import TimeRangeSheet, { type TimeRangeSheetProps } from "../../components/TimeRangeSheet";
+import { upsertMyPlace, syntheticPlaceId, mapsUrlFor } from "../../services/hostPlaceService";
 
 /**
  * OnboardingScreen — shown once after a first Google sign-in, before the app.
@@ -36,7 +58,7 @@ type Step = "role" | "otop" | "business" | "username" | "details";
 
 export default function OnboardingScreen() {
   const insets = useSafeAreaInsets();
-  const { isUsernameAvailable, completeOnboarding } = useAuth();
+  const { isUsernameAvailable, completeOnboarding, user } = useAuth();
 
   const [step, setStep] = useState<Step>("role");
 
@@ -47,21 +69,83 @@ export default function OnboardingScreen() {
   const [otop, setOtop] = useState<OtopProfile | null>(null);
 
   // Host business profile
-  type BizType = "homestay" | "activity" | "cafe" | "custom";
   const [bizType, setBizType] = useState<BizType>("homestay");
-  const [weekdayLabel, setWeekdayLabel] = useState("วันธรรมดา (อา.-พฤ.)");
-  const [weekendLabel, setWeekendLabel] = useState("วันหยุดสุดสัปดาห์ (ศ.-ส. & นักขัตฤกษ์)");
-  const [weekdayHours, setWeekdayHours] = useState("");
-  const [weekendHours, setWeekendHours] = useState("");
-  const [closedDays, setClosedDays] = useState("เปิดทุกวัน");
+  // Weekday/weekend day arrays — the wizard edits these via DayPickerSheet and
+  // the displayed label (rebuilt below) comes from them. Default values come
+  // from the homestay profile so the user sees something meaningful before
+  // they pick a Google place or a business-type chip.
+  const [weekdayDays, setWeekdayDays] = useState<string[]>(
+    () => parseDayGroupFromLabel(profileFor("homestay").weekdayLabel)?.days ?? []
+  );
+  const [weekendDays, setWeekendDays] = useState<string[]>(
+    () => parseDayGroupFromLabel(profileFor("homestay").weekendLabel)?.days ?? []
+  );
+  // Hours stay as text inputs for the legacy seed path (seeded from
+  // parseOpeningHours on a Google pick); TimeRangeSheet writes via the
+  // dedicated state added below.
+  const [weekdayHoursText, setWeekdayHoursText] = useState("");
+  const [weekendHoursText, setWeekendHoursText] = useState("");
+  const [closedDayKeys, setClosedDayKeys] = useState<string[]>([]);
   const [weekdayPrice, setWeekdayPrice] = useState("");
   const [weekendPrice, setWeekendPrice] = useState("");
+  const [priceUnit, setPriceUnit] = useState("/ คืน");
+  const [customUnit, setCustomUnit] = useState("");
+
+  // Each Google-derived section shows its value and stays read-only until the
+  // host asks to change it — most of what Google returns is already right, so
+  // a wall of empty-looking inputs made the step feel like typing, not checking.
+  const [editing, setEditing] = useState({
+    type: false,
+    weekday: false,
+    weekend: false,
+    closed: false,
+    price: false,
+  });
+  const toggleEditing = (key: keyof typeof editing) =>
+    setEditing((prev) => ({ ...prev, [key]: !prev[key] }));
+
+  /**
+   * Seed the TimeRangeSheet from whatever hours string we have. If the value
+   * came from parseOpeningHours we already know it's two HH:mm tokens; if it's
+   * the host's free-text pick we hand the raw value to the sheet so a text
+   * like "เปิด 24 ชม." doesn't get rewritten into a meaningless "00:00 -
+   * 00:00".
+   */
+  const seedTimeSheet = (text: string) => {
+    if (!text) return { open: null, close: null, allDay: false };
+    const range = parseHourRange(text);
+    return {
+      open: range.allDay ? null : range.open,
+      close: range.allDay ? null : range.close,
+      allDay: range.allDay,
+    };
+  };
+
+  // Day labels are rebuilt from the day arrays on every render so the
+  // displayed label never goes out of sync with what the host just picked.
+  // Prefix is fixed per row — only the day list and note change.
+  const weekdayLabel = formatDayGroupLabel("วันธรรมดา", weekdayDays);
+  const weekendLabel = formatDayGroupLabel("วันหยุดสุดสัปดาห์", weekendDays);
 
   const [businessPlaceName, setBusinessPlaceName] = useState("");
   const [businessPhone, setBusinessPhone] = useState("");
   const [searchingPin, setSearchingPin] = useState(false);
   const [pinCandidates, setPinCandidates] = useState<PlaceCandidate[]>([]);
   const [confirmedPlace, setConfirmedPlace] = useState<PlaceCandidate | null>(null);
+  // What Google actually said, kept separate from the editable fields so the
+  // registrant can compare the two instead of guessing what was prefilled.
+  const [googleHours, setGoogleHours] = useState<ParsedGoogleHours | null>(null);
+  const [daySheetOpen, setDaySheetOpen] = useState(false);
+  // Three pickers used by the weekday / weekend / closed sections. Each is its
+  // own state so opening one doesn't accidentally close another, and so the
+  // weekday picker (which is purely a layout question) doesn't carry the
+  // "เปิดทุกวัน" reset button that the closed picker has.
+  const [weekdaySheetOpen, setWeekdaySheetOpen] = useState(false);
+  const [weekendSheetOpen, setWeekendSheetOpen] = useState(false);
+  const [timeSheet, setTimeSheet] = useState<
+    | { which: "weekday" | "weekend"; range: { open: string | null; close: string | null; allDay: boolean } }
+    | null
+  >(null);
 
   const [username, setUsername] = useState("");
   const [checking, setChecking] = useState(false);
@@ -124,57 +208,50 @@ export default function OnboardingScreen() {
   }, [businessPlaceName, step, otop, confirmedPlace]);
 
   const handleSelectBizType = (type: BizType) => {
+    const p = profileFor(type);
     setBizType(type);
-    if (type === "homestay") {
-      setWeekdayLabel("วันธรรมดา (อา.-พฤ.)");
-      setWeekendLabel("วันหยุดสุดสัปดาห์ (ศ.-ส. & นักขัตฤกษ์)");
-    } else if (type === "activity") {
-      setWeekdayLabel("วันธรรมดา (จ.-ศ.)");
-      setWeekendLabel("วันหยุดสุดสัปดาห์ (ส.-อา. & นักขัตฤกษ์)");
-    } else if (type === "cafe") {
-      setWeekdayLabel("วันธรรมดา (จ.-ศ.)");
-      setWeekendLabel("วันหยุดสุดสัปดาห์ (ส.-อา.)");
-    } else {
-      setWeekdayLabel("วันธรรมดา");
-      setWeekendLabel("วันหยุด / เทศกาล");
-    }
-  };
-
-  const parseGoogleHours = (openingHoursStr?: string | null) => {
-    if (!openingHoursStr) return;
-    const parts = openingHoursStr.split("|").map((p) => p.trim());
-    const closedDayNames: string[] = [];
-    parts.forEach((p) => {
-      if (p.includes("ปิดทำการ") || p.toLowerCase().includes("closed")) {
-        const dayName = p.split(":")[0]?.trim();
-        if (dayName) closedDayNames.push(dayName.replace("วัน", ""));
-      }
-    });
-
-    if (closedDayNames.length > 0) {
-      setClosedDays(`ปิดทุกวัน${closedDayNames.join(", ")}`);
-    } else {
-      setClosedDays("เปิดทุกวัน");
-    }
-
-    const openPart = parts.find(
-      (p) => !p.includes("ปิดทำการ") && !p.toLowerCase().includes("closed") && p.includes(":")
-    );
-    if (openPart) {
-      const timeIdx = openPart.indexOf(":");
-      if (timeIdx !== -1) {
-        const timeStr = openPart.slice(timeIdx + 1).trim();
-        setWeekdayHours(timeStr);
-        setWeekendHours(timeStr);
-      }
-    }
+    // Day sets come from the new default labels — empty if the profile
+    // doesn't pin a day list ("วันธรรมดา" alone, for "custom").
+    const wdParsed = parseDayGroupFromLabel(p.weekdayLabel);
+    const weParsed = parseDayGroupFromLabel(p.weekendLabel);
+    setWeekdayDays(wdParsed?.days ?? []);
+    setWeekendDays(weParsed?.days ?? []);
+    setPriceUnit(p.priceUnit);
+    // Leave hours alone if the host already has them — switching type shouldn't
+    // silently rewrite something they typed.
+    if (!weekdayHoursText.trim()) setWeekdayHoursText(p.defaultWeekdayHours);
+    if (!weekendHoursText.trim()) setWeekendHoursText(p.defaultWeekendHours);
+    setEditing((prev) => ({ ...prev, type: false }));
   };
 
   const selectCandidate = (c: PlaceCandidate) => {
     setConfirmedPlace(c);
     if (c.name) setBusinessPlaceName(c.name);
-    if (c.phone) setBusinessPhone(c.phone);
-    if (c.openingHours) parseGoogleHours(c.openingHours);
+    // Don't stomp a number the host already typed — Google often has none.
+    if (c.phone && !businessPhone.trim()) setBusinessPhone(c.phone);
+
+    // Category + day labels come from Google's own classification.
+    const detected = detectBusinessProfile(c.types, c.name, c.primaryType);
+    setBizType(detected.bizType);
+    const wdParsed = parseDayGroupFromLabel(detected.weekdayLabel);
+    const weParsed = parseDayGroupFromLabel(detected.weekendLabel);
+    setWeekdayDays(wdParsed?.days ?? []);
+    setWeekendDays(weParsed?.days ?? []);
+    setPriceUnit(detected.priceUnit);
+
+    // Real Google hours beat our defaults; the host then corrects what's wrong.
+    const parsed = parseOpeningHours(c.openingHours);
+    setGoogleHours(parsed);
+    if (parsed) {
+      setWeekdayHoursText(parsed.weekdayHours);
+      setWeekendHoursText(parsed.weekendHours);
+      setClosedDayKeys(parsed.closedDayKeys);
+    } else {
+      setWeekdayHoursText(detected.defaultWeekdayHours);
+      setWeekendHoursText(detected.defaultWeekendHours);
+      setClosedDayKeys([]);
+    }
+
     setPinCandidates([]);
   };
 
@@ -201,28 +278,10 @@ export default function OnboardingScreen() {
       subdistrict: otop?.tambol ?? null,
       types: ["community"],
     });
+    // No Google pin means no Google data to show — clear it so the card
+    // doesn't imply anything was fetched.
+    setGoogleHours(null);
     setPinCandidates([]);
-  };
-
-  const searchBusinessLocation = async () => {
-    if (!businessPlaceName.trim()) {
-      Alert.alert("กรอกชื่อสถานที่", "กรุณากรอกชื่อสถานที่ประกอบการของคุณก่อนค้นหาพิกัด");
-      return;
-    }
-    setSearchingPin(true);
-    setPinCandidates([]);
-    try {
-      const res = await verifyPlaceOnGoogle({
-        placeName: businessPlaceName.trim(),
-        community: otop?.village,
-        district: otop?.amphur,
-        province: otop?.province,
-      });
-      setSearchingPin(false);
-      setPinCandidates(res.candidates);
-    } catch {
-      setSearchingPin(false);
-    }
   };
 
   const normalized = username.trim().toLowerCase();
@@ -284,20 +343,21 @@ export default function OnboardingScreen() {
       return;
     }
     setSaving(true);
+    // The labels are derived from the day arrays (see weekdayLabel above);
+    // we keep the same "${label}: ${hours}" shape so existing rows in DB
+    // are still parseable by ProfileLocal.parseStoredHours.
+    const wdSegment = `${weekdayLabel}: ${weekdayHoursText.trim()}`.trim();
+    const weSegment = `${weekendLabel}: ${weekendHoursText.trim()}`.trim();
     const compOpening = [
-      weekdayHours.trim() ? `${weekdayLabel}: ${weekdayHours.trim()}` : "",
-      weekendHours.trim() ? `${weekendLabel}: ${weekendHours.trim()}` : "",
-      closedDays.trim() ? `วันหยุดร้าน: ${closedDays.trim()}` : "",
+      wdSegment && wdSegment.endsWith(":") ? "" : wdSegment,
+      weSegment && weSegment.endsWith(":") ? "" : weSegment,
+      `วันหยุดร้าน: ${formatClosedDaysStr(closedDayKeys)}`,
     ]
       .filter(Boolean)
       .join(" | ");
 
-    const compPrice = [
-      weekdayPrice.trim() ? `${weekdayLabel}: ${weekdayPrice.trim()}` : "",
-      weekendPrice.trim() ? `${weekendLabel}: ${weekendPrice.trim()}` : "",
-    ]
-      .filter(Boolean)
-      .join(" | ");
+    const effectiveUnit = resolvePriceUnit(priceUnit, customUnit);
+    const compPrice = formatPriceStr(weekdayPrice, weekendPrice, effectiveUnit);
 
     const { error } = await completeOnboarding({
       username: normalized,
@@ -308,6 +368,7 @@ export default function OnboardingScreen() {
       otop: role === "host" ? otop : null,
       businessPlaceName: role === "host" ? businessPlaceName.trim() : undefined,
       businessPriceInfo: role === "host" ? compPrice : undefined,
+      businessOpeningHours: role === "host" ? compOpening : undefined,
       businessPhone: role === "host" ? businessPhone.trim() : undefined,
       businessLat: role === "host" ? (confirmedPlace?.latitude ?? null) : undefined,
       businessLng: role === "host" ? (confirmedPlace?.longitude ?? null) : undefined,
@@ -323,42 +384,57 @@ export default function OnboardingScreen() {
       return;
     }
 
-    // Upsert into community_places master table for AI chat & search
-    if (role === "host" && confirmedPlace) {
-      const pId = confirmedPlace.placeId || `otop-${villageId}-${Date.now()}`;
-      const gUrl =
-        confirmedPlace.googleMapsUri ||
-        (confirmedPlace.latitude != null && confirmedPlace.longitude != null
-          ? `https://www.google.com/maps?q=${confirmedPlace.latitude},${confirmedPlace.longitude}`
-          : null);
-
-      supabase
-        .from("community_places")
-        .upsert(
-          {
-            place_id: pId,
-            place_name: businessPlaceName.trim(),
-            formatted_address: confirmedPlace.address || null,
+    // Publish the listing for AI chat & search. This used to be a separate
+    // fire-and-forget Supabase write, so a failure left the host registered
+    // with no row for the AI to read and nobody was told. The backend commits
+    // this alongside anything else in one transaction.
+    if (role === "host" && confirmedPlace && user?.id) {
+      try {
+        await upsertMyPlace({
+          place: {
+            placeId: confirmedPlace.placeId || syntheticPlaceId(user.id),
+            placeName: businessPlaceName.trim(),
             province: confirmedPlace.province || otop?.province || "",
+            formattedAddress: confirmedPlace.address || null,
             district: confirmedPlace.district || otop?.amphur || null,
             subdistrict: confirmedPlace.subdistrict || otop?.tambol || null,
             village: otop?.village || null,
             latitude: confirmedPlace.latitude ?? null,
             longitude: confirmedPlace.longitude ?? null,
-            google_maps_url: gUrl,
+            googleMapsUrl: mapsUrlFor(
+              confirmedPlace.googleMapsUri,
+              confirmedPlace.latitude,
+              confirmedPlace.longitude
+            ),
             phone: businessPhone.trim() || null,
-            opening_hours: compOpening || null,
-            price_info: compPrice || null,
+            openingHours: compOpening || null,
+            priceInfo: compPrice || null,
             rating: confirmedPlace.rating ?? null,
-            user_ratings_total: confirmedPlace.userRatingCount ?? null,
+            userRatingsTotal: confirmedPlace.userRatingCount ?? null,
             website: confirmedPlace.website ?? null,
-            source: "host_verified",
+            // Machine-readable twins of the two strings above.
+            businessHours: composeHoursJson({
+              weekdayDays,
+              weekdayHours: weekdayHoursText,
+              weekendDays,
+              weekendHours: weekendHoursText,
+              dayOffs: closedDayKeys,
+            }),
+            businessPricing: composePricingJson(
+              weekdayPrice,
+              weekendPrice,
+              effectiveUnit
+            ),
           },
-          { onConflict: "place_id" }
-        )
-        .then(({ error: cErr }) => {
-          if (cErr) console.warn("[onboarding] community_places error:", cErr.message);
         });
+      } catch (e: any) {
+        // The account itself is registered and usable, so this is a warning
+        // rather than a failed save — the host can retry from "แก้ไขร้าน".
+        Alert.alert(
+          "ลงทะเบียนสำเร็จ แต่ข้อมูลสถานที่ยังไม่ถูกเผยแพร่",
+          `${e?.message ?? String(e)}\n\nคุณสามารถลองใหม่ได้ภายหลังจากหน้าโปรไฟล์ > แก้ไขข้อมูลร้าน`
+        );
+      }
     }
     // On success, AuthGate re-renders into the app automatically.
   };
@@ -428,6 +504,7 @@ export default function OnboardingScreen() {
                   setVillageId(t);
                   setOtop(null);
                 }}
+                keyboardType="numeric"
                 placeholder="เช่น 123456"
                 placeholderTextColor="#9CA3AF"
                 className="flex-1 bg-gray-100 rounded-xl px-3.5 py-3 text-[15px] text-gray-900"
@@ -531,22 +608,17 @@ export default function OnboardingScreen() {
             {/* Candidates found on Google Maps within community scope */}
             {pinCandidates.length > 0 && !confirmedPlace && (
               <View className="bg-blue-50 border border-blue-200 rounded-2xl p-3.5 mb-4">
-                <Text className="text-blue-900 font-bold text-[12px] mb-2">
+                <Text className="text-blue-900 font-bold text-[13px] mb-2">
                   📍 พบสถานที่ในเขต {otop.amphur || otop.province} — เลือกเพื่อดึงข้อมูลอัตโนมัติ:
                 </Text>
                 {pinCandidates.map((c, idx) => (
                   <View key={idx} className="bg-white border border-blue-100 rounded-xl p-3 mb-2.5 shadow-sm">
-                    <Text className="text-gray-900 font-bold text-[13.5px]">📍 {c.name}</Text>
-                    <Text className="text-gray-500 text-[11px] mt-0.5" numberOfLines={2}>{c.address}</Text>
+                    <Text className="text-gray-900 font-bold text-[15px]">📍 {c.name}</Text>
+                    <Text className="text-gray-500 text-[12.5px] mt-0.5" numberOfLines={2}>{c.address}</Text>
 
-                    {(c.phone || c.openingHours) && (
+                    {(c.phone) && (
                       <View className="mt-1.5 pt-1.5 border-t border-gray-100">
-                        {c.phone && <Text className="text-gray-600 text-[11px]">📞 {c.phone}</Text>}
-                        {c.openingHours && (
-                          <Text className="text-gray-600 text-[11px] mt-0.5" numberOfLines={1}>
-                            🕒 {c.openingHours}
-                          </Text>
-                        )}
+                        {c.phone && <Text className="text-gray-600 text-[12.5px]">📞 {c.phone}</Text>}
                       </View>
                     )}
 
@@ -557,7 +629,7 @@ export default function OnboardingScreen() {
                           activeOpacity={0.7}
                           className="flex-row items-center px-2 py-1 bg-gray-100 rounded-lg"
                         >
-                          <Text className="text-[11px] text-blue-700 font-semibold">🗺️ ดูบน Google Maps</Text>
+                          <Text className="text-[12.5px] text-blue-700 font-semibold">🗺️ ดูบน Google Maps</Text>
                         </TouchableOpacity>
                       ) : <View />}
 
@@ -566,7 +638,7 @@ export default function OnboardingScreen() {
                         activeOpacity={0.85}
                         className="bg-[#2D6A4F] py-1.5 px-3.5 rounded-lg"
                       >
-                        <Text className="text-white font-bold text-[11px]">✓ เลือกสถานที่นี้</Text>
+                        <Text className="text-white font-bold text-[12.5px]">✓ เลือกสถานที่นี้</Text>
                       </TouchableOpacity>
                     </View>
                   </View>
@@ -580,10 +652,10 @@ export default function OnboardingScreen() {
               !searchingPin &&
               !confirmedPlace && (
                 <View className="bg-amber-50 border border-amber-200 rounded-2xl p-3.5 mb-4">
-                  <Text className="text-amber-900 font-semibold text-[12px] mb-1">
-                    ไม่พบหมุดร้าน "{businessPlaceName.trim()}" บน Google Maps ในเขต {otop.amphur}
+                  <Text className="text-amber-900 font-semibold text-[13px] mb-1">
+                    ไม่พบหมุดร้าน &quot;{businessPlaceName.trim()}&quot; บน Google Maps ในเขต {otop.amphur}
                   </Text>
-                  <Text className="text-gray-500 text-[11px] mb-2.5 leading-4">
+                  <Text className="text-gray-500 text-[12.5px] mb-2.5 leading-5">
                     หากเป็นร้านเปิดใหม่หรือยังไม่มีหมุด สามารถกดใช้พิกัดของชุมชน OTOP แทน และกรอกข้อมูลด้วยตนเองได้เลยค่ะ
                   </Text>
                   <TouchableOpacity
@@ -592,203 +664,299 @@ export default function OnboardingScreen() {
                     className="bg-amber-600 py-2 px-3.5 rounded-xl flex-row items-center justify-center self-start"
                   >
                     <MapPinIcon size={15} color="#FFFFFF" />
-                    <Text className="text-white font-bold text-[12px] ml-1.5">
+                    <Text className="text-white font-bold text-[13px] ml-1.5">
                       📍 ใช้พิกัดของชุมชน OTOP แทน
                     </Text>
                   </TouchableOpacity>
                 </View>
               )}
 
-            {/* Confirmed Pin & Review / Edit Section */}
+            {/* Confirmed Pin + what Google actually said about it */}
             {confirmedPlace && (
               <View className="mb-2">
                 <View className="bg-emerald-50 border-2 border-emerald-300 rounded-2xl p-3.5 mb-4">
                   <View className="flex-row items-center justify-between mb-1">
-                    <View className="flex-row items-center">
+                    <View className="flex-row items-center flex-1">
                       <CheckCircleIcon size={18} color="#2D6A4F" />
                       <Text className="text-[#1B4332] font-black text-[13px] ml-1.5">
                         ✓ ยืนยันพิกัดเรียบร้อยแล้ว
                       </Text>
                     </View>
                     <TouchableOpacity
-                      onPress={() => setConfirmedPlace(null)}
+                      onPress={() => {
+                        setConfirmedPlace(null);
+                        setGoogleHours(null);
+                      }}
                       activeOpacity={0.7}
                       className="px-2 py-0.5 bg-white border border-emerald-200 rounded-lg"
                     >
-                      <Text className="text-emerald-700 font-semibold text-[10.5px]">เปลี่ยนพิกัด</Text>
+                      <Text className="text-emerald-700 font-semibold text-[13px]">เปลี่ยนพิกัด</Text>
                     </TouchableOpacity>
                   </View>
-                  <Text className="text-gray-800 font-bold text-[13px] mt-0.5">{confirmedPlace.name}</Text>
-                  <Text className="text-gray-500 text-[11px] mt-0.5">{confirmedPlace.address}</Text>
+                  <Text className="text-gray-800 font-bold text-[15px] mt-0.5">{confirmedPlace.name}</Text>
+                  <Text className="text-gray-500 text-[13px] mt-0.5">{confirmedPlace.address}</Text>
 
-                  {confirmedPlace.googleMapsUri && (
-                    <TouchableOpacity
-                      onPress={() => Linking.openURL(confirmedPlace.googleMapsUri!)}
-                      activeOpacity={0.7}
-                      className="mt-2 self-start flex-row items-center"
-                    >
-                      <Text className="text-[11px] text-blue-700 font-semibold">🗺️ ดูตำแหน่งบน Google Maps</Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
-
-                {/* Preset Selector */}
-                <Text className="text-gray-700 font-bold text-[13px] mb-1.5">
-                  เลือกประเภทสถานประกอบการ <Text className="text-gray-400 font-normal text-[11px]">(ปรับรอบวันอัตโนมัติ)</Text>
-                </Text>
-                <View className="flex-row flex-wrap gap-1.5 mb-4">
-                  {[
-                    { id: "homestay", label: "🏡 โฮมสเตย์ / ที่พัก" },
-                    { id: "activity", label: "🎨 กิจกรรม / ท่องเที่ยว" },
-                    { id: "cafe", label: "☕ ร้านค้า / คาเฟ่" },
-                    { id: "custom", label: "⚙️ กำหนดเอง" },
-                  ].map((p) => (
-                    <TouchableOpacity
-                      key={p.id}
-                      onPress={() => handleSelectBizType(p.id as BizType)}
-                      activeOpacity={0.8}
-                      className={`px-3 py-1.5 rounded-xl border ${
-                        bizType === p.id
-                          ? "bg-[#2D6A4F] border-[#2D6A4F]"
-                          : "bg-gray-100 border-gray-200"
-                      }`}
-                    >
-                      <Text
-                        className={`text-[12px] font-bold ${
-                          bizType === p.id ? "text-white" : "text-gray-700"
-                        }`}
-                      >
-                        {p.label}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-
-                {/* Section 1: Weekday Schedule & Price */}
-                <View className="bg-gray-50 p-3.5 rounded-2xl border border-gray-200 mb-3">
-                  <View className="flex-row items-center justify-between mb-2">
-                    <Text className="text-[#1B4332] font-bold text-[13px]">
-                      1. รอบวันธรรมดา / วันปกติ
-                    </Text>
-                    <Text className="text-gray-400 text-[10px]">แตะแก้ไขชื่อวันได้</Text>
-                  </View>
-                  <TextInput
-                    value={weekdayLabel}
-                    onChangeText={setWeekdayLabel}
-                    placeholder="เช่น วันธรรมดา (อา.-พฤ.)"
-                    placeholderTextColor="#9CA3AF"
-                    className="bg-white border border-gray-200 rounded-xl px-3 py-2 text-[13px] text-gray-800 font-semibold mb-2"
-                  />
-                  <Text className="text-gray-600 text-[11.5px] font-medium mb-1">
-                    เวลาเปิด-ปิดทำการ / Check-in
-                  </Text>
-                  <TextInput
-                    value={weekdayHours}
-                    onChangeText={setWeekdayHours}
-                    placeholder={
-                      bizType === "homestay"
-                        ? "เช่น เช็คอิน 14:00 / เช็คเอาท์ 11:00"
-                        : "เช่น 08:30 - 17:00"
-                    }
-                    placeholderTextColor="#9CA3AF"
-                    className="bg-white border border-gray-200 rounded-xl px-3 py-2 text-[13px] text-gray-900 mb-2"
-                  />
-                  <Text className="text-gray-600 text-[11.5px] font-medium mb-1">
-                    อัตราค่าบริการ / ราคา
-                  </Text>
-                  <TextInput
-                    value={weekdayPrice}
-                    onChangeText={setWeekdayPrice}
-                    placeholder={
-                      bizType === "homestay"
-                        ? "เช่น 500 บาท / คืน"
-                        : "เช่น 50-150 บาท"
-                    }
-                    placeholderTextColor="#9CA3AF"
-                    className="bg-white border border-gray-200 rounded-xl px-3 py-2 text-[13px] text-gray-900"
-                  />
-                </View>
-
-                {/* Section 2: Weekend & Holiday Schedule & Price */}
-                <View className="bg-amber-50/50 p-3.5 rounded-2xl border border-amber-200 mb-3">
-                  <View className="flex-row items-center justify-between mb-2">
-                    <Text className="text-amber-900 font-bold text-[13px]">
-                      2. รอบวันหยุด / สุดสัปดาห์ / เทศกาล
-                    </Text>
-                    <Text className="text-gray-400 text-[10px]">แตะแก้ไขชื่อวันได้</Text>
-                  </View>
-                  <TextInput
-                    value={weekendLabel}
-                    onChangeText={setWeekendLabel}
-                    placeholder="เช่น วันหยุดสุดสัปดาห์ (ศ.-ส. & นักขัตฤกษ์)"
-                    placeholderTextColor="#9CA3AF"
-                    className="bg-white border border-amber-200 rounded-xl px-3 py-2 text-[13px] text-gray-800 font-semibold mb-2"
-                  />
-                  <Text className="text-gray-600 text-[11.5px] font-medium mb-1">
-                    เวลาเปิด-ปิดทำการ / Check-in
-                  </Text>
-                  <TextInput
-                    value={weekendHours}
-                    onChangeText={setWeekendHours}
-                    placeholder={
-                      bizType === "homestay"
-                        ? "เช่น เช็คอิน 14:00 / เช็คเอาท์ 11:00"
-                        : "เช่น 08:00 - 18:00"
-                    }
-                    placeholderTextColor="#9CA3AF"
-                    className="bg-white border border-amber-200 rounded-xl px-3 py-2 text-[13px] text-gray-900 mb-2"
-                  />
-                  <Text className="text-gray-600 text-[11.5px] font-medium mb-1">
-                    อัตราค่าบริการ / ราคา
-                  </Text>
-                  <TextInput
-                    value={weekendPrice}
-                    onChangeText={setWeekendPrice}
-                    placeholder={
-                      bizType === "homestay"
-                        ? "เช่น 750 บาท / คืน"
-                        : "เช่น 80-200 บาท"
-                    }
-                    placeholderTextColor="#9CA3AF"
-                    className="bg-white border border-amber-200 rounded-xl px-3 py-2 text-[13px] text-gray-900"
-                  />
-                </View>
-
-                {/* Section 3: Closed Days */}
-                <View className="bg-gray-50 p-3.5 rounded-2xl border border-gray-200 mb-4">
-                  <Text className="text-gray-800 font-bold text-[13px] mb-1.5">
-                    3. วันหยุดประจำร้าน / วันที่ไม่เปิดทำการ
-                  </Text>
-                  <View className="flex-row flex-wrap gap-1.5 mb-2">
-                    {["เปิดทุกวัน", "ปิดวันจันทร์", "ปิดวันพุธ", "ปิดวันอาทิตย์"].map((opt) => (
+                  <View className="flex-row items-center mt-2">
+                    {confirmedPlace.googleMapsUri ? (
                       <TouchableOpacity
-                        key={opt}
-                        onPress={() => setClosedDays(opt)}
-                        activeOpacity={0.75}
-                        className={`px-2.5 py-1 rounded-lg border ${
-                          closedDays === opt
-                            ? "bg-red-500 border-red-500"
-                            : "bg-white border-gray-200"
+                        onPress={() => Linking.openURL(confirmedPlace.googleMapsUri!)}
+                        activeOpacity={0.7}
+                        className="flex-row items-center"
+                      >
+                        <Text className="text-[13px] text-blue-700 font-semibold">
+                          🗺️ ดูตำแหน่งบน Google Maps
+                        </Text>
+                      </TouchableOpacity>
+                    ) : null}
+                  </View>
+                </View>
+
+                {/* Each block below starts as a plain read-only value. Google's
+                    classification and hours are usually right, so the inputs
+                    only appear where the host says "เปลี่ยน". */}
+
+                {/* 1. Business type — straight from Google's own tag */}
+                <EditableValueRow
+                  label="ประเภทสถานประกอบการ"
+                  icon={profileFor(bizType).icon}
+                  value={profileFor(bizType).badgeLabel}
+                  editing={editing.type}
+                  onToggle={() => toggleEditing("type")}
+                >
+                  {confirmedPlace.primaryTypeDisplayName ? (
+                    <Text className="text-[13px] text-gray-500 mb-2.5">
+                      ตรวจพบจาก Google: &quot;{confirmedPlace.primaryTypeDisplayName}&quot;
+                    </Text>
+                  ) : null}
+                  <View className="flex-row flex-wrap gap-2">
+                    {BIZ_TYPE_OPTIONS.map((p) => (
+                      <TouchableOpacity
+                        key={p.id}
+                        onPress={() => handleSelectBizType(p.id)}
+                        activeOpacity={0.8}
+                        accessibilityRole="radio"
+                        accessibilityState={{ selected: bizType === p.id }}
+                        className={`px-3 py-2 rounded-xl border ${
+                          bizType === p.id
+                            ? "bg-[#2D6A4F] border-[#2D6A4F]"
+                            : "bg-gray-100 border-gray-200"
                         }`}
                       >
                         <Text
-                          className={`text-[11px] font-semibold ${
-                            closedDays === opt ? "text-white" : "text-gray-600"
+                          className={`text-[14px] font-bold ${
+                            bizType === p.id ? "text-white" : "text-gray-700"
                           }`}
                         >
-                          {opt}
+                          {p.label}
                         </Text>
                       </TouchableOpacity>
                     ))}
                   </View>
-                  <TextInput
-                    value={closedDays}
-                    onChangeText={setClosedDays}
-                    placeholder="เช่น เปิดทุกวัน หรือ ปิดทุกวันจันทร์"
-                    placeholderTextColor="#9CA3AF"
-                    className="bg-white border border-gray-200 rounded-xl px-3 py-2 text-[13px] text-gray-900"
-                  />
-                </View>
+                </EditableValueRow>
+
+                {/* 2. Weekday: day list + time — pickers, not text inputs */}
+                <EditableValueRow
+                  label={weekdayLabel || "วันธรรมดา"}
+                  icon="🌿"
+                  value={weekdayHoursText}
+                  editing={editing.weekday}
+                  onToggle={() => toggleEditing("weekday")}
+                  emptyHint="ยังไม่ได้ระบุเวลาเปิด-ปิด"
+                >
+                  {/* Day-list picker */}
+                  <Text className="text-[13px] font-medium text-gray-600 mb-1.5">
+                    วันในสัปดาห์
+                  </Text>
+                  <TouchableOpacity
+                    onPress={() => setWeekdaySheetOpen(true)}
+                    activeOpacity={0.8}
+                    accessibilityRole="button"
+                    className="flex-row items-center justify-between bg-white border border-gray-200 rounded-xl px-3.5 py-3 mb-3"
+                  >
+                    <Text className="text-[15px] font-bold text-gray-800">
+                      {weekdayLabel || "วันธรรมดา"}
+                    </Text>
+                    <ChevronDownIcon size={20} color="#2D6A4F" />
+                  </TouchableOpacity>
+
+                  {/* Time picker */}
+                  <Text className="text-[13px] font-medium text-gray-600 mb-1.5">
+                    {bizType === "homestay" ? "เช็คอิน / เช็คเอาท์" : "เวลาเปิด / เวลาปิด"}
+                  </Text>
+                  <TouchableOpacity
+                    onPress={() =>
+                      setTimeSheet({
+                        which: "weekday",
+                        range: seedTimeSheet(weekdayHoursText),
+                      })
+                    }
+                    activeOpacity={0.8}
+                    accessibilityRole="button"
+                    className="flex-row items-center justify-between bg-white border border-gray-200 rounded-xl px-3.5 py-3"
+                  >
+                    <Text className="text-[15px] font-bold text-gray-800">
+                      {weekdayHoursText || (bizType === "homestay"
+                        ? "เลือกเวลาเช็คอิน / เช็คเอาท์"
+                        : "เลือกเวลาเปิด-ปิด")}
+                    </Text>
+                    <ChevronDownIcon size={20} color="#2D6A4F" />
+                  </TouchableOpacity>
+                </EditableValueRow>
+
+                {/* 3. Weekend: day list + time — same pickers */}
+                <EditableValueRow
+                  label={weekendLabel || "วันหยุดสุดสัปดาห์"}
+                  icon="🔥"
+                  tone="amber"
+                  value={weekendHoursText}
+                  editing={editing.weekend}
+                  onToggle={() => toggleEditing("weekend")}
+                  emptyHint="ยังไม่ได้ระบุเวลาเปิด-ปิด"
+                >
+                  <Text className="text-[13px] font-medium text-gray-600 mb-1.5">
+                    วันในสัปดาห์
+                  </Text>
+                  <TouchableOpacity
+                    onPress={() => setWeekendSheetOpen(true)}
+                    activeOpacity={0.8}
+                    accessibilityRole="button"
+                    className="flex-row items-center justify-between bg-white border border-amber-200 rounded-xl px-3.5 py-3 mb-3"
+                  >
+                    <Text className="text-[15px] font-bold text-gray-800">
+                      {weekendLabel || "วันหยุดสุดสัปดาห์"}
+                    </Text>
+                    <ChevronDownIcon size={20} color="#2D6A4F" />
+                  </TouchableOpacity>
+
+                  <Text className="text-[13px] font-medium text-gray-600 mb-1.5">
+                    {bizType === "homestay" ? "เช็คอิน / เช็คเอาท์" : "เวลาเปิด / เวลาปิด"}
+                  </Text>
+                  <TouchableOpacity
+                    onPress={() =>
+                      setTimeSheet({
+                        which: "weekend",
+                        range: seedTimeSheet(weekendHoursText),
+                      })
+                    }
+                    activeOpacity={0.8}
+                    accessibilityRole="button"
+                    className="flex-row items-center justify-between bg-white border border-amber-200 rounded-xl px-3.5 py-3"
+                  >
+                    <Text className="text-[15px] font-bold text-gray-800">
+                      {weekendHoursText || (bizType === "homestay"
+                        ? "เลือกเวลาเช็คอิน / เช็คเอาท์"
+                        : "เลือกเวลาเปิด-ปิด")}
+                    </Text>
+                    <ChevronDownIcon size={20} color="#2D6A4F" />
+                  </TouchableOpacity>
+                </EditableValueRow>
+
+                {/* 4. Closed days — pick from a checklist, not seven 42px chips */}
+                <EditableValueRow
+                  label="วันที่ปิดทำการ"
+                  icon="🚫"
+                  value={formatClosedDaysStr(closedDayKeys)}
+                  editing={editing.closed}
+                  onToggle={() => toggleEditing("closed")}
+                >
+                  <TouchableOpacity
+                    onPress={() => setDaySheetOpen(true)}
+                    activeOpacity={0.8}
+                    accessibilityRole="button"
+                    className="flex-row items-center justify-between bg-white border border-gray-200 rounded-xl px-3.5 py-3"
+                  >
+                    <Text className="text-[15px] font-bold text-gray-800">
+                      เลือกวันที่ปิดทำการ
+                    </Text>
+                    <ChevronDownIcon size={20} color="#2D6A4F" />
+                  </TouchableOpacity>
+                  {googleHours && googleHours.closedDayKeys.length > 0 ? (
+                    <Text className="text-[12.5px] text-gray-500 mt-2">
+                      ตั้งจากข้อมูล Google — ตรวจสอบให้ตรงกับที่จริง
+                    </Text>
+                  ) : null}
+                </EditableValueRow>
+
+                {/* 5. Price — numeric keypad plus a unit, never free text */}
+                <EditableValueRow
+                  label="อัตราค่าบริการ"
+                  icon="💰"
+                  value={formatPriceStr(
+                    weekdayPrice,
+                    weekendPrice,
+                    resolvePriceUnit(priceUnit, customUnit)
+                  )}
+                  editing={editing.price}
+                  onToggle={() => toggleEditing("price")}
+                  emptyHint="ยังไม่ได้ระบุราคา"
+                >
+                  <Text className="text-[13px] text-gray-600 font-medium mb-1.5">
+                    หน่วยบริการ
+                  </Text>
+                  <View className="flex-row flex-wrap gap-1.5 mb-2">
+                    {PRICE_UNITS.map((u) => (
+                      <TouchableOpacity
+                        key={u.id}
+                        onPress={() => setPriceUnit(u.id)}
+                        activeOpacity={0.8}
+                        accessibilityRole="radio"
+                        accessibilityState={{ selected: priceUnit === u.id }}
+                        className={`px-3 py-1.5 rounded-xl border ${
+                          priceUnit === u.id
+                            ? "bg-[#2D6A4F] border-[#2D6A4F]"
+                            : "bg-white border-gray-200"
+                        }`}
+                      >
+                        <Text
+                          className={`text-[14px] font-bold ${
+                            priceUnit === u.id ? "text-white" : "text-gray-700"
+                          }`}
+                        >
+                          {u.label}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  {priceUnit === "custom" ? (
+                    <TextInput
+                      value={customUnit}
+                      onChangeText={setCustomUnit}
+                      placeholder="ระบุหน่วย เช่น / ทริป, / จาน, / ชุด"
+                      placeholderTextColor="#9CA3AF"
+                      className="bg-white border border-gray-200 rounded-xl px-3 py-2.5 text-[15px] text-gray-900 mb-2"
+                    />
+                  ) : null}
+
+                  <Text className="text-[13px] text-gray-600 font-medium mb-1">
+                    วันธรรมดา
+                  </Text>
+                  <View className="flex-row items-center bg-white border border-gray-200 rounded-xl px-3 mb-2">
+                    <Text className="text-[15px] font-bold text-gray-400 mr-1">฿</Text>
+                    <TextInput
+                      value={weekdayPrice}
+                      onChangeText={setWeekdayPrice}
+                      keyboardType="numeric"
+                      placeholder="เช่น 500"
+                      placeholderTextColor="#9CA3AF"
+                      className="flex-1 text-[15px] font-bold text-gray-900 py-2.5"
+                    />
+                  </View>
+
+                  <Text className="text-[13px] text-amber-800 font-medium mb-1">
+                    วันหยุด / เทศกาล
+                  </Text>
+                  <View className="flex-row items-center bg-white border border-amber-200 rounded-xl px-3">
+                    <Text className="text-[15px] font-bold text-gray-400 mr-1">฿</Text>
+                    <TextInput
+                      value={weekendPrice}
+                      onChangeText={setWeekendPrice}
+                      keyboardType="numeric"
+                      placeholder="เช่น 750"
+                      placeholderTextColor="#9CA3AF"
+                      className="flex-1 text-[15px] font-bold text-gray-900 py-2.5"
+                    />
+                  </View>
+                </EditableValueRow>
 
                 {/* Business Phone */}
                 <Text className="text-gray-700 font-bold text-[13px] mb-1.5">
@@ -962,6 +1130,61 @@ export default function OnboardingScreen() {
           </>
         )}
       </ScrollView>
+
+      <DayPickerSheet
+        visible={daySheetOpen}
+        selected={closedDayKeys}
+        onCancel={() => setDaySheetOpen(false)}
+        onConfirm={(days) => {
+          setClosedDayKeys(days);
+          setDaySheetOpen(false);
+        }}
+      />
+
+      <DayPickerSheet
+        visible={weekdaySheetOpen}
+        selected={weekdayDays}
+        title="เลือกวันธรรมดา"
+        resetLabel=""
+        selectedLabel="ใช่"
+        unselectedLabel="ไม่ใช่"
+        onCancel={() => setWeekdaySheetOpen(false)}
+        onConfirm={(days) => {
+          setWeekdayDays(days);
+          setWeekdaySheetOpen(false);
+        }}
+      />
+
+      <DayPickerSheet
+        visible={weekendSheetOpen}
+        selected={weekendDays}
+        title="เลือกวันหยุดสุดสัปดาห์"
+        resetLabel=""
+        selectedLabel="ใช่"
+        unselectedLabel="ไม่ใช่"
+        onCancel={() => setWeekendSheetOpen(false)}
+        onConfirm={(days) => {
+          setWeekendDays(days);
+          setWeekendSheetOpen(false);
+        }}
+      />
+
+      <TimeRangeSheet
+        visible={timeSheet !== null}
+        kind={bizType === "homestay" ? "checkin" : "hours"}
+        initialRange={timeSheet?.range ?? { open: null, close: null, allDay: false }}
+        onCancel={() => setTimeSheet(null)}
+        onConfirm={(range) => {
+          if (!timeSheet) return;
+          const formatted = formatHourRange(range, bizType === "homestay" ? "checkin" : "hours");
+          if (timeSheet.which === "weekday") {
+            setWeekdayHoursText(formatted);
+          } else {
+            setWeekendHoursText(formatted);
+          }
+          setTimeSheet(null);
+        }}
+      />
     </View>
   );
 }

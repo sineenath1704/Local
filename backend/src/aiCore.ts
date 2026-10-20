@@ -1,4 +1,5 @@
 import { config, isAiConfigured } from "./config";
+import { AiUpstreamError } from "./aiErrors";
 
 export interface AiMessage {
   role: "user" | "assistant";
@@ -49,7 +50,7 @@ export async function callAi(params: {
 
       if (!res.ok) {
         const errText = await res.text().catch(() => "");
-        throw new Error(`AI endpoint error ${res.status}: ${errText.slice(0, 300)}`);
+        throw new AiUpstreamError(res.status, errText);
       }
 
       const data: any = await res.json();
@@ -106,6 +107,99 @@ export async function callAi(params: {
   }
   // Loop exited because response is complete
   return fullReply.trim();
+}
+
+export interface PingResult {
+  ok: boolean;
+  reason: string;
+  upstreamStatus: number | null;
+  upstreamBody: string | null;
+  elapsedMs: number;
+  model: string;
+  baseUrlHost: string;
+  tokenLength: number;
+}
+
+/**
+ * Fire the smallest possible real request at the AI provider.
+ * -------------------------------------------------------------
+ * `/health` only proves the process is alive; it says nothing about whether the
+ * token is valid. This does — it answers "is the AI actually reachable with the
+ * credentials we have" without needing the phone app at all.
+ */
+export async function pingAi(): Promise<PingResult> {
+  const base: Omit<PingResult, "ok" | "reason" | "elapsedMs"> = {
+    upstreamStatus: null,
+    upstreamBody: null,
+    model: config.ai.model,
+    baseUrlHost: config.ai.baseUrl ? hostOf(config.ai.baseUrl) : "(ไม่ได้ตั้งค่า)",
+    tokenLength: config.ai.authToken.length,
+  };
+
+  if (!isAiConfigured()) {
+    return {
+      ...base,
+      ok: false,
+      reason: "ยังไม่ได้ตั้ง ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN",
+      elapsedMs: 0,
+    };
+  }
+
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const res = await fetch(`${config.ai.baseUrl}/v1/messages`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": config.ai.authToken,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: config.ai.model,
+        max_tokens: 1,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    const text = await res.text().catch(() => "");
+    const elapsedMs = Date.now() - startedAt;
+    return {
+      ...base,
+      ok: res.ok,
+      upstreamStatus: res.status,
+      upstreamBody: res.ok ? null : text.slice(0, 1000),
+      elapsedMs,
+      reason: res.ok
+        ? "เชื่อมต่อ AI สำเร็จ — token ใช้งานได้"
+        : res.status === 401 || res.status === 403
+        ? "token ไม่ถูกต้องหรือหมดอายุ"
+        : `ปลายทาง AI ตอบกลับ ${res.status}`,
+    };
+  } catch (err: any) {
+    return {
+      ...base,
+      ok: false,
+      upstreamStatus: null,
+      upstreamBody: null,
+      elapsedMs: Date.now() - startedAt,
+      reason:
+        err?.name === "AbortError"
+          ? "ต่อปลายทาง AI ไม่ทัน 15 วินาที"
+          : `ต่อปลายทาง AI ไม่ได้: ${err?.message ?? "unknown error"}`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 }
 
 /** Pull a JSON object out of a model reply (handles code fences / extra text). */

@@ -35,6 +35,12 @@ export interface PlaceCandidate {
   website?: string | null;
   googleMapsUri?: string | null;
   businessStatus?: string | null;
+  /** Google's single best-fit type, e.g. "lodging". Authoritative when present. */
+  primaryType?: string | null;
+  /** Google's own Thai label for that type, e.g. "ที่พัก". */
+  primaryTypeDisplayName?: string | null;
+  /** 0-4, Google's guess at price band. Context only — never the real price. */
+  priceLevel?: number | null;
 }
 
 function cleanAdminName(name: string): string {
@@ -146,7 +152,7 @@ async function searchGooglePlaces(query: string): Promise<PlaceCandidate[]> {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": config.places.googleKey,
         "X-Goog-FieldMask":
-          "places.displayName,places.formattedAddress,places.id,places.location,places.types,places.addressComponents,places.regularOpeningHours,places.nationalPhoneNumber,places.websiteUri,places.rating,places.userRatingCount,places.googleMapsUri,places.businessStatus",
+          "places.displayName,places.formattedAddress,places.id,places.location,places.types,places.primaryType,places.primaryTypeDisplayName,places.priceLevel,places.addressComponents,places.regularOpeningHours,places.nationalPhoneNumber,places.websiteUri,places.rating,places.userRatingCount,places.googleMapsUri,places.businessStatus",
       },
       body: JSON.stringify({
         textQuery: query,
@@ -188,6 +194,9 @@ async function searchGooglePlaces(query: string): Promise<PlaceCandidate[]> {
             website: p.websiteUri ?? null,
             googleMapsUri: mapsUri,
             businessStatus: p.businessStatus ?? null,
+            primaryType: p.primaryType ?? null,
+            primaryTypeDisplayName: p.primaryTypeDisplayName?.text ?? null,
+            priceLevel: p.priceLevel ?? null,
           } as PlaceCandidate;
         });
       }
@@ -225,12 +234,14 @@ async function searchGooglePlaces(query: string): Promise<PlaceCandidate[]> {
             let googleMapsUri: string | null =
               lat != null && lng != null ? `https://www.google.com/maps?q=${lat},${lng}` : null;
             let businessStatus: string | null = p.business_status ?? null;
+            let primaryType: string | null = p.types?.[0] ?? null;
+            let priceLevel: number | null = null;
 
             if (placeId) {
               try {
                 const detUrl = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${encodeURIComponent(
                   placeId
-                )}&fields=name,formatted_address,address_component,geometry,type,formatted_phone_number,opening_hours,rating,user_ratings_total,website,url,business_status&language=th&key=${config.places.googleKey}`;
+                )}&fields=name,formatted_address,address_component,geometry,type,formatted_phone_number,opening_hours,rating,user_ratings_total,website,url,business_status,price_level&language=th&key=${config.places.googleKey}`;
                 const detResp = await fetch(detUrl);
                 if (detResp.ok) {
                   const detData: any = await detResp.json();
@@ -253,6 +264,10 @@ async function searchGooglePlaces(query: string): Promise<PlaceCandidate[]> {
                     if (r.website) website = r.website;
                     if (r.url) googleMapsUri = r.url;
                     if (r.business_status) businessStatus = r.business_status;
+                    // `type` is the single best-fit category on the legacy
+                    // details endpoint (no Thai display label is offered there).
+                    if (r.type) primaryType = r.type;
+                    if (r.price_level != null) priceLevel = r.price_level;
                   }
                 }
               } catch {
@@ -277,6 +292,9 @@ async function searchGooglePlaces(query: string): Promise<PlaceCandidate[]> {
               website,
               googleMapsUri,
               businessStatus,
+              primaryType,
+              primaryTypeDisplayName: null, // legacy endpoint has no localised label
+              priceLevel,
             } as PlaceCandidate;
           })
         );

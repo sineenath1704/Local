@@ -22,10 +22,13 @@ import {
   MapPinIcon,
   CalendarDaysIcon,
   ArrowTopRightOnSquareIcon,
+  ExclamationTriangleIcon,
+  ArrowPathIcon,
 } from "react-native-heroicons/outline";
 import { useAiPlanner } from "../../state/AiPlannerContext";
 import { useInteractions } from "../../state/InteractionContext";
 import { sendChat } from "../../services/aiChatService";
+import { asAiError } from "../../services/aiHttp";
 import { getFolderContextForAi } from "../../services/folderService";
 import { AiChatMessage, Trip } from "../../data/tripsData";
 import OriginSelectorModal from "../../components/OriginSelectorModal";
@@ -163,14 +166,27 @@ export default function AiChatScreen({
           ))
         : [];
       folderCtx = { folderName: folder.name, places };
-      console.log("[aiChat] folderCtx places =", places);
     }
 
-    const reply = await sendChat(history, folderCtx);
-    appendMessage(threadId, { role: "assistant", content: reply });
-    setAttachedFolderId(null); // attachment is one-shot per send
-    setSending(false);
-    setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
+    try {
+      const reply = await sendChat(history, folderCtx);
+      appendMessage(threadId, { role: "assistant", content: reply });
+      setAttachedFolderId(null); // attachment is one-shot per send
+    } catch (err) {
+      // Previously this fell through and appended the failure as an assistant
+      // message, so a 401 looked exactly like a real answer. Mark it instead.
+      const aiErr = asAiError(err);
+      const detail = aiErr
+        ? `${aiErr.message}\n\n(${aiErr.status !== null ? `HTTP ${aiErr.status} · ` : ""}${aiErr.requestId ? `req ${aiErr.requestId} · ` : ""}${Math.round(aiErr.durationMs)}ms)`
+        : "ส่งข้อความไม่สำเร็จ";
+      console.warn("[aiChat] FAIL", detail);
+      appendMessage(threadId, { role: "assistant", content: detail, isError: true });
+    } finally {
+      // Without this, any throw above wedged `sending` on forever and the
+      // composer could never be used again without remounting the screen.
+      setSending(false);
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
+    }
   };
 
   // Auto-send the seed message once (used when opened from the AI-summary
@@ -259,32 +275,64 @@ export default function AiChatScreen({
           onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
           renderItem={({ item }) => {
             const mine = item.role === "user";
+            const failed = Boolean(item.isError);
             return (
               <View className={`mb-3 flex-row ${mine ? "justify-end" : "justify-start"}`}>
                 {!mine && (
-                  <View className="w-7 h-7 rounded-full bg-violet-100 items-center justify-center mr-2 mt-0.5">
-                    <SparklesIcon size={14} color="#7C3AED" />
+                  <View
+                    className={`w-7 h-7 rounded-full items-center justify-center mr-2 mt-0.5 ${
+                      failed ? "bg-red-100" : "bg-violet-100"
+                    }`}
+                  >
+                    {failed ? (
+                      <ExclamationTriangleIcon size={14} color="#DC2626" />
+                    ) : (
+                      <SparklesIcon size={14} color="#7C3AED" />
+                    )}
                   </View>
                 )}
                 <View className="max-w-[88%]">
                   <View
                     className={
-                      mine
+                      failed
+                        ? "px-3.5 py-2.5 rounded-2xl bg-red-50 border border-red-200 self-start"
+                        : mine
                         ? "px-3.5 py-2.5 rounded-2xl bg-[#2D6A4F] rounded-br-md self-end"
                         : "py-1 self-start"
                     }
                   >
+                    {failed ? (
+                      <Text className="text-[12px] font-bold text-red-700 mb-1">
+                        ⚠️ AI ตอบไม่สำเร็จ
+                      </Text>
+                    ) : null}
                     <Text
                       className={`text-[14px] leading-6 ${
-                        mine ? "text-white font-medium" : "text-gray-900"
+                        failed ? "text-red-800" : mine ? "text-white font-medium" : "text-gray-900"
                       }`}
                     >
                       {item.content}
                     </Text>
                   </View>
 
+                  {failed ? (
+                    <TouchableOpacity
+                      onPress={() => {
+                        const lastUser = [...thread.messages]
+                          .reverse()
+                          .find((m) => m.role === "user");
+                        if (lastUser) send(lastUser.content);
+                      }}
+                      activeOpacity={0.8}
+                      className="mt-2 bg-red-600 rounded-xl px-3.5 py-2 flex-row items-center self-start"
+                    >
+                      <ArrowPathIcon size={15} color="#FFFFFF" />
+                      <Text className="text-white text-[12.5px] font-bold ml-1.5">ลองใหม่อีกครั้ง</Text>
+                    </TouchableOpacity>
+                  ) : null}
+
                   {/* If assistant gave a trip plan response, show "เลือกแพลนทริปนี้" button */}
-                  {!mine && (item.content.includes("วัน") || item.content.includes("ทริป") || item.content.includes("เดินทาง") || item.content.includes("แผน")) && (
+                  {!mine && !failed && (item.content.includes("วัน") || item.content.includes("ทริป") || item.content.includes("เดินทาง") || item.content.includes("แผน")) && (
                     <TouchableOpacity
                       onPress={() => handleCreateTripFromChat(item.content)}
                       activeOpacity={0.8}

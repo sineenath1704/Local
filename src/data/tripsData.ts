@@ -57,6 +57,12 @@ export interface AiChatMessage {
   role: "user" | "assistant";
   content: string;
   at: number;
+  /**
+   * This "message" is actually a failure notice, not a reply. Set when the AI
+   * call failed, so the bubble can be styled as an error instead of passing
+   * the failure text off as something the assistant actually said.
+   */
+  isError?: boolean;
 }
 
 export interface AiChatThread {

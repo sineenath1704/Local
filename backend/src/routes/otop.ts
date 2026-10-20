@@ -56,9 +56,16 @@ function normalize(payload: any): OtopProfile | null {
   };
 }
 
+/**
+ * Mock communities for UI flow testing, keyed by a short numeric ID.
+ *
+ * These used to be "DEMO001"… but the Village ID field opens a numeric keypad,
+ * so the letters couldn't be typed at all. Plain digits keep the demo reachable
+ * from a real keyboard.
+ */
 const MOCK_COMMUNITIES: Record<string, any> = {
-  DEMO001: {
-    idNumber: "DEMO001",
+  "001": {
+    idNumber: "001",
     region: "ภาคเหนือ",
     province: "แม่ฮ่องสอน",
     amphur: "แม่ลาน้อย",
@@ -69,8 +76,8 @@ const MOCK_COMMUNITIES: Record<string, any> = {
     cbtVillage: "หมู่บ้านท่องเที่ยวโดยชุมชนบ้านห้วยห้อม",
     raw: { note: "mock — replace with real OTOP_API_TOKEN" },
   },
-  DEMO002: {
-    idNumber: "DEMO002",
+  "002": {
+    idNumber: "002",
     region: "ภาคเหนือ",
     province: "เชียงราย",
     amphur: "แม่สาย",
@@ -81,8 +88,8 @@ const MOCK_COMMUNITIES: Record<string, any> = {
     cbtVillage: "หมู่บ้านท่องเที่ยวโดยชุมชน",
     raw: { note: "mock — replace with real OTOP_API_TOKEN" },
   },
-  DEMO003: {
-    idNumber: "DEMO003",
+  "003": {
+    idNumber: "003",
     region: "ภาคกลาง",
     province: "สุโขทัย",
     amphur: "ศรีสัชนาลัย",
@@ -99,11 +106,12 @@ router.get("/verify/:id", async (req: Request, res: Response) => {
   const id = (req.params.id ?? "").trim().toUpperCase();
   if (!id) return res.status(400).json({ error: "id is required" });
 
-  // Mock mode: DEMO* IDs work without a real token (for UI flow testing).
-  if (id.startsWith("DEMO")) {
+  // Mock mode: the three short demo IDs answer without a real token (for UI flow
+  // testing). Gated to exactly three digits so a real 6-digit Village ID can
+  // never collide with one of them.
+  if (/^\d{3}$/.test(id)) {
     const mock = MOCK_COMMUNITIES[id];
-    if (mock) return res.json({ configured: true, verified: true, profile: mock });
-    return res.json({ configured: true, verified: false, profile: null });
+    return res.json({ configured: true, verified: Boolean(mock), profile: mock ?? null });
   }
 
   if (!isOtopConfigured()) {

@@ -58,12 +58,10 @@ export default function BottomMenuBar({
   return (
     <View
       style={{
-        position: "absolute",
-        left: 10,
-        right: 10,
-        bottom: Math.max(insets.bottom, 20),
+        width: "100%",
+        paddingBottom: insets.bottom,
       }}
-      className={`bg-[#171717] rounded-full ${paddingY} px-2 flex-row items-center justify-around shadow-2xl shadow-black border border-white/5 z-50`}
+      className="bg-[#171717] pt-2 px-2 flex-row items-center justify-around border-t border-white/10"
     >
       {/* 1. หน้าหลัก */}
       <TouchableOpacity
@@ -77,11 +75,10 @@ export default function BottomMenuBar({
           <HomeOutline size={iconSize} color={INACTIVE_COLOR} strokeWidth={1.8} />
         )}
         <Text
-          className={`${fontSize} mt-1 ${
-            activeTab === "home"
+          className={`${fontSize} mt-1 ${activeTab === "home"
               ? "text-[#00D26A] font-bold"
               : "text-[#A1A1AA] font-normal"
-          }`}
+            }`}
         >
           หน้าหลัก
         </Text>
@@ -110,11 +107,10 @@ export default function BottomMenuBar({
           )}
         </View>
         <Text
-          className={`${fontSize} mt-1 ${
-            activeTab === "ai"
+          className={`${fontSize} mt-1 ${activeTab === "ai"
               ? "text-[#00D26A] font-bold"
               : "text-[#A1A1AA] font-normal"
-          }`}
+            }`}
         >
           AI ช่วยคิด
         </Text>
@@ -128,9 +124,8 @@ export default function BottomMenuBar({
       >
         <View
           style={{ width: plusButtonSize, height: plusButtonSize }}
-          className={`rounded-full items-center justify-center ${
-            activeTab === "create" ? "bg-[#00D26A]" : "bg-white"
-          }`}
+          className={`rounded-full items-center justify-center ${activeTab === "create" ? "bg-[#00D26A]" : "bg-white"
+            }`}
         >
           <PlusIcon
             size={plusIconSize}
@@ -139,11 +134,10 @@ export default function BottomMenuBar({
           />
         </View>
         <Text
-          className={`${fontSize} mt-1 ${
-            activeTab === "create"
+          className={`${fontSize} mt-1 ${activeTab === "create"
               ? "text-[#00D26A] font-bold"
               : "text-[#A1A1AA] font-normal"
-          }`}
+            }`}
         >
           เพิ่มโพส
         </Text>
@@ -161,11 +155,10 @@ export default function BottomMenuBar({
           <ChatOutline size={iconSize} color={INACTIVE_COLOR} strokeWidth={1.8} />
         )}
         <Text
-          className={`${fontSize} mt-1 ${
-            activeTab === "chat"
+          className={`${fontSize} mt-1 ${activeTab === "chat"
               ? "text-[#00D26A] font-bold"
               : "text-[#A1A1AA] font-normal"
-          }`}
+            }`}
         >
           กล่องข้อความ
         </Text>
@@ -183,11 +176,10 @@ export default function BottomMenuBar({
           <UserOutline size={iconSize} color={INACTIVE_COLOR} strokeWidth={1.8} />
         )}
         <Text
-          className={`${fontSize} mt-1 ${
-            activeTab === "profile"
+          className={`${fontSize} mt-1 ${activeTab === "profile"
               ? "text-[#00D26A] font-bold"
               : "text-[#A1A1AA] font-normal"
-          }`}
+            }`}
         >
           โปรไฟล์
         </Text>

@@ -8,6 +8,7 @@ import {
   StatusBar,
   Platform,
   ActivityIndicator,
+  Alert,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
@@ -69,33 +70,44 @@ export default function TripWizard({ initialFolderId, onBack, onCreated }: TripW
 
   const handleGenerate = async () => {
     setGenerating(true);
-    const result = await generateTrip({
-      startPoint,
-      destinations: selectedPlaces,
-      days,
-      nights: Math.max(0, days - 1),
-      budgetPerPerson: budget,
-      style,
-    });
-    const trip: Trip = {
-      id: `trip-${Date.now()}`,
-      title: result.title,
-      summary: result.summary,
-      status: "draft",
-      startPoint,
-      destinations: selectedPlaces,
-      days,
-      nights: Math.max(0, days - 1),
-      budgetPerPerson: budget,
-      style,
-      itinerary: result.days,
-      budget: result.budget,
-      sourceFolderId: initialFolderId,
-      createdAt: Date.now(),
-    };
-    addTrip(trip);
-    setGenerating(false);
-    onCreated(trip.id);
+    try {
+      const result = await generateTrip({
+        startPoint,
+        destinations: selectedPlaces,
+        days,
+        nights: Math.max(0, days - 1),
+        budgetPerPerson: budget,
+        style,
+      });
+      const trip: Trip = {
+        id: `trip-${Date.now()}`,
+        title: result.title,
+        summary: result.summary,
+        status: "draft",
+        startPoint,
+        destinations: selectedPlaces,
+        days,
+        nights: Math.max(0, days - 1),
+        budgetPerPerson: budget,
+        style,
+        itinerary: result.days,
+        budget: result.budget,
+        sourceFolderId: initialFolderId,
+        createdAt: Date.now(),
+      };
+      addTrip(trip);
+      // The offline template used to be handed over silently, so a broken AI
+      // looked like a working trip. Say so before navigating away.
+      if (result.source === "local-fallback") {
+        Alert.alert(
+          "ใช้แผนสำรองแทน",
+          `${result.fallbackReason ?? "AI ไม่สำเร็จ"}\n\nแผนทริปนี้มาจากเทมเพลตในแอป ไม่ใช่ AI — ดูรายละเอียดที่ Settings → AI Diagnostics`
+        );
+      }
+      onCreated(trip.id);
+    } finally {
+      setGenerating(false);
+    }
   };
 
   const canNext =

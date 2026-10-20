@@ -6,8 +6,13 @@ import aiCaptionRouter from "./routes/aiCaption";
 import aiChatRouter from "./routes/aiChat";
 import tripsRouter from "./routes/trips";
 import placesRouter from "./routes/places";
+import hostPlaceRouter from "./routes/hostPlace";
 import otopRouter from "./routes/otop";
+import accountRouter from "./routes/account";
 import { seedMemorySummary } from "./summaryStore";
+import { pingAi } from "./aiCore";
+import { requestContext, requestId } from "./middleware/requestContext";
+import { notFoundHandler, errorHandler } from "./middleware/errors";
 
 /**
  * Builds the configured Express app (no listen()).
@@ -16,11 +21,49 @@ import { seedMemorySummary } from "./summaryStore";
 export function createApp() {
   const app = express();
 
-  app.use(cors()); // allow the Expo app (any origin) to call
+  app.set("trust proxy", true);
+
+  // FIRST: every request gets an id + a one-line access log.
+  app.use(requestContext);
+
+  app.use(cors({
+    // The app reads this to correlate a failed call with a backend log line.
+    exposedHeaders: ["x-request-id"],
+  }));
   app.use(express.json({ limit: "1mb" }));
 
-  app.get("/health", (_req, res) => {
-    res.json({ ok: true, aiConfigured: isAiConfigured(), model: config.ai.model });
+  app.get("/health", (req, res) => {
+    let upstreamHost = "";
+    try {
+      upstreamHost = config.ai.baseUrl ? new URL(config.ai.baseUrl).host : "";
+    } catch {
+      upstreamHost = config.ai.baseUrl;
+    }
+    res.json({
+      ok: true,
+      aiConfigured: isAiConfigured(),
+      model: config.ai.model,
+      upstreamHost,
+      // Length only — never the token itself. Tells us "set, but how long".
+      tokenLength: config.ai.authToken.length,
+      timeoutMs: config.ai.timeoutMs,
+      maxTokens: config.ai.maxTokens,
+      supabaseConfigured: Boolean(config.supabase.url && config.supabase.serviceRoleKey),
+      placesConfigured: Boolean(config.places.googleKey),
+      nodeVersion: process.version,
+      uptimeSec: Math.round(process.uptime()),
+      requestId: requestId(req),
+    });
+  });
+
+  /**
+   * Fires ONE real request at the AI provider (max_tokens: 1) and reports the
+   * result. `/health` says the process is alive; only this says whether the
+   * token actually works.
+   */
+  app.get("/health/ping-ai", async (req, res) => {
+    const result = await pingAi();
+    res.status(result.ok ? 200 : 502).json({ ...result, requestId: requestId(req) });
   });
 
   app.use("/ai-summary", aiSummaryRouter);
@@ -28,6 +71,11 @@ export function createApp() {
   app.use("/ai-chat", aiChatRouter);
   app.use("/trips", tripsRouter);
   app.use("/places", placesRouter);
+  // Mounted after placesRouter on purpose: /places/verify is a real GET route
+  // there, and Express only falls through to the next handler when nothing
+  // matched. Keeping the host write on its own path avoids any ordering
+  // question about which router owns /places/*.
+  app.use("/places", hostPlaceRouter);
   app.use("/otop", otopRouter);
 
   // Seed demo summaries (memory-only; post-1/2/3 are not real DB video ids).
@@ -108,6 +156,11 @@ export function createApp() {
     highlights: ["เวิร์กช็อปกระดาษสา", "ชาอัสสัมหอมกรุ่น", "สายหมอกยามเช้า"],
     onScreenText: ["บ้านปางห้า", "เชียงราย"],
   });
+
+  // LAST: anything unrouted → JSON 404, anything thrown → JSON envelope.
+  app.use("/account", accountRouter);
+  app.use(notFoundHandler);
+  app.use(errorHandler);
 
   return app;
 }

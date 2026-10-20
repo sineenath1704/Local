@@ -1,16 +1,24 @@
-import { API_BASE_URL, API_TIMEOUT_MS } from "./apiConfig";
+import { API_TIMEOUT_MS } from "./apiConfig";
 import {
   ItineraryDay,
   TripBudget,
   TripRequestInput,
   TRAVEL_STYLES,
 } from "../data/tripsData";
+import { aiFetch, AiError, toastAiError } from "./aiHttp";
 
 export interface GeneratedItinerary {
   title: string;
   summary: string;
   days: ItineraryDay[];
   budget: TripBudget;
+  /**
+   * Was this really written by the AI, or is it the offline template?
+   * This used to be invisible: a 502 or a timeout silently produced a
+   * plausible-looking itinerary with no marker at all.
+   */
+  source?: "ai" | "local-fallback";
+  fallbackReason?: string;
 }
 
 function styleLabel(key: TripRequestInput["style"]): string {
@@ -47,10 +55,18 @@ function localItinerary(req: TripRequestInput): GeneratedItinerary {
     summary: `โร้ดทริปสไตล์ ${styleLabel(req.style)} เริ่มจาก ${req.startPoint}`,
     days,
     budget: { lodging, fuel, food, total, perPerson: total, withinBudget: total <= req.budgetPerPerson },
+    source: "local-fallback",
   };
 }
 
-/** Ask the backend to generate a road-trip itinerary from the wizard inputs. */
+/**
+ * Ask the backend to generate a road-trip itinerary from the wizard inputs.
+ *
+ * Always resolves — but `source` tells the caller whether the AI actually
+ * produced it. On failure we still return a usable plan (the app would be
+ * useless otherwise) *and* record the real reason, so the UI can badge it and
+ * the diagnostics screen can show what went wrong.
+ */
 export async function generateTrip(req: TripRequestInput): Promise<GeneratedItinerary> {
   const payload = {
     startPoint: req.startPoint,
@@ -61,28 +77,44 @@ export async function generateTrip(req: TripRequestInput): Promise<GeneratedItin
     style: styleLabel(req.style),
   };
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS * 4);
+  const local = (reason: string): GeneratedItinerary => ({
+    ...localItinerary(req),
+    fallbackReason: reason,
+  });
+
   try {
-    const res = await fetch(`${API_BASE_URL}/trips/generate`, {
+    const data = await aiFetch<GeneratedItinerary & { fallback?: GeneratedItinerary; error?: string }>({
+      label: "trips/generate",
+      path: "/trips/generate",
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
+      body: payload,
+      timeoutMs: API_TIMEOUT_MS * 4,
+      onSettled: (ok, error) => {
+        if (!ok && error) toastAiError(error);
+      },
     });
-    if (!res.ok) {
-      const data = await res.json().catch(() => null);
-      if (data?.fallback) return data.fallback as GeneratedItinerary;
-      return localItinerary(req);
-    }
-    const data = await res.json();
+
     if (Array.isArray(data?.days) && data?.budget) {
-      return data as GeneratedItinerary;
+      return { ...data, source: data.source ?? "ai" };
     }
-    return localItinerary(req);
+    return local(data?.fallbackReason ?? "AI ตอบมาไม่ใช่ข้อมูลทริปที่ใช้ได้");
+  } catch (err: any) {
+    if (err instanceof AiError) {
+      // The backend sends a `fallback` alongside the error — prefer it over
+      // rebuilding locally, and keep the real reason either way.
+      const fallback = safeParse<GeneratedItinerary>(err.body);
+      return { ...(fallback ?? localItinerary(req)), fallbackReason: err.message };
+    }
+    return local(err?.message ?? "เรียก AI ไม่สำเร็จ");
+  }
+}
+
+/** `AiError.body` may be a JSON string, an upstream string, or anything. */
+function safeParse<T>(text: string): T | null {
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" ? (parsed as T) : null;
   } catch {
-    return localItinerary(req);
-  } finally {
-    clearTimeout(timer);
+    return null;
   }
 }

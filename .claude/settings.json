@@ -1,0 +1,16 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://nrrai2-model.sit.kmutt.ac.th/api",
+    "ANTHROPIC_AUTH_TOKEN": "sk-sit-sineenath-JELxX0WoqQv-7z1UEziDhnboNX2nIMBZCp2ze0Qh5wcQ",
+    "ANTHROPIC_MODEL": "minimax-m3",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000",
+    "API_TIMEOUT_MS": "3000000"
+  },
+  "alwaysThinkingEnabled": true,
+  "skipDangerousModePermissionPrompt": true,
+  "theme": "dark",
+  "tui": "fullscreen",
+  "verbose": true
+}

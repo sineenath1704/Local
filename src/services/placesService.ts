@@ -22,6 +22,12 @@ export interface PlaceCandidate {
   website?: string | null;
   googleMapsUri?: string | null;
   businessStatus?: string | null;
+  /** Google's single best-fit type, e.g. "lodging". Authoritative when present. */
+  primaryType?: string | null;
+  /** Google's own Thai label for that type, e.g. "ที่พัก". */
+  primaryTypeDisplayName?: string | null;
+  /** 0-4, Google's guess at price band. Context only — never the real price. */
+  priceLevel?: number | null;
 }
 
 export interface VerifyPlacesResult {

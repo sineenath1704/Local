@@ -4,6 +4,7 @@ import { StatusBar } from "expo-status-bar";
 import { View, Text } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import BottomMenuBar, { TabKey } from "./src/components/BottomMenuBar";
+import AiToastHost from "./src/components/AiToastHost";
 import { InteractionProvider } from "./src/state/InteractionContext";
 import { ChatProvider } from "./src/state/ChatContext";
 import { AiPlannerProvider } from "./src/state/AiPlannerContext";
@@ -81,19 +82,21 @@ function AppContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingChatSeed]);
 
-  return (
-      <View className="flex-1 w-full h-full bg-black">
-        <StatusBar
-          style={
-            activeTab === "profile" ||
-            activeTab === "create" ||
-            (activeTab === "home" && isMapOpen)
-              ? "dark"
-              : "light"
-          }
-        />
 
-        {/* Main Content Area */}
+  return (
+    <View className="flex-1 w-full h-full bg-black">
+      <StatusBar
+        style={
+          activeTab === "profile" ||
+          activeTab === "create" ||
+          (activeTab === "home" && isMapOpen)
+            ? "dark"
+            : "light"
+        }
+      />
+
+      {/* Main Content Area */}
+      <View className="flex-1">
         {activeTab === "home" ? (
           isMapOpen ? (
             <MapScreen
@@ -167,17 +170,23 @@ function AppContent() {
             </Text>
           </View>
         )}
-
-        {/* Bottom Menu Bar (hidden during Map flow, chat room, AI sub-view, or profile sub-view) */}
-        {!isMapOpen &&
-          activeTab !== "create" &&
-          !(activeTab === "chat" && chatRoomOpen) &&
-          !(activeTab === "ai" && aiFullScreen) &&
-          !(activeTab === "profile" && (profileFullScreen || profileFolderId)) && (
-            <BottomMenuBar activeTab={activeTab} onTabChange={handleTabChange} />
-          )}
       </View>
+
+      {/* Bottom Menu Bar (hidden during Map flow, chat room, AI sub-view, or profile sub-view) */}
+      {!isMapOpen &&
+        activeTab !== "create" &&
+        !(activeTab === "chat" && chatRoomOpen) &&
+        !(activeTab === "ai" && aiFullScreen) &&
+        !(activeTab === "profile" &&
+          (profileFullScreen || profileFolderId)) && (
+          <BottomMenuBar
+            activeTab={activeTab}
+            onTabChange={handleTabChange}
+          />
+        )}
+    </View>
   );
+
 }
 
 /** Decides between the auth screen and the main app based on the session. */
@@ -222,6 +231,8 @@ function AuthGate() {
 export default function App() {
   return (
     <SafeAreaProvider>
+      {/* Mounted above AuthGate so an AI call fails visibly even during auth. */}
+      <AiToastHost />
       <AuthProvider>
         <AuthGate />
       </AuthProvider>

@@ -4,6 +4,8 @@ import { getSummary, saveSummary, hasSummary } from "../summaryStore";
 import { VideoAnalysisInput } from "../prompt";
 import { enrichWithGooglePlaces } from "./places";
 import { transcribeVideo } from "../transcribe";
+import { errorBody } from "../middleware/errors";
+import { requestId } from "../middleware/requestContext";
 
 const router = Router();
 
@@ -68,9 +70,8 @@ router.post("/preview", async (req: Request, res: Response) => {
 
     return res.json(finalSummary);
   } catch (err: any) {
-    const message =
-      err?.name === "AbortError" ? "หมดเวลาเชื่อมต่อ AI endpoint" : err?.message || "สร้างสรุปไม่สำเร็จ";
-    return res.status(502).json({ status: "error", message });
+    const body = errorBody(err, req);
+    return res.status(502).json({ ...body, status: "error", message: body.error });
   }
 });
 
@@ -85,6 +86,8 @@ router.get("/:postId", async (req: Request, res: Response) => {
     return res.status(404).json({
       status: "processing",
       message: "ยังไม่มีสรุปสำหรับวิดีโอนี้ (ยังไม่ถูกประมวลผล)",
+      code: "NOT_FOUND",
+      requestId: requestId(req),
     });
   }
   return res.json(summary);

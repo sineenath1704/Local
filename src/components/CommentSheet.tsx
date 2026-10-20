@@ -27,6 +27,8 @@ import {
   HeartIcon as HeartOutline,
   PhotoIcon,
   ChatBubbleLeftRightIcon,
+  ExclamationTriangleIcon,
+  ArrowPathIcon,
 } from "react-native-heroicons/outline";
 import { StarIcon as StarSolid, HeartIcon as HeartSolid } from "react-native-heroicons/solid";
 
@@ -43,6 +45,7 @@ import {
   AiSummary,
 } from "../data/commentsData";
 import { fetchAiSummary } from "../services/aiSummaryService";
+import { asAiError, type AiError } from "../services/aiHttp";
 import { useAiPlanner } from "../state/AiPlannerContext";
 
 type TabKey = "comments" | "reviews" | "ai";
@@ -249,10 +252,14 @@ function ReviewRow({ review }: { review: ReviewItem }) {
 function AiSummaryPanel({
   summary,
   loading,
+  error,
+  onRetry,
   onContinueInChat,
 }: {
   summary: AiSummary | null;
   loading: boolean;
+  error?: AiError | null;
+  onRetry?: () => void;
   onContinueInChat?: () => void;
 }) {
   if (loading) {
@@ -262,6 +269,38 @@ function AiSummaryPanel({
         <Text className="text-gray-500 text-sm text-center mt-3">
           กำลังดึงสรุปจากเซิร์ฟเวอร์...
         </Text>
+      </View>
+    );
+  }
+
+  // A failed fetch used to render as "the system is still processing…", which
+  // sent people off to wait for a summary that was never coming. Show the
+  // actual reason and offer a retry.
+  if (error) {
+    return (
+      <View className="px-5 py-10 items-center">
+        <ExclamationTriangleIcon size={30} color="#DC2626" />
+        <Text className="text-red-700 text-sm font-bold text-center mt-3">
+          ดึงสรุปจาก AI ไม่สำเร็จ
+        </Text>
+        <Text className="text-gray-600 text-[13px] text-center mt-2 leading-5">
+          {error.message}
+        </Text>
+        <Text className="text-gray-400 text-[11px] text-center mt-1.5">
+          {error.status !== null ? `HTTP ${error.status} · ` : ""}
+          {error.requestId ? `req ${error.requestId} · ` : ""}
+          {Math.round(error.durationMs)}ms
+        </Text>
+        {onRetry ? (
+          <TouchableOpacity
+            onPress={onRetry}
+            activeOpacity={0.8}
+            className="mt-4 bg-red-600 rounded-xl px-5 py-2.5 flex-row items-center"
+          >
+            <ArrowPathIcon size={16} color="#FFFFFF" />
+            <Text className="text-white text-[13px] font-bold ml-1.5">ลองใหม่</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
     );
   }
@@ -386,6 +425,7 @@ export default function CommentSheet({ visible, postId, onClose }: CommentSheetP
   // AI summary is fetched from the backend (not read from local data)
   const [aiSummary, setAiSummary] = useState<AiSummary | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<AiError | null>(null);
   const [aiFetchedFor, setAiFetchedFor] = useState<string | null>(null);
 
   // Build a seed message from the AI summary + hand it to the AI chat.
@@ -418,19 +458,29 @@ export default function CommentSheet({ visible, postId, onClose }: CommentSheetP
     }
   }, [visible, translateY]);
 
-  // Lazily fetch the AI summary the first time the AI tab is opened for a post
+  // Lazily fetch the AI summary the first time the AI tab is opened for a post.
+  // Failures are NOT latched — the user can hit "ลองใหม่" instead of being
+  // stuck on the fake "processing…" message for the rest of the session.
   useEffect(() => {
     if (!visible || tab !== "ai") return;
     if (aiFetchedFor === postId) return; // already fetched for this post
 
     let cancelled = false;
     setAiLoading(true);
+    setAiError(null);
     fetchAiSummary(postId)
-      .then((summary) => {
-        if (!cancelled) {
-          setAiSummary(summary);
-          setAiFetchedFor(postId);
-        }
+      .then((result) => {
+        if (cancelled) return;
+        setAiSummary(result.summary);
+        setAiError(result.kind === "error" ? result.error : null);
+        // Only latch on a real answer, so an error stays retryable.
+        if (result.kind !== "error") setAiFetchedFor(postId);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.warn("[commentSheet] ai summary fetch FAIL", err?.message ?? err);
+        setAiSummary(null);
+        setAiError(asAiError(err));
       })
       .finally(() => {
         if (!cancelled) setAiLoading(false);
@@ -589,6 +639,16 @@ export default function CommentSheet({ visible, postId, onClose }: CommentSheetP
               <AiSummaryPanel
                 summary={aiSummary}
                 loading={aiLoading}
+                error={aiError}
+                onRetry={
+                  aiError
+                    ? () => {
+                        // Clear the latch + error so the effect re-runs.
+                        setAiError(null);
+                        setAiFetchedFor(null);
+                      }
+                    : undefined
+                }
                 onContinueInChat={
                   aiSummary?.status === "ready" ? handleContinueInChat : undefined
                 }

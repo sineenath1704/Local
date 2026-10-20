@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { callAi, extractJson, isAiConfigured } from "../aiCore";
 import { TRIP_SYSTEM_PROMPT, buildTripPrompt, TripRequest } from "../tripPrompt";
+import { errorBody } from "../middleware/errors";
 
 const router = Router();
 
@@ -67,7 +68,11 @@ router.post("/generate", async (req: Request, res: Response) => {
   };
 
   if (!isAiConfigured()) {
-    return res.json(stubItinerary(tripReq));
+    return res.json({
+      ...stubItinerary(tripReq),
+      source: "local-fallback",
+      fallbackReason: "ยังไม่ได้ตั้งค่า AI บนเซิร์ฟเวอร์",
+    });
   }
 
   try {
@@ -81,11 +86,12 @@ router.post("/generate", async (req: Request, res: Response) => {
       return res.json({ ...parsed, source: "ai" });
     }
     // AI replied but not valid JSON → fall back to a usable plan.
-    return res.json(stubItinerary(tripReq));
+    return res.json({ ...stubItinerary(tripReq), source: "local-fallback", fallbackReason: "AI ตอบมาไม่ใช่ JSON ที่ใช้ได้" });
   } catch (err: any) {
-    const message =
-      err?.name === "AbortError" ? "หมดเวลาเชื่อมต่อ AI" : err?.message || "สร้างแผนไม่สำเร็จ";
-    return res.status(502).json({ error: message, fallback: stubItinerary(tripReq) });
+    const body = errorBody(err, req);
+    // Keep `fallback` so the app can still render a usable trip, but now the
+    // real reason rides along instead of being silently dropped.
+    return res.status(502).json({ ...body, fallback: stubItinerary(tripReq) });
   }
 });
 
