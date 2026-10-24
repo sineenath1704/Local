@@ -76,7 +76,7 @@ export default function HomeScreen({
   );
 
   // Dynamic bottom offset
-  const bottomOffset = Math.max(insets.bottom, 20) + 72;
+  const bottomOffset = 20;
 
   // Viewability config to detect which video is currently visible
   const viewabilityConfig = useRef({

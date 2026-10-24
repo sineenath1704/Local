@@ -87,7 +87,7 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
   const insets = useSafeAreaInsets();
   const { width: screenWidth } = useWindowDimensions();
 
-  const { name, username, bio, avatar, location, registeredInfo } = useMyProfile();
+  const { name, username, bio, avatar, location } = useMyProfile();
   const { user, refreshUser } = useAuth();
   const { followingCount, likedVideoIds, savedVideoIds, folders, createFolder } = useInteractions();
 
@@ -606,10 +606,12 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
           </View>
 
           {/* 2. Location */}
-          <View className="px-5 flex-row items-center mb-3">
-            <MapPinSolid size={16} color="#EF4444" />
-            <Text className="text-gray-500 text-[13px] font-medium ml-1.5">{location}</Text>
-          </View>
+          {location ? (
+            <View className="px-5 flex-row items-center mb-3">
+              <MapPinSolid size={16} color="#EF4444" />
+              <Text className="text-gray-500 text-[13px] font-medium ml-1.5">{location}</Text>
+            </View>
+          ) : null}
 
           {/* 3. Name / Username / Bio + Avatar (editable via pencil) */}
           <View className="px-5 flex-row items-start justify-between mb-5">
@@ -621,16 +623,31 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
                 </TouchableOpacity>
               </View>
               <Text className="text-sm font-semibold text-gray-700 mb-2">{username}</Text>
-              <Text className="text-[13px] text-gray-800 leading-5">{bio}</Text>
+              {bio ? (
+                <Text className="text-[13px] text-gray-800 leading-5">{bio}</Text>
+              ) : (
+                <Text className="text-[13px] text-gray-400 italic leading-5">ยังไม่ได้เขียนแนะนำตัว</Text>
+              )}
             </View>
 
             <TouchableOpacity onPress={() => setShowEdit(true)} activeOpacity={0.85} className="items-center justify-center">
-              <Image
-                source={avatar}
-                style={{ width: 97, height: 97, borderRadius: 97 / 2 }}
-                className="bg-gray-100 border border-gray-200"
-                resizeMode="cover"
-              />
+              {avatar ? (
+                <Image
+                  source={avatar}
+                  style={{ width: 97, height: 97, borderRadius: 97 / 2 }}
+                  className="bg-gray-100 border border-gray-200"
+                  resizeMode="cover"
+                />
+              ) : (
+                <View
+                  style={{ width: 97, height: 97, borderRadius: 97 / 2 }}
+                  className="bg-emerald-100 border border-gray-200 items-center justify-center"
+                >
+                  <Text className="text-[#2D6A4F] font-black text-4xl">
+                    {name.trim().charAt(0)}
+                  </Text>
+                </View>
+              )}
             </TouchableOpacity>
           </View>
 

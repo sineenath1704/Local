@@ -8,7 +8,11 @@
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/server.js",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "probe:gem": "ts-node --transpile-only scripts/gem_probe.ts",
+    "probe:summary": "ts-node --transpile-only scripts/summary_probe.ts",
+    "check:proofread": "ts-node --transpile-only scripts/proofread_check.ts",
+    "lint": "expo lint"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.3",

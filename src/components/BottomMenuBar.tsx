@@ -61,7 +61,7 @@ export default function BottomMenuBar({
         width: "100%",
         paddingBottom: insets.bottom,
       }}
-      className="bg-[#171717] pt-2 px-2 flex-row items-center justify-around border-t border-white/10"
+      className="bg-[#171717] flex-row items-center justify-around border-t border-white/10 pt-5"
     >
       {/* 1. หน้าหลัก */}
       <TouchableOpacity

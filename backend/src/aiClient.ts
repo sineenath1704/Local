@@ -1,5 +1,6 @@
 import { config, isAiConfigured } from "./config";
 import { AiUpstreamError } from "./aiErrors";
+import type { PlaceCandidate } from "./placeTypes";
 import {
   SYSTEM_PROMPT,
   buildSummaryPrompt,
@@ -23,12 +24,52 @@ export interface PlaceData {
     subdistrict?: string | null;
     gps?: string | null;
   };
+  /**
+   * Google Places candidates for this clip. The app shows them as a picker —
+   * the USER ticks one, we never pick for them. Not persisted: the app
+   * strips this list before saving the summary.
+   */
+  google_candidates?: PlaceCandidate[];
   atmosphere?: string | null;
   category: string[];
   activities: string[];
-  price_info: { weekday: string | null; weekend: string | null; currency?: string };
-  contact: { phone?: string | null; facebook?: string | null; line?: string | null };
+  price_info: {
+    weekday: string | null;
+    weekend: string | null;
+    currency?: string;
+    /**
+     * Google's price band for a place the user confirmed ("฿" / "฿฿฿" /
+     * "ฟรี"). An overall estimate — NOT a weekday/weekend price, so it sits
+     * beside them rather than in them. Filled in on the app when the user
+     * tick-confirms a Google candidate.
+     */
+    level?: string | null;
+  };
+  contact: {
+    phone?: string | null;
+    facebook?: string | null;
+    line?: string | null;
+    /** Website of the confirmed place, from Google. */
+    website?: string | null;
+  };
   opening_hours?: string | null;
+  /**
+   * How many people the place takes. Every slot is a STRING on purpose: the
+   * clip says "มี 3 ห้อง ห้องใหญ่นอนได้ 4-6 คน" and a number would force us
+   * to pick one reading of an ambiguous sentence.
+   */
+  capacity?: {
+    rooms?: string | null;
+    guests_per_room?: string | null;
+    max_guests?: string | null;
+    beds?: string | null;
+  } | null;
+  /** The place's rules — "รับวันละ 1 กลุ่ม", "ต้องช่วยกันทำเตาไฟ". */
+  rules?: string[];
+  /** Zones of the place — "โซนเจ้าบ้าน", "โซนคาเฟ่". */
+  areas?: string[];
+  /** Facilities — "ระเบียง", "กองไฟ". */
+  facilities?: string[];
   otop_products: string[];
   highlights: string[];
   tags: string[];
@@ -41,12 +82,34 @@ export interface PlaceData {
 }
 
 /** Shape returned to the mobile app (superset of the app's AiSummary type). */
+/**
+ * One object from the clip's scene inventory (Pillar 1). The narrator treats
+ * this list as a checklist — every row has to end up in paragraph 1, so a
+ * small detail (a towel, a sign, a water bottle) is never dropped.
+ */
+export interface SceneItem {
+  /** Name of the thing ("เตียงไม้") — "ไม่ชัด" when it can't be identified. */
+  item: string;
+  /** What it's made of ("ไม้เนื้อแข็ง"). */
+  material: string | null;
+  /** How many ("2", "3-4", "1 คู่") — a string because clips say ranges. */
+  count: string | null;
+  /** How it looks now ("เก่า มีรอยชำรุด"). */
+  condition: string | null;
+  /** Where it sits in the frame ("ซ้าย บนโต๊ะ"). */
+  position: string | null;
+}
+
 export interface AiSummaryResult {
   status: "ready" | "processing" | "unavailable";
   generatedAt: string;
   model: string;
   /** Natural-language summary (maps to the model's "summary"). */
   text: string;
+  /** Detailed description of everything visible in the clip (Pillar 1). */
+  visualDescription?: string;
+  /** Every visible object, itemised — the narrator's checklist for ¶1. */
+  sceneInventory?: SceneItem[];
   /** Structured extraction (place/location/price/contact/...), when available. */
   place?: PlaceData;
   // Back-compat display fields used by the current app UI:
@@ -57,8 +120,29 @@ export interface AiSummaryResult {
   transcriptHighlights?: string[];
 }
 
+/**
+ * Normalise the model's `scene_inventory` into our shape. Rows without a
+ * usable name are dropped — a nameless row can't be narrated.
+ */
+function parseSceneInventory(raw: unknown): SceneItem[] {
+  if (!Array.isArray(raw)) return [];
+  const rows: SceneItem[] = [];
+  for (const row of raw as any[]) {
+    const item = typeof row?.item === "string" ? row.item.trim() : "";
+    if (!item) continue;
+    rows.push({
+      item,
+      material: row?.material != null ? String(row.material) : null,
+      count: row?.count != null ? String(row.count) : null,
+      condition: row?.condition != null ? String(row.condition) : null,
+      position: row?.position != null ? String(row.position) : null,
+    });
+  }
+  return rows;
+}
+
 /** Try to pull a JSON object out of the model's text response. */
-function extractJson(raw: string): any | null {
+export function extractJson(raw: string): any | null {
   // Direct parse first
   try {
     return JSON.parse(raw);
@@ -165,6 +249,10 @@ export async function generateSummary(
         price_info: parsed.price_info ?? { weekday: null, weekend: null, currency: "THB" },
         contact: parsed.contact ?? {},
         opening_hours: parsed.opening_hours ?? null,
+        capacity: parsed.capacity ?? null,
+        rules: parsed.rules ?? [],
+        areas: parsed.areas ?? [],
+        facilities: parsed.facilities ?? [],
         otop_products: parsed.otop_products ?? [],
         highlights: parsed.highlights ?? [],
         tags: parsed.tags ?? [],
@@ -175,6 +263,8 @@ export async function generateSummary(
         generatedAt: now,
         model: config.ai.model,
         text: parsed.summary,
+        visualDescription: parsed.visual_description ?? undefined,
+        sceneInventory: parseSceneInventory(parsed.scene_inventory),
         place,
         tags: place.tags,
         highlights: place.highlights,
@@ -197,17 +287,45 @@ export async function generateSummary(
 
 /**
  * Ask the AI to suggest 2–3 captions for a post, using the clip's AI summary
- * + location as the main source. Returns a list of caption strings.
+ * + location as the main source, plus a set of hashtag suggestions.
+ *
+ * Returns `{ captions, hashtags }`. The hashtags are suggestions the user picks
+ * from — the app never posts them without a tap.
  */
-export async function generateCaptions(input: CaptionInput): Promise<string[]> {
+export interface CaptionSuggestion {
+  captions: string[];
+  hashtags: string[];
+}
+
+/** Strip a leading "#", spaces and anything that can't live in a hashtag. */
+function normalizeHashtag(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  return raw
+    .replace(/^#+/, "")
+    .replace(/\s+/g, "")
+    .replace(/[^\p{L}\p{N}_]/gu, "")
+    .slice(0, 40);
+}
+
+export async function generateCaptions(input: CaptionInput): Promise<CaptionSuggestion> {
   if (!isAiConfigured()) {
     // Graceful stub so the feature works before the token is set.
     const place = input.locationName || input.province || "ชุมชน";
-    return [
-      `วันนี้พามาเที่ยว ${place} บรรยากาศดีมากกก 🌿`,
-      `${place} สวยจนต้องมาเอง มาสัมผัสวิถีชุมชนกัน ✨`,
-      `แวะ ${place} มาเติมพลังใจ 😊`,
-    ];
+    const safePlace = place.replace(/\s+/g, "");
+    return {
+      captions: [
+        `วันนี้พามาเที่ยว ${place} บรรยากาศดีมากกก 🌿`,
+        `${place} สวยจนต้องมาเอง มาสัมผัสวิถีชุมชนกัน ✨`,
+        `แวะ ${place} มาเติมพลังใจ 😊`,
+      ],
+      hashtags: [
+        safePlace,
+        "เที่ยวชุมชน",
+        "ช้อปปิ้ง",
+        "คาเฟ่",
+        "ไทย",
+      ].filter(Boolean),
+    };
   }
 
   const controller = new AbortController();
@@ -223,7 +341,7 @@ export async function generateCaptions(input: CaptionInput): Promise<string[]> {
       },
       body: JSON.stringify({
         model: config.ai.model,
-        max_tokens: 512,
+        max_tokens: 1024,
         system: CAPTION_SYSTEM_PROMPT,
         messages: [{ role: "user", content: buildCaptionPrompt(input) }],
       }),
@@ -241,14 +359,25 @@ export async function generateCaptions(input: CaptionInput): Promise<string[]> {
 
     const parsed = extractJson(rawText);
     if (parsed && Array.isArray(parsed.captions)) {
-      return parsed.captions.filter((c: unknown) => typeof c === "string").slice(0, 3);
+      const captions = parsed.captions
+        .filter((c: unknown) => typeof c === "string")
+        .slice(0, 3) as string[];
+      const hashtags = Array.isArray(parsed.hashtags)
+        ? parsed.hashtags
+            .map(normalizeHashtag)
+            .filter(Boolean)
+            .filter((h: string) => !input.hashtags?.some((u) => normalizeHashtag(u) === h))
+            .slice(0, 8)
+        : [];
+      return { captions, hashtags };
     }
     // Fallback: split lines if JSON wasn't returned.
-    return rawText
+    const captions = rawText
       .split("\n")
       .map((l) => l.replace(/^[-*\d.\s]+/, "").trim())
       .filter(Boolean)
       .slice(0, 3);
+    return { captions, hashtags: [] };
   } finally {
     clearTimeout(timer);
   }
@@ -257,6 +386,9 @@ export async function generateCaptions(input: CaptionInput): Promise<string[]> {
 /**
  * Stage 2: Turn structured JSON into an engaging 2-paragraph narrative
  * for display in the AI summary panel.
+ *
+ * Paragraph 1 = what the clip shows. Paragraph 2 = the conditions a
+ * traveller needs before going (price, rules, capacity, zones, facilities).
  */
 export async function generateNarration(analysisJson: any): Promise<string> {
   const place = analysisJson?.place ?? analysisJson;
@@ -264,19 +396,67 @@ export async function generateNarration(analysisJson: any): Promise<string> {
   const province = place?.location?.province ?? null;
   const district = place?.location?.district ?? null;
   const atmosphere = place?.atmosphere ?? analysisJson?.atmosphere ?? null;
-  const activities: string[] = place?.activities ?? [];
   const highlights: string[] = place?.highlights ?? analysisJson?.highlights ?? [];
 
   const locationText = [district, province].filter(Boolean).join(" ");
-  const fallbackPin = placeName
-    ? `📍 ${placeName}${locationText ? ` | ${locationText}` : ""}`
-    : "📍 ท่องเที่ยวชุมชนและวิถีชีวิตไทย";
 
-  const fallbackBody =
-    atmosphere ||
-    "คลิปนี้พามาสัมผัสบรรยากาศความสวยงามและเสน่ห์ของชุมชนท้องถิ่นที่อบอุ่น ชวนแวะมาพักผ่อน สัมผัสวิถีชีวิตเป็นกันเอง และช้อปสินค้า OTOP ชุมชนด้วยตัวเองสักครั้งนะคะ!";
+  // Paragraph 1 — what the clip shows. The fallback must not be thinner
+  // than the AI-written version, so it leans on the visual description and
+  // falls back to the highlights / atmosphere when there is none.
+  const visualDescription: string | null =
+    analysisJson?.visualDescription ?? place?.visual_description ?? null;
+  // The inventory is the narrator's checklist. In the fallback it becomes
+  // paragraph 1 itself, so nothing the model saw is lost when the AI call
+  // fails or the token is not configured.
+  const sceneInventory: SceneItem[] = Array.isArray(analysisJson?.sceneInventory)
+    ? analysisJson.sceneInventory
+    : Array.isArray(place?.scene_inventory)
+    ? place.scene_inventory
+    : [];
+  const inventoryLine = sceneInventory
+    .map((row) => {
+      const bits = [row.count, row.material, row.condition, row.position].filter(Boolean);
+      return bits.length ? `${row.item} (${bits.join(", ")})` : row.item;
+    })
+    .join(", ");
+  const fallbackVisual = visualDescription
+    ? `ในคลิปนี้เห็น${visualDescription}`
+    : inventoryLine
+    ? `ในคลิปนี้เห็น${inventoryLine}`
+    : highlights.length
+    ? `ในคลิปนี้เห็น${highlights.join(" ")}`
+    : atmosphere || "";
 
-  const fallbackText = `${fallbackPin}\n\n${fallbackBody}`;
+  // Paragraph 2 — the conditions. Same order the prompt asks for: price →
+  // rules → capacity → zones → facilities.
+  const conditions: string[] = [];
+  const price = place?.price_info?.weekday ?? place?.price_info?.weekend ?? null;
+  if (price) conditions.push(`ราคา ${price}`);
+  const rules: string[] = Array.isArray(place?.rules) ? place.rules : [];
+  if (rules.length) conditions.push(rules.join(" "));
+  const cap = place?.capacity ?? null;
+  if (cap?.rooms) conditions.push(`มี ${cap.rooms} ห้อง`);
+  if (cap?.guests_per_room) conditions.push(`ห้องปกตินอนได้ ${cap.guests_per_room} คน`);
+  if (cap?.max_guests) conditions.push(`ห้องใหญ่นอนได้ ${cap.max_guests} คน`);
+  if (cap?.beds) conditions.push(`มี ${cap.beds} เตียง`);
+  const areas: string[] = Array.isArray(place?.areas) ? place.areas : [];
+  if (areas.length) conditions.push(areas.join(" "));
+  const facilities: string[] = Array.isArray(place?.facilities) ? place.facilities : [];
+  if (facilities.length) conditions.push(facilities.join(" "));
+
+  const placeLine = placeName
+    ? `${placeName}${locationText ? ` ที่ ${locationText}` : ""}`
+    : "";
+  const fallbackConditions = [
+    placeLine,
+    conditions.length
+      ? conditions.join(" ")
+      : "คลิปนี้พามาสัมผัสบรรยากาศความสวยงามและเสน่ห์ของชุมชนท้องถิ่นที่อบอุ่น ชวนแวะมาพักผ่อน สัมผัสวิถีชีวิตเป็นกันเอง และช้อปสินค้า OTOP ชุมชนด้วยตัวเองสักครั้งนะคะ!",
+  ]
+    .filter(Boolean)
+    .join(" — ");
+
+  const fallbackText = [fallbackVisual, fallbackConditions].filter(Boolean).join("\n\n");
 
   if (!isAiConfigured()) {
     return fallbackText;
@@ -295,7 +475,10 @@ export async function generateNarration(analysisJson: any): Promise<string> {
       },
       body: JSON.stringify({
         model: config.ai.model,
-        max_tokens: 512,
+        // Paragraph 1 is written at maximum detail (every object described by
+        // material / count / condition), so the old 1024 budget truncated it
+        // mid-sentence.
+        max_tokens: 4096,
         temperature: 0.6,
         system: SUMMARY_NARRATION_PROMPT,
         messages: [{ role: "user", content: buildNarrationPrompt(analysisJson) }],

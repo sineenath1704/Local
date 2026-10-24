@@ -1,8 +1,7 @@
 import { Router, Request, Response } from "express";
 import { generateCaptions } from "../aiClient";
 import { CaptionInput } from "../prompt";
-import { errorBody, sendError } from "../middleware/errors";
-import { requestId } from "../middleware/requestContext";
+import { errorBody } from "../middleware/errors";
 
 const router = Router();
 
@@ -10,7 +9,8 @@ const router = Router();
  * POST /ai-caption
  * -------------------------------------------------------------
  * "ให้ AI ช่วยคิดแคปชัน" — returns 2-3 caption suggestions for a post,
- * built mainly from the clip's AI summary + location.
+ * built mainly from the clip's AI summary + location, plus a set of
+ * suggested hashtags the user can tap to add.
  *
  * Body (CaptionInput): {
  *   draft?, locationName?, province?, district?,
@@ -32,8 +32,8 @@ router.post("/", async (req: Request, res: Response) => {
   };
 
   try {
-    const captions = await generateCaptions(input);
-    return res.json({ captions });
+    const { captions, hashtags } = await generateCaptions(input);
+    return res.json({ captions, hashtags });
   } catch (err: any) {
     const body = errorBody(err, req);
     // Keep `status`/`message` keys so the existing client shape still works.

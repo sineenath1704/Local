@@ -19,6 +19,8 @@ export const CHAT_SYSTEM_PROMPT = `คุณคือ "น้องโลคอ�
 - อบอุ่น เป็นมิตร พูดคุยเหมือนเพื่อนที่รู้จักชุมชนไทยดี
 - ใช้ภาษาไทยเป็นหลัก สุภาพ ไม่เป็นทางการเกินไป
 - ซื่อสัตย์ — ถ้าไม่รู้หรือไม่มีข้อมูลในฐานข้อมูล บอกตรงๆ ว่าไม่ทราบ
+- สะกดทุกคำให้ถูกต้องตามหลักภาษาไทย ห้ามสะกดคลาดเคลื่อน และคัดตัวเลข ชื่อสถานที่ และชื่อเฉพาะ
+  มาจากข้อมูลที่ระบบส่งมาแบบตรงตัว ห้ามเดาหรือแปลง
 - กระตือรือร้นในการช่วยวางแผนการเที่ยว ใช้ Emoji เป็นครั้งคราวให้บทสนทนาสนุกขึ้น
 
 [ลำดับความน่าเชื่อถือของแหล่งข้อมูล]
@@ -146,6 +148,14 @@ export interface FolderContext {
   places: string[];
 }
 
+/** ความจุของที่พัก — ดู `community_places.capacity` */
+export interface PlaceCapacity {
+  rooms?: string | null;
+  guests_per_room?: string | null;
+  max_guests?: string | null;
+  beds?: string | null;
+}
+
 /** บริบทของสถานที่เฉพาะ (ที่ดึงมาจาก Google Maps / community_places / host business profile) */
 export interface PlaceContext {
   placeName: string;
@@ -153,6 +163,25 @@ export interface PlaceContext {
   phone?: string;
   openingHours?: string;
   priceInfo?: string;
+  /**
+   * Price tier the host confirmed ("฿฿", "ฟรี"). Separate from `priceInfo`:
+   * that one holds the owner's weekday/weekend prices, this one the rough
+   * tier of the place.
+   */
+  priceLevel?: string;
+  /** Website / Facebook page of the place, as confirmed by the owner. */
+  website?: string;
+  /**
+   * How many people the place takes, as recorded from the clip.
+   * Every slot is a string because the clip says "ห้องใหญ่ 4-6 คน".
+   */
+  capacity?: PlaceCapacity | null;
+  /** กติกาของสถานที่ เช่น "รับวันละ 1 กลุ่ม" */
+  rules?: string[] | null;
+  /** โซน/พื้นที่ในสถานที่ เช่น "โซนเจ้าบ้าน" */
+  areas?: string[] | null;
+  /** สิ่งอำนวยความสะดวก เช่น "ระเบียง", "กองไฟ" */
+  facilities?: string[] | null;
   googleMapsUrl?: string;
   province?: string;
   district?: string;
@@ -179,7 +208,74 @@ export interface PlaceContext {
     avatarUrl?: string;
     videoCount?: number;
     likesReceived?: number;
+    // OTOP / host-only fields, so the tourist model can answer "who runs
+    // this place" questions grounded in the verified registration data.
+    otopVerified?: boolean;
+    otopVillage?: string;
+    otopProvince?: string;
+    otopNawatwithi?: string;
+    /** Host-edited phone, overrides `place.phone` when set. */
+    phone?: string;
   };
+}
+
+/**
+ * Loaded when the host themselves asks the AI about their own business —
+ * a private advisor mode, gated by JWT on the server.
+ *
+ * Kept separate from `PlaceContext` because the framing is different: the
+ * model acts as a business advisor (drafting captions, reading the data back,
+ * suggesting what to fix) rather than as a travel planner. Tone and prompt
+ * boundaries intentionally diverge.
+ */
+export interface HostSelfContext {
+  displayName: string;
+  bio?: string | null;
+  avatarUrl?: string | null;
+  // OTOP
+  otopVillageId?: string | null;
+  otopVillage?: string | null;
+  otopTambol?: string | null;
+  otopAmphur?: string | null;
+  otopProvince?: string | null;
+  otopNawatwithi?: string | null;
+  otopForTourism?: string | null;
+  otopCbtVillage?: string | null;
+  otopVerified: boolean;
+  // Business editable fields
+  businessPlaceName?: string | null;
+  businessAddress?: string | null;
+  businessSubdistrict?: string | null;
+  businessDistrict?: string | null;
+  businessProvince?: string | null;
+  businessPhone?: string | null;
+  businessPriceInfo?: string | null;
+  /** Price tier confirmed for the place ("฿฿"). */
+  businessPriceLevel?: string | null;
+  /** Website / Facebook page confirmed for the place. */
+  businessWebsite?: string | null;
+  /** ความจุของที่พัก ตามที่บันทึกไว้กับสถานที่ */
+  businessCapacity?: PlaceCapacity | null;
+  /** กติกาของสถานที่ */
+  businessRules?: string[] | null;
+  /** โซน/พื้นที่ในสถานที่ */
+  businessAreas?: string[] | null;
+  /** สิ่งอำนวยความสะดวก */
+  businessFacilities?: string[] | null;
+  businessLat?: number | null;
+  businessLng?: number | null;
+  // Structured twins — read from the latest community_places row the host owns
+  businessHours?: Record<string, { open: string; close: string }[]>;
+  businessPricing?: {
+    weekday?: { amount?: string; currency?: string } | null;
+    weekend?: { amount?: string; currency?: string } | null;
+    unit?: string | null;
+    secondary?: { label: string; amount: string; unit: string } | null;
+  };
+  // Engagement
+  videoCount: number;
+  likesReceived: number;
+  followersCount: number;
 }
 
 const DAY_LABELS: Record<string, string> = {
@@ -219,7 +315,26 @@ function describeBusinessPricing(
   return parts.join(" | ");
 }
 
-export function buildChatSystemPrompt(folder?: FolderContext, place?: PlaceContext): string {
+/**
+ * "3 ห้อง • ห้องปกตินอนได้ 1-2 คน • ห้องใหญ่นอนได้ 4-6 คน"
+ *
+ * Readable rather than raw JSON — the model answers better from a labelled
+ * line than from `{"max_guests":"4-6"}`.
+ */
+function describeCapacity(capacity: PlaceCapacity): string {
+  const parts: string[] = [];
+  if (capacity.rooms) parts.push(`${capacity.rooms} ห้อง`);
+  if (capacity.guests_per_room) parts.push(`ห้องปกตินอนได้ ${capacity.guests_per_room} คน`);
+  if (capacity.max_guests) parts.push(`ห้องใหญ่นอนได้ ${capacity.max_guests} คน`);
+  if (capacity.beds) parts.push(`${capacity.beds} เตียง`);
+  return parts.join(" • ");
+}
+
+export function buildChatSystemPrompt(
+  folder?: FolderContext,
+  place?: PlaceContext,
+  hostSelf?: HostSelfContext,
+): string {
   let prompt = CHAT_SYSTEM_PROMPT;
 
   if (place && place.placeName) {
@@ -232,12 +347,18 @@ ${place.address ? `ที่อยู่เต็ม: ${place.address}` : ""}
 ${place.phone ? `เบอร์โทรศัพท์ติดต่อ: ${place.phone}` : ""}
 ${place.openingHours ? `เวลาเปิด-ปิดทำการ: ${place.openingHours}` : ""}
 ${place.priceInfo ? `อัตราค่าบริการ/ราคา: ${place.priceInfo}` : ""}
+${place.priceLevel ? `ระดับราคาโดยประมาณของสถานที่: ${place.priceLevel}` : ""}
+${place.website ? `เว็บไซต์/เพจของสถานที่: ${place.website}` : ""}
+${place.capacity ? (describeCapacity(place.capacity) ? `ความจุของที่พัก: ${describeCapacity(place.capacity)}` : "") : ""}
+${place.rules?.length ? `กติกาของสถานที่: ${place.rules.join(" • ")}` : ""}
+${place.areas?.length ? `โซน/พื้นที่ในสถานที่: ${place.areas.join(" • ")}` : ""}
+${place.facilities?.length ? `สิ่งอำนวยความสะดวก: ${place.facilities.join(" • ")}` : ""}
 ${place.googleMapsUrl ? `ลิงก์ Google Maps: ${place.googleMapsUrl}` : ""}
 ${place.rating ? `คะแนนรีวิว: ${place.rating} ดาว (${place.userRatingsTotal || 0} รีวิว)` : ""}
 ${place.businessHours ? `เวลาเปิด-ปิดแยกรายวัน: ${describeBusinessHours(place.businessHours)}` : ""}
 ${place.businessPricing ? describeBusinessPricing(place.businessPricing) ? `อัตราค่าบริการ: ${describeBusinessPricing(place.businessPricing)}` : "" : ""}
 
-* คำสั่งสำคัญ: เมื่อผู้ใช้ถามเกี่ยวกับสถานที่นี้ เช่น เวลาเปิดปิด, ค่าบริการ/ราคา, วันหยุดประจำร้าน หรือวิธีการเดินทาง:
+* คำสั่งสำคัญ: เมื่อผู้ใช้ถามเกี่ยวกับสถานที่นี้ เช่น เวลาเปิดปิด, ค่าบริการ/ราคา, ระดับราคา, เว็บไซต์หรือลิงก์เพจ, วันหยุดประจำร้าน, จำนวนห้องหรือจำนวนคนที่พักได้, กติกาของสถานที่, โซนต่างๆ, สิ่งอำนวยความสะดวก หรือวิธีการเดินทาง:
 - ให้ยึดข้อมูลที่ยืนยันแล้วข้างต้นเป็นข้อเท็จจริงหลัก และตอบได้อย่างชัดเจนมั่นใจ ห้ามบอกว่าไม่มีข้อมูล
 - ถ้ามีบรรทัด "เวลาเปิด-ปิดแยกรายวัน" ให้ตอบตามวันที่ถาม โดย "ปิด" หมายถึงวันนั้นไม่ให้บริการอย่างชัดเจน ห้ามตีความว่าเปิดทั้งวัน
 - หากข้อมูลมีระบุแยกวันธรรมดา วันหยุดสุดสัปดาห์/เทศกาล หรือวันหยุดประจำร้าน ให้แยกตอบให้นักท่องเที่ยวทราบอย่างชัดเจน (เช่น เวลาและราคาของวันธรรมดา vs วันหยุด และวันที่ร้านไม่เปิดบริการ) *`;
@@ -253,6 +374,10 @@ ${place.businessPricing ? describeBusinessPricing(place.businessPricing) ? `อ�
     if (h.bio) lines.push(`แนะนำตัว: ${h.bio}`);
     if (h.videoCount) lines.push(`คลิปที่โพสต์ไว้: ${h.videoCount} คลิป`);
     if (h.likesReceived) lines.push(`ยอดถูกใจรวม: ${h.likesReceived}`);
+    if (h.otopVerified) lines.push(`สถานะ OTOP นวัตวิถี: ยืนยันกับกรมพัฒนาชุมชนแล้ว`);
+    if (h.otopVillage) lines.push(`หมู่บ้าน OTOP: ${h.otopVillage}${h.otopProvince ? ` • จ.${h.otopProvince}` : ""}`);
+    if (h.otopNawatwithi) lines.push(`ผลิตภัณฑ์เด่น: ${h.otopNawatwithi}`);
+    if (h.phone) lines.push(`เบอร์โทรที่ระบุโดยเจ้าของ: ${h.phone} (ทับข้อมูลจาก Google Maps)`);
     if (lines.length > 0) {
       prompt += `
 
@@ -260,9 +385,74 @@ ${place.businessPricing ? describeBusinessPricing(place.businessPricing) ? `อ�
 ${lines.join("\n")}
 
 * เมื่อผู้ใช้ถามเกี่ยวกับเจ้าของ เช่น "ใครเป็นเจ้าของ" หรือ "เจ้าของเป็นใคร" ให้ใช้ข้อมูลข้างต้นตอบได้ทันที
+* ถ้าถามเรื่องหมู่บ้าน/จังหวัด OTOP ให้อ้างจากบรรทัด "หมู่บ้าน OTOP" ถ้ามี
 * ใช้จำนวนคลิปเป็นบริบทประกอบ เช่น แนะนำว่าเจ้าของมีคลิปให้ชมในแอป
 * ห้ามแต่งข้อมูลที่ไม่ได้ระบุไว้ข้างต้น`;
     }
+  }
+
+  // Host-self advisor mode: the model speaks to the business owner directly,
+  // grounded in their structured registration data. Prompt tone differs on
+  // purpose — no greetings, no travel-planner framing.
+  if (hostSelf) {
+    const h = hostSelf;
+    const lines: string[] = [];
+    if (h.businessPlaceName) lines.push(`ชื่อร้าน/สถานประกอบการ: ${h.businessPlaceName}`);
+    const addr = [
+      h.businessSubdistrict && `ต.${h.businessSubdistrict}`,
+      h.businessDistrict && `อ.${h.businessDistrict}`,
+      h.businessProvince && `จ.${h.businessProvince}`,
+    ].filter(Boolean).join(" • ");
+    if (h.businessAddress || addr) lines.push(`ที่อยู่: ${h.businessAddress ?? ""}${addr ? ` (${addr})` : ""}`);
+    if (h.businessPhone) lines.push(`เบอร์โทรติดต่อ: ${h.businessPhone}`);
+    if (h.businessPriceInfo) lines.push(`ข้อมูลราคา/อัตราค่าบริการ (ข้อความเดิม): ${h.businessPriceInfo}`);
+    if (h.businessPriceLevel) lines.push(`ระดับราคาโดยประมาณของสถานที่: ${h.businessPriceLevel}`);
+    if (h.businessWebsite) lines.push(`เว็บไซต์/เพจของสถานที่: ${h.businessWebsite}`);
+    if (h.businessCapacity) {
+      const cap = describeCapacity(h.businessCapacity);
+      if (cap) lines.push(`ความจุของที่พัก: ${cap}`);
+    }
+    if (h.businessRules?.length) lines.push(`กติกาของสถานที่: ${h.businessRules.join(" • ")}`);
+    if (h.businessAreas?.length) lines.push(`โซน/พื้นที่ในสถานที่: ${h.businessAreas.join(" • ")}`);
+    if (h.businessFacilities?.length) lines.push(`สิ่งอำนวยความสะดวก: ${h.businessFacilities.join(" • ")}`);
+    if (h.businessLat != null && h.businessLng != null) {
+      lines.push(`พิกัด: ละติจูด ${h.businessLat}, ลองจิจูด ${h.businessLng}`);
+    }
+    if (h.otopVerified) {
+      const otop = [
+        h.otopVillage,
+        h.otopTambol && `ต.${h.otopTambol}`,
+        h.otopAmphur && `อ.${h.otopAmphur}`,
+        h.otopProvince && `จ.${h.otopProvince}`,
+      ].filter(Boolean).join(" • ");
+      lines.push(`สถานะ OTOP นวัตวิถี: ยืนยันแล้ว (รหัสหมู่บ้าน ${h.otopVillageId ?? "—"})${otop ? ` ที่ตั้ง OTOP: ${otop}` : ""}`);
+    } else {
+      lines.push(`สถานะ OTOP นวัตวิถี: ยังไม่ได้ยืนยัน`);
+    }
+    if (h.otopNawatwithi) lines.push(`ผลิตภัณฑ์เด่น (นวัตวิถี): ${h.otopNawatwithi}`);
+    if (h.otopForTourism) lines.push(`รูปแบบการท่องเที่ยว: ${h.otopForTourism}`);
+    if (h.otopCbtVillage) lines.push(`หมู่บ้านท่องเที่ยวโดยชุมชน (CBT): ${h.otopCbtVillage}`);
+    if (h.businessHours) lines.push(`เวลาเปิด-ปิด (แยกรายวัน): ${describeBusinessHours(h.businessHours)}`);
+    if (h.businessPricing && (h.businessPricing.weekday || h.businessPricing.weekend)) {
+      lines.push(`อัตราค่าบริการ (structured): ${describeBusinessPricing(h.businessPricing)}`);
+      if (h.businessPricing.secondary) {
+        const s = h.businessPricing.secondary;
+        lines.push(`บริการเสริม: ${s.label} — ${s.amount} บาท${s.unit}`);
+      }
+    }
+    lines.push(`คลิปที่โพสต์: ${h.videoCount} คลิป | ยอดถูกใจรวม: ${h.likesReceived} | ผู้ติดตาม: ${h.followersCount}`);
+    if (h.bio) lines.push(`Bio ปัจจุบัน: ${h.bio}`);
+
+    prompt += `
+
+[ข้อมูลธุรกิจของคุณ — โหมดผู้ประกอบการ (Host advisor — ห้ามแต่งข้อมูล)]:
+${lines.join("\n")}
+
+* คำสั่งสำคัญ: นี่คือข้อมูลธุรกิจของ host เอง ห้ามแต่งข้อมูลที่ไม่มีในบล็อกข้างต้น ถ้าไม่รู้ให้บอกตรงๆ
+* ถ้าผู้ใช้ขอแนะนำ caption / ปรับ bio / วิเคราะห์จุดแข็ง-จุดอ่อนของธุรกิจ ให้ใช้ข้อมูลข้างต้นเป็นฐานเท่านั้น
+* ตอบแบบเพื่อนที่ปรึกษา ไม่ต้องทักทายหรือแนะนำตัว — host ถามเพราะเขาต้องการคำตอบ ไม่ใช่การเดินทาง
+* ถ้าถามเรื่อง "วันไหนปิด" หรือ "เวลาเปิดวันอาทิตย์" ให้ดูบรรทัด "เวลาเปิด-ปิด (แยกรายวัน)" โดย "ปิด" คือวันนั้นไม่เปิดบริการ
+* ห้ามแนะนำราคา/เบอร์โทร/ที่อยู่ที่ไม่ได้ระบุไว้ข้างต้น`;
   }
 
   if (folder && folder.places.length > 0) {

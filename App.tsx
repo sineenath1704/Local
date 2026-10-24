@@ -84,7 +84,7 @@ function AppContent() {
 
 
   return (
-    <View className="flex-1 w-full h-full bg-black">
+    <View className="flex-1 w-full bg-black">
       <StatusBar
         style={
           activeTab === "profile" ||
@@ -96,7 +96,7 @@ function AppContent() {
       />
 
       {/* Main Content Area */}
-      <View className="flex-1">
+      <View style={{ flex: 1, minHeight: 0 }}>
         {activeTab === "home" ? (
           isMapOpen ? (
             <MapScreen

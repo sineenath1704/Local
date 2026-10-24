@@ -10,6 +10,29 @@ import { aiFetch, AiError, toastAiError } from "./aiHttp";
  * sheet reads it instantly later.
  */
 
+/** A Google Places candidate the user can tick. */
+export interface GooglePlaceCandidate {
+  name: string;
+  address: string;
+  placeId: string;
+  latitude: number | null;
+  longitude: number | null;
+  province: string | null;
+  district: string | null;
+  subdistrict: string | null;
+  types: string[];
+  phone?: string | null;
+  openingHours?: string | null;
+  rating?: number | null;
+  userRatingCount?: number | null;
+  website?: string | null;
+  googleMapsUri?: string | null;
+  businessStatus?: string | null;
+  primaryType?: string | null;
+  primaryTypeDisplayName?: string | null;
+  priceLevel?: number | null;
+}
+
 /** Structured place block (mirrors backend AiSummaryResult.place). */
 export interface SummaryPlace {
   place_name: string | null;
@@ -23,9 +46,37 @@ export interface SummaryPlace {
   atmosphere?: string | null;
   category: string[];
   activities: string[];
-  price_info: { weekday: string | null; weekend: string | null; currency?: string };
-  contact: { phone?: string | null; facebook?: string | null; line?: string | null };
+  price_info: {
+    weekday: string | null;
+    weekend: string | null;
+    currency?: string;
+    /** Google's price band for a confirmed place ("฿" / "฿฿฿" / "ฟรี"). */
+    level?: string | null;
+  };
+  contact: {
+    phone?: string | null;
+    facebook?: string | null;
+    line?: string | null;
+    /** Website of the confirmed place, from Google. */
+    website?: string | null;
+  };
   opening_hours?: string | null;
+  /**
+   * How many people the place takes. Strings on purpose — the clip says
+   * "ห้องใหญ่ 4-6 คน" and a number would force one reading of that.
+   */
+  capacity?: {
+    rooms?: string | null;
+    guests_per_room?: string | null;
+    max_guests?: string | null;
+    beds?: string | null;
+  } | null;
+  /** กติกาของสถานที่ เช่น "รับวันละ 1 กลุ่ม" */
+  rules?: string[];
+  /** โซน/พื้นที่ในสถานที่ เช่น "โซนเจ้าบ้าน" */
+  areas?: string[];
+  /** สิ่งอำนวยความสะดวก เช่น "ระเบียง", "กองไฟ" */
+  facilities?: string[];
   otop_products: string[];
   highlights: string[];
   tags: string[];
@@ -35,6 +86,8 @@ export interface SummaryPlace {
     missing_info?: string[];
     warning?: string | null;
   };
+  /** Places the AI found for this clip — the user ticks one, we never pick. */
+  google_candidates?: GooglePlaceCandidate[];
 }
 
 /** Full summary object returned by the backend (what we persist + display). */
@@ -43,6 +96,8 @@ export interface AiSummaryResult {
   generatedAt?: string;
   model?: string;
   text: string;
+  /** Detailed description of everything visible in the clip (Pillar 1). */
+  visualDescription?: string;
   place?: SummaryPlace;
   tags?: string[];
   highlights?: string[];
@@ -59,6 +114,14 @@ export interface SummaryInput {
   /** Public URL of the clip — makes the backend analyze the VIDEO directly. */
   videoUrl?: string;
 }
+
+/**
+ * Budget for one full summary run: Gemini transcription + M3 video analysis
+ * + narration. The old 48s (API_TIMEOUT_MS × 6) was shorter than the
+ * server's own 120s AI timeout, so long clips always timed out on the
+ * phone while the server was still working.
+ */
+const SUMMARY_TIMEOUT_MS = 240000;
 
 export interface CaptionRequest {
   draft?: string;
@@ -79,10 +142,15 @@ export interface CaptionRequest {
  * Throws `AiError` on failure — this used to return `null`, which the caller
  * could not tell apart from "AI ran fine but found no location". A null used
  * to make the create-post screen wipe the user's typed-in location fields.
+ *
+ * The timeout is long on purpose: the server now runs the whole pipeline —
+ * Gemini transcribes the clip, M3 reads the video and the transcript, then a
+ * narration pass writes the final text. That is minutes, not seconds.
  */
 export async function generatePreviewSummary(
   input: SummaryInput
 ): Promise<AiSummaryResult> {
+  const timeoutMs = SUMMARY_TIMEOUT_MS;
   const data = await aiFetch<AiSummaryResult>({
     label: "ai-summary/preview",
     path: "/ai-summary/preview",
@@ -94,7 +162,7 @@ export async function generatePreviewSummary(
       uploaderType: input.uploaderType ?? "tourist",
       videoUrl: input.videoUrl,
     },
-    timeoutMs: API_TIMEOUT_MS * 6,
+    timeoutMs,
     onSettled: (ok, error) => {
       if (!ok && error) toastAiError(error);
     },
@@ -109,15 +177,24 @@ export async function generatePreviewSummary(
       label: "ai-summary/preview",
       url: `${API_BASE_URL}/ai-summary/preview`,
       durationMs: 0,
-      timeoutMs: API_TIMEOUT_MS * 6,
+      timeoutMs,
     });
   }
   return data;
 }
 
-/** Returns 2–3 caption suggestions. Throws `AiError` on failure (was: `[]`). */
-export async function suggestCaptions(req: CaptionRequest): Promise<string[]> {
-  const data = await aiFetch<{ captions?: unknown }>({
+/** Caption suggestions + hashtag suggestions returned by the backend. */
+export interface CaptionSuggestion {
+  captions: string[];
+  hashtags: string[];
+}
+
+/**
+ * Returns 2–3 caption suggestions + a set of suggested hashtags.
+ * Throws `AiError` on failure (was: `[]`).
+ */
+export async function suggestCaptions(req: CaptionRequest): Promise<CaptionSuggestion> {
+  const data = await aiFetch<{ captions?: unknown; hashtags?: unknown }>({
     label: "ai-caption",
     path: "/ai-caption",
     method: "POST",
@@ -140,5 +217,9 @@ export async function suggestCaptions(req: CaptionRequest): Promise<string[]> {
       timeoutMs: API_TIMEOUT_MS * 3,
     });
   }
-  return data.captions.filter((c: unknown): c is string => typeof c === "string");
+  const captions = data.captions.filter((c: unknown): c is string => typeof c === "string");
+  const hashtags = Array.isArray(data?.hashtags)
+    ? data.hashtags.filter((h: unknown): h is string => typeof h === "string")
+    : [];
+  return { captions, hashtags };
 }

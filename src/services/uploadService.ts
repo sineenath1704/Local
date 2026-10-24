@@ -32,11 +32,30 @@ export interface NewVideoInput {
   aiSummary?: AiSummaryResult | null;
   /** Uploader's 1–5 rating of how accurate the AI summary was (for model eval). */
   summaryAccuracy?: number | null;
+  /**
+   * Storage path of the temporary draft copy. Once the real upload and the
+   * row insert succeed, the draft is deleted so the clip isn't stored twice.
+   */
+  draftPath?: string | null;
 }
 
 export interface UploadResult {
   videoId: string;
   videoUrl: string;
+}
+
+/**
+ * Drop the Google Places candidate list before persisting.
+ *
+ * The candidates are a transient picker aid — once the user has ticked one
+ * they are meaningless, and keeping them would bloat the row with data the
+ * user never confirmed.
+ */
+function stripCandidates(summary: AiSummaryResult | null): AiSummaryResult | null {
+  if (!summary?.place?.google_candidates) return summary;
+  const { google_candidates, ...place } = summary.place;
+  void google_candidates;
+  return { ...summary, place: place as AiSummaryResult["place"] };
 }
 
 function guessExt(uri: string): string {
@@ -70,6 +89,20 @@ export async function uploadDraftVideo(localUri: string): Promise<{ path: string
   if (error) throw new Error(`อัปโหลดวิดีโอชั่วคราวไม่สำเร็จ: ${error.message}`);
   const url = supabase.storage.from("videos").getPublicUrl(path).data.publicUrl;
   return { path, url };
+}
+
+/**
+ * Delete the temporary draft copy. Best-effort: a leftover draft is a storage
+ * wart, not a user-facing failure, so we never throw.
+ */
+export async function deleteDraftVideo(path: string): Promise<void> {
+  if (!path || !isSupabaseConfigured) return;
+  try {
+    const { error } = await supabase.storage.from("videos").remove([path]);
+    if (error) console.warn("[upload] delete draft warning:", error.message);
+  } catch (e: any) {
+    console.warn("[upload] delete draft failed:", e?.message);
+  }
 }
 
 export async function uploadVideo(input: NewVideoInput): Promise<UploadResult> {
@@ -106,10 +139,11 @@ export async function uploadVideo(input: NewVideoInput): Promise<UploadResult> {
   // 4) Decide the AI summary status we persist.
   //    - ready       → a summary was generated (and maybe edited) before posting
   //    - pending     → no summary available (AI was unreachable) → can retry later
+  const persistedSummary = stripCandidates(input.aiSummary ?? null);
   const hasSummary =
-    !!input.aiSummary && typeof input.aiSummary.text === "string" && input.aiSummary.text.trim() !== "";
+    !!persistedSummary && typeof persistedSummary.text === "string" && persistedSummary.text.trim() !== "";
   const summaryStatus =
-    hasSummary && input.aiSummary!.status !== "unavailable" && input.aiSummary!.status !== "error"
+    hasSummary && persistedSummary!.status !== "unavailable" && persistedSummary!.status !== "error"
       ? "ready"
       : "pending";
 
@@ -128,7 +162,7 @@ export async function uploadVideo(input: NewVideoInput): Promise<UploadResult> {
       district: input.district ?? null,
       latitude: input.latitude ?? null,
       longitude: input.longitude ?? null,
-      ai_summary: hasSummary ? { ...input.aiSummary, status: "ready" } : null,
+      ai_summary: hasSummary ? { ...persistedSummary, status: "ready" } : null,
       ai_summary_status: summaryStatus,
       ai_summary_accuracy:
         typeof input.summaryAccuracy === "number" ? input.summaryAccuracy : null,
@@ -141,9 +175,13 @@ export async function uploadVideo(input: NewVideoInput): Promise<UploadResult> {
   }
   console.log("[upload] 5/insert OK id =", row.id);
 
-  // 6) Also store structured AI analysis in video_ai_analyses table (non-blocking)
-  if (hasSummary && input.aiSummary) {
-    const s = input.aiSummary;
+  // 6) The draft copy has served its purpose (the AI read the clip from it).
+  //    Delete it now so the same video isn't stored twice.
+  if (input.draftPath) await deleteDraftVideo(input.draftPath);
+
+  // 7) Also store structured AI analysis in video_ai_analyses table (non-blocking)
+  if (hasSummary && persistedSummary) {
+    const s = persistedSummary;
     const p = s.place;
     supabase
       .from("video_ai_analyses")

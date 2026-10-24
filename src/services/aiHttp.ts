@@ -122,6 +122,12 @@ export interface AiFetchOptions {
   body?: unknown;
   timeoutMs: number;
   /**
+   * Extra request headers. Common use is `Authorization: Bearer <token>` for
+   * JWT-gated modes (host advisor). The Content-Type for JSON bodies is
+   * always set by the wrapper regardless.
+   */
+  headers?: Record<string, string>;
+  /**
    * Called on every finished request with the diagnostics record. The toast
    * host uses this to decide whether to interrupt the user — success stays
    * silent.
@@ -130,7 +136,7 @@ export interface AiFetchOptions {
 }
 
 export async function aiFetch<T>(opts: AiFetchOptions): Promise<T> {
-  const { label, path, method = "POST", body, timeoutMs } = opts;
+  const { label, path, method = "POST", body, timeoutMs, headers: extraHeaders } = opts;
   const url = `${API_BASE_URL}${path}`;
   const startedAt = Date.now();
   const requestPreview = body === undefined ? "" : truncate(JSON.stringify(body), 500);
@@ -165,7 +171,13 @@ export async function aiFetch<T>(opts: AiFetchOptions): Promise<T> {
     const res = await fetch(url, {
       method,
       signal: controller.signal,
-      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+      headers:
+        body === undefined && !extraHeaders
+          ? undefined
+          : {
+              ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+              ...(extraHeaders ?? {}),
+            },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
 

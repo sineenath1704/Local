@@ -35,9 +35,15 @@ export interface VerifyPlacesResult {
   candidates: PlaceCandidate[];
 }
 
+export interface PlaceDetailsResult {
+  configured: boolean;
+  place: PlaceCandidate | null;
+}
+
 export async function verifyPlaceOnGoogle(input: {
   placeName: string;
   community?: string | null;
+  subdistrict?: string | null;
   district?: string | null;
   province?: string | null;
 }): Promise<VerifyPlacesResult> {
@@ -58,6 +64,36 @@ export async function verifyPlaceOnGoogle(input: {
     };
   } catch {
     return { configured: false, candidates: [] };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Fetch the full record for ONE place — phone, opening hours, website, rating.
+ *
+ * Called only AFTER the user ticks a candidate, so we spend a single
+ * billable Places Details call per confirmed place.
+ */
+export async function fetchPlaceDetails(placeId: string): Promise<PlaceDetailsResult> {
+  if (!placeId) return { configured: false, place: null };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS * 3);
+  try {
+    const res = await fetch(`${API_BASE_URL}/places/details`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({ placeId }),
+    });
+    if (!res.ok) return { configured: false, place: null };
+    const data = await res.json();
+    return {
+      configured: Boolean(data?.configured),
+      place: data?.place ?? null,
+    };
+  } catch {
+    return { configured: false, place: null };
   } finally {
     clearTimeout(timer);
   }

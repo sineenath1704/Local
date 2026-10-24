@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useMemo, useState, useCallback, useEffect } from "react";
-import { PROFILE_LOCAL_SEED, MyVideo, RegisteredCommunityInfo } from "../data/profileLocalData";
+import { PROFILE_LOCAL_SEED, MyVideo } from "../data/profileLocalData";
 import { useAuth } from "./AuthContext";
 
 /**
@@ -7,7 +7,7 @@ import { useAuth } from "./AuthContext";
  * -------------------------------------------------------------
  * Editable: name, bio, avatar (uri from image picker), owned-video captions,
  * and deleting owned videos.
- * Read-only: username, registration info (comes from OTOP registration).
+ * Read-only: username (comes from OTOP registration).
  */
 interface MyProfileState {
   location: string;
@@ -16,7 +16,6 @@ interface MyProfileState {
   bio: string;
   /** Either a bundled asset (number) or { uri } when the user picked a photo. */
   avatar: any;
-  registeredInfo: RegisteredCommunityInfo; // read-only
   ownedVideos: MyVideo[];
 
   updateName: (name: string) => void;
@@ -33,18 +32,21 @@ export function MyProfileProvider({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
 
   const [name, setName] = useState(PROFILE_LOCAL_SEED.name);
-  const [bio, setBio] = useState(PROFILE_LOCAL_SEED.bio);
-  const [avatar, setAvatar] = useState<any>(PROFILE_LOCAL_SEED.avatar);
+  const [bio, setBio] = useState("");
+  const [avatar, setAvatar] = useState<any>(null);
   const [username, setUsername] = useState(PROFILE_LOCAL_SEED.username);
   const [ownedVideos, setOwnedVideos] = useState<MyVideo[]>([]);
 
   // Sync profile fields from the real user row whenever it loads/changes.
+  // bio + avatar are written unconditionally so a NULL/cleared real value can
+  // overwrite the prior state — the earlier `if (user.bio)` guard meant a
+  // newly-registered account kept showing the bundled mock forever.
   useEffect(() => {
     if (!user) return;
     if (user.display_name) setName(user.display_name);
     if (user.username) setUsername(user.username);
-    if (user.bio) setBio(user.bio);
-    if (user.avatar_url) setAvatar({ uri: user.avatar_url });
+    setBio(user.bio ?? "");
+    setAvatar(user.avatar_url ? { uri: user.avatar_url } : null);
   }, [user]);
 
   const updateName = useCallback((v: string) => setName(v), []);
@@ -59,14 +61,29 @@ export function MyProfileProvider({ children }: { children: React.ReactNode }) {
     setOwnedVideos((prev) => prev.filter((v) => v.id !== videoId));
   }, []);
 
+  // Derived from the real user row — OTOP data is authoritative for hosts,
+  // business_* is the fallback for any host whose place has no village yet.
+  const location = useMemo(() => {
+    if (!user) return "";
+    const otop = [
+      user.otop_village,
+      user.otop_tambol && `ต.${user.otop_tambol}`,
+      user.otop_amphur && `อ.${user.otop_amphur}`,
+      user.otop_province && `จ.${user.otop_province}`,
+    ].filter(Boolean);
+    if (otop.length > 0) return otop.join(" • ");
+    return [user.business_subdistrict, user.business_district, user.business_province]
+      .filter(Boolean)
+      .join(" • ");
+  }, [user]);
+
   const value = useMemo<MyProfileState>(
     () => ({
-      location: PROFILE_LOCAL_SEED.location,
+      location,
       name,
       username,
       bio,
       avatar,
-      registeredInfo: PROFILE_LOCAL_SEED.registeredInfo,
       ownedVideos,
       updateName,
       updateBio,
@@ -74,7 +91,7 @@ export function MyProfileProvider({ children }: { children: React.ReactNode }) {
       updateVideoCaption,
       deleteVideo,
     }),
-    [name, username, bio, avatar, ownedVideos, updateName, updateBio, updateAvatarUri, updateVideoCaption, deleteVideo]
+    [location, name, username, bio, avatar, ownedVideos, updateName, updateBio, updateAvatarUri, updateVideoCaption, deleteVideo]
   );
 
   return <MyProfileContext.Provider value={value}>{children}</MyProfileContext.Provider>;

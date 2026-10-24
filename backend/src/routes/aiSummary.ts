@@ -1,9 +1,15 @@
 import { Router, Request, Response } from "express";
 import { generateSummary, generateNarration } from "../aiClient";
+import {
+  proofreadSummary,
+  proofreadNarration,
+  applyProofreadToSummary,
+  narrationFacts,
+} from "../thaiProofread";
 import { getSummary, saveSummary, hasSummary } from "../summaryStore";
 import { VideoAnalysisInput } from "../prompt";
 import { enrichWithGooglePlaces } from "./places";
-import { transcribeVideo } from "../transcribe";
+import { transcribeVideo, type TranscriptResult } from "../geminiTranscribe";
 import { errorBody } from "../middleware/errors";
 import { requestId } from "../middleware/requestContext";
 
@@ -24,6 +30,45 @@ function readInput(body: any): VideoAnalysisInput {
 }
 
 /**
+ * Pillar 1: give the summary the clip's SPEECH, not just its picture.
+ *
+ * The caller may hand us a transcript; if it doesn't, Gemini transcribes the
+ * clip for us. `audioType` is then set to whatever the audio really is, so
+ * the prompt can tell "no speech" apart from "speech we failed to capture".
+ *
+ * A transcription failure is NOT fatal — we fall back to a visual-only
+ * summary and say so in the log, rather than wiping the user's data.
+ */
+async function withTranscript(
+  input: VideoAnalysisInput
+): Promise<{ input: VideoAnalysisInput; transcript: TranscriptResult | null }> {
+  if (input.transcript?.trim()) {
+    return { input, transcript: null };
+  }
+  if (!input.videoUrl) {
+    return { input, transcript: null };
+  }
+
+  const result = await transcribeVideo(input.videoUrl);
+  if (!result) {
+    console.warn("[summary] ถอดเสียงไม่สำเร็จ — สรุปจากภาพอย่างเดียว");
+    return { input, transcript: null };
+  }
+
+  console.log(
+    `[summary] transcript: ${result.transcript.length} ตัวอักษร, audioType=${result.audioType}, transport=${result.transport}`
+  );
+  return {
+    input: {
+      ...input,
+      transcript: result.transcript || undefined,
+      audioType: result.audioType,
+    },
+    transcript: result,
+  };
+}
+
+/**
  * POST /ai-summary/preview
  * -------------------------------------------------------------
  * Generate a summary WITHOUT a saved video row — used at UPLOAD time,
@@ -33,40 +78,46 @@ function readInput(body: any): VideoAnalysisInput {
 router.post("/preview", async (req: Request, res: Response) => {
   try {
     const input = readInput(req.body);
-    let transcriptionResult: Awaited<ReturnType<typeof transcribeVideo>> | null = null;
 
-    // Step 1: If we have a video URL, transcribe audio + describe visuals first.
-    if (input.videoUrl) {
-      // eslint-disable-next-line no-console
-      console.log("[preview] transcribing video →", input.videoUrl.slice(-40));
-      const tr = await transcribeVideo(input.videoUrl).catch(() => null);
-      transcriptionResult = tr;
-      if (tr) {
-        // eslint-disable-next-line no-console
-        console.log("[preview] transcript hasAudio =", tr.hasAudio,
-          "len =", tr.transcript?.length ?? 0,
-          "onScreen =", tr.onScreenText.length);
-        if (tr.transcript) input.transcript = tr.transcript;
-        if (tr.visualDescription) input.visualDescription = tr.visualDescription;
-        if (tr.onScreenText.length > 0) input.onScreenText = tr.onScreenText;
-        input.audioType = tr.hasAudio ? "speech" : "none";
-      }
-    }
+    // Step 1: Gemini transcribes the clip (so the summary can use the
+    // uploader's words, not just the picture).
+    const { input: withAudio } = await withTranscript(input);
 
-    // Step 2: M3 summarizes.
-    const rawSummary = await generateSummary(input);
+    // Step 2: M3 summarizes — from the video, the transcript, and the text
+    // on screen together.
+    const rawSummary = await generateSummary(withAudio);
 
-    // Pass transcript to enricher for a better Google search query.
-    const summaryWithCtx = transcriptionResult?.transcript
-      ? { ...rawSummary, _transcript: transcriptionResult.transcript, _onScreenText: transcriptionResult.onScreenText }
+    // Step 2b: proofread pass — the model writes fresh Thai, so it slips on
+    // spelling. Copy-edit it BEFORE Google, because the place name is part
+    // of the search query: a misspelled name finds nothing.
+    const corrected = await proofreadSummary(rawSummary, withAudio.transcript);
+    const cleanSummary = corrected
+      ? applyProofreadToSummary(rawSummary, corrected)
       : rawSummary;
 
-    // Step 3: Google Places fills province/district/coords.
-    const enriched = await enrichWithGooglePlaces(summaryWithCtx).catch(() => rawSummary);
+    // Hand any transcript the caller supplied to the enricher so it can build a
+    // better Google Places search query. See places.ts `_transcript`.
+    const summaryWithCtx = withAudio.transcript
+      ? {
+          ...cleanSummary,
+          _transcript: withAudio.transcript,
+          _onScreenText: withAudio.onScreenText ?? [],
+        }
+      : cleanSummary;
+
+    // Step 3: Google Places returns candidate places for the user to tick.
+    const enriched = await enrichWithGooglePlaces(summaryWithCtx).catch(() => cleanSummary);
 
     // Step 4: Stage 2 Storytelling Narration
     const narrationText = await generateNarration(enriched).catch(() => enriched.text);
-    const finalSummary = { ...enriched, text: narrationText };
+
+    // Step 4b: proofread the narration — this is the text the reader sees.
+    const cleanNarration = await proofreadNarration(
+      narrationText,
+      narrationFacts(enriched),
+      withAudio.transcript
+    );
+    const finalSummary = { ...enriched, text: cleanNarration || narrationText };
 
     return res.json(finalSummary);
   } catch (err: any) {
@@ -101,10 +152,28 @@ router.get("/:postId", async (req: Request, res: Response) => {
 router.post("/:postId/generate", async (req: Request, res: Response) => {
   const { postId } = req.params;
   try {
-    const rawSummary = await generateSummary(readInput(req.body));
-    const enriched = await enrichWithGooglePlaces(rawSummary).catch(() => rawSummary);
+    const { input } = await withTranscript(readInput(req.body));
+    const rawSummary = await generateSummary(input);
+
+    // Same proofread → Google → narration order as /preview: the corrected
+    // place name is the one that goes into the Google search query.
+    const corrected = await proofreadSummary(rawSummary, input.transcript);
+    const cleanSummary = corrected
+      ? applyProofreadToSummary(rawSummary, corrected)
+      : rawSummary;
+    const summaryWithCtx = input.transcript
+      ? { ...cleanSummary, _transcript: input.transcript }
+      : cleanSummary;
+    const enriched = await enrichWithGooglePlaces(summaryWithCtx).catch(
+      () => cleanSummary
+    );
     const narrationText = await generateNarration(enriched).catch(() => enriched.text);
-    const finalSummary = { ...enriched, text: narrationText };
+    const cleanNarration = await proofreadNarration(
+      narrationText,
+      narrationFacts(enriched),
+      input.transcript
+    );
+    const finalSummary = { ...enriched, text: cleanNarration || narrationText };
     await saveSummary(postId, finalSummary);
     return res.status(201).json(finalSummary);
   } catch (err: any) {

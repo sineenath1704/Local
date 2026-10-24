@@ -27,6 +27,7 @@ import {
 } from "react-native-heroicons/outline";
 import { useAiPlanner } from "../../state/AiPlannerContext";
 import { useInteractions } from "../../state/InteractionContext";
+import { useAuth } from "../../state/AuthContext";
 import { sendChat } from "../../services/aiChatService";
 import { asAiError } from "../../services/aiHttp";
 import { getFolderContextForAi } from "../../services/folderService";
@@ -51,6 +52,14 @@ const SUGGESTIONS = [
   "แนะนำอาหารพื้นถิ่นที่ต้องลอง",
 ];
 
+/** Quick-prompt chips shown only in host-self mode — the host is asking
+ * about their own business, so the prompts are advisory in tone. */
+const HOST_SUGGESTIONS = [
+  "สรุปธุรกิจของฉันให้หน่อย",
+  "วันไหนที่ร้านปิดบ้าง",
+  "ช่วยแต่งแคปชันโปรโมทห้องพักหน่อย",
+];
+
 export default function AiChatScreen({
   threadId,
   onBack,
@@ -62,6 +71,7 @@ export default function AiChatScreen({
   const insets = useSafeAreaInsets();
   const { getThread, appendMessage, createOrUpdateTripFromPlan } = useAiPlanner();
   const { folders } = useInteractions();
+  const { user, session } = useAuth();
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [attachedFolderId, setAttachedFolderId] = useState<string | null>(null);
@@ -69,6 +79,11 @@ export default function AiChatScreen({
   const [originModalOpen, setOriginModalOpen] = useState(false);
   const [currentOrigin, setCurrentOrigin] = useState<{ label: string; address: string; url?: string; coords?: { lat: number; lng: number } } | null>(null);
   const [currentPlanId, setCurrentPlanId] = useState<string | undefined>(linkedPlanId);
+  // Visible only for hosts (see toggle render below). "tourist" is the default
+  // and matches the historical behaviour — every chat before this toggle went
+  // through the public /ai-chat endpoint without an Authorization header.
+  const [chatMode, setChatMode] = useState<"tourist" | "host-self">("tourist");
+  const isHost = user?.role === "host";
 
   const listRef = useRef<FlatList<AiChatMessage>>(null);
   const autoSentRef = useRef(false);
@@ -169,7 +184,11 @@ export default function AiChatScreen({
     }
 
     try {
-      const reply = await sendChat(history, folderCtx);
+      const reply = await sendChat(history, {
+        folder: folderCtx,
+        mode: chatMode,
+        token: chatMode === "host-self" ? session?.access_token ?? undefined : undefined,
+      });
       appendMessage(threadId, { role: "assistant", content: reply });
       setAttachedFolderId(null); // attachment is one-shot per send
     } catch (err) {
@@ -240,6 +259,45 @@ export default function AiChatScreen({
         )}
       </View>
 
+      {/* Mode toggle — visible only for hosts. Defaults to the historical
+          tourist behaviour; host-self is a JWT-gated advisor that reads the
+          host's own business data. Switching mode does NOT clear the thread,
+          but each send tags the new mode, so the prompt rebuilds fresh. */}
+      {isHost && (
+        <View className="flex-row bg-gray-100 rounded-full p-1 mx-4 my-2 self-stretch">
+          <TouchableOpacity
+            onPress={() => setChatMode("tourist")}
+            activeOpacity={0.8}
+            className={`flex-1 py-2 rounded-full items-center ${
+              chatMode === "tourist" ? "bg-white shadow-sm" : ""
+            }`}
+          >
+            <Text
+              className={`text-[13px] ${
+                chatMode === "tourist" ? "font-bold text-gray-900" : "text-gray-500 font-medium"
+              }`}
+            >
+              ถามทั่วไป
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => setChatMode("host-self")}
+            activeOpacity={0.8}
+            className={`flex-1 py-2 rounded-full items-center ${
+              chatMode === "host-self" ? "bg-emerald-700 shadow-sm" : ""
+            }`}
+          >
+            <Text
+              className={`text-[13px] ${
+                chatMode === "host-self" ? "font-bold text-white" : "text-gray-500 font-medium"
+              }`}
+            >
+              ถามเกี่ยวกับร้านฉัน
+            </Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* Messages / empty state */}
       {isEmpty ? (
         <View className="flex-1 px-6 justify-center">
@@ -247,14 +305,18 @@ export default function AiChatScreen({
             <View className="w-16 h-16 rounded-3xl bg-violet-100 items-center justify-center mb-3">
               <SparklesIcon size={30} color="#7C3AED" />
             </View>
-            <Text className="text-xl font-black text-gray-900">AI ช่วยคิด</Text>
+            <Text className="text-xl font-black text-gray-900">
+              {chatMode === "host-self" ? "ผู้ช่วยธุรกิจ" : "AI ช่วยคิด"}
+            </Text>
             <Text className="text-gray-500 text-[13px] text-center mt-1 leading-5">
-              {folder
-                ? `ถามอะไรก็ได้เกี่ยวกับคลิปในโฟลเดอร์ "${folder.name}" หรือกด "วางแผนทริป" ได้เลย`
-                : "ผู้ช่วยวางแผนเที่ยว ถามเรื่องที่พัก เส้นทาง อาหารพื้นถิ่น หรือวางแผนทริปได้เลย"}
+              {chatMode === "host-self"
+                ? "ถามเกี่ยวกับธุรกิจของคุณได้เลย — AI จะตอบจากข้อมูลที่ลงทะเบียนไว้ในระบบ"
+                : folder
+                  ? `ถามอะไรก็ได้เกี่ยวกับคลิปในโฟลเดอร์ "${folder.name}" หรือกด "วางแผนทริป" ได้เลย`
+                  : "ผู้ช่วยวางแผนเที่ยว ถามเรื่องที่พัก เส้นทาง อาหารพื้นถิ่น หรือวางแผนทริปได้เลย"}
             </Text>
           </View>
-          {SUGGESTIONS.map((s, i) => (
+          {(chatMode === "host-self" ? HOST_SUGGESTIONS : SUGGESTIONS).map((s, i) => (
             <TouchableOpacity
               key={i}
               onPress={() => send(s)}

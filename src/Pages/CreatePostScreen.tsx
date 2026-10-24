@@ -27,17 +27,29 @@ import {
 } from "react-native-heroicons/outline";
 import { StarIcon as StarSolid } from "react-native-heroicons/solid";
 import { useAuth } from "../state/AuthContext";
-import { uploadVideo, uploadDraftVideo } from "../services/uploadService";
+import { uploadVideo, uploadDraftVideo, deleteDraftVideo } from "../services/uploadService";
 import {
   suggestCaptions,
   generatePreviewSummary,
   type AiSummaryResult,
+  type SummaryPlace,
 } from "../services/captionService";
+import PlaceDetailsCard, {
+  type PlaceDetailsValues,
+} from "../components/PlaceDetailsCard";
+import {
+  fetchPlaceDetailsRow,
+  savePlaceDetails,
+} from "../services/placeDetailsService";
 import { searchPlaces } from "../data/thailandGeographicData";
 import type { PlaceItem } from "../data/thailandGeographicData";
 import { verifyLocationOffline, type VerifyResult } from "../services/placeVerifyService";
 import { findLocalPlaces, saveVerifiedPlace, type LocalPlace } from "../services/placesLocalService";
-import { verifyPlaceOnGoogle, type PlaceCandidate } from "../services/placesService";
+import {
+  verifyPlaceOnGoogle,
+  fetchPlaceDetails,
+  type PlaceCandidate,
+} from "../services/placesService";
 import { asAiError } from "../services/aiHttp";
 
 export interface InitialPostLocation {
@@ -58,12 +70,40 @@ interface CreatePostScreenProps {
   initialLocation?: InitialPostLocation;
 }
 
+/**
+ * Google's price band (0–4) → the label Thai users read.
+ * Google shows these as: Free / ฿ / ฿฿ / ฿฿฿ / ฿฿฿฿.
+ *
+ * This is an overall estimate of the place, not a real price list — so it
+ * lives in `price_info.level`, beside the weekday/weekend prices that come
+ * from what the uploader actually said.
+ */
+function priceLevelLabel(level?: number | null): string | null {
+  switch (level) {
+    case 0:
+      return "ฟรี";
+    case 1:
+      return "฿";
+    case 2:
+      return "฿฿";
+    case 3:
+      return "฿฿฿";
+    case 4:
+      return "฿฿฿฿";
+    default:
+      return null;
+  }
+}
+
 export default function CreatePostScreen({ onPosted, onCancel, initialLocation }: CreatePostScreenProps) {
   const insets = useSafeAreaInsets();
   const { session, user } = useAuth();
 
   // Pre-fill location for OTOP hosts from their verified business profile.
   const isHost = user?.role === "host" && Boolean(user?.otop_verified);
+  // Any host may curate a place's details (the backend gates on the role, not
+  // on the OTOP verification) — OTOP only decides the posting mode.
+  const isCommunityHost = user?.role === "host";
   const hostBusinessName = user?.business_place_name || user?.otop_village || user?.otop_nawatwithi || "";
   const hostLocation = isHost ? {
     locationName: hostBusinessName,
@@ -106,6 +146,30 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
   const [locationConfirmed, setLocationConfirmed] = useState(locationConfirmedInit);
   const [googleCandidates, setGoogleCandidates] = useState<PlaceCandidate[]>([]);
   const [googleLoading, setGoogleLoading] = useState(false);
+  // The Google place the host confirmed — its id is the place's identity in
+  // `community_places`, the table the AI chat reads.
+  const [confirmedPlace, setConfirmedPlace] = useState<PlaceCandidate | null>(null);
+  // The place's own details — price band, website, phone, opening hours.
+  // They belong to the PLACE, not to one summary, so they live in their own
+  // state: a regenerated summary cannot drop them, and they are what gets
+  // saved for the AI chat to answer from.
+  const [placeDetails, setPlaceDetails] = useState<PlaceDetailsValues>({
+    priceLevel: null,
+    website: null,
+    phone: null,
+    openingHours: null,
+  });
+  // Fields the host set by hand — a fresh answer never overwrites those.
+  const [placeDetailsEdited, setPlaceDetailsEdited] = useState<
+    Partial<Record<keyof PlaceDetailsValues, boolean>>
+  >({});
+  // The card opens once the place's details have arrived — a form that
+  // appears empty and then fills itself under the host's fingers is worse
+  // than one that appears a moment later, already right.
+  const [placeDetailsReady, setPlaceDetailsReady] = useState(false);
+  // True while a Place Details call is in flight — blocks a double tap,
+  // which would spend a second billable call on the same place.
+  const [confirmingPlace, setConfirmingPlace] = useState(false);
   // Single Google result pending confirmation (with editable fields).
   const [pendingConfirm, setPendingConfirm] = useState<PlaceCandidate | null>(null);
   const [pendingName, setPendingName] = useState("");
@@ -117,6 +181,8 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
 
   const [captionIdeas, setCaptionIdeas] = useState<string[]>([]);
   const [captionLoading, setCaptionLoading] = useState(false);
+  /** Hashtags the AI suggests — tapping one adds it to the field. */
+  const [hashtagIdeas, setHashtagIdeas] = useState<string[]>([]);
 
   // Switch functions for host post modes
   const applyHostOwnBusiness = () => {
@@ -151,10 +217,91 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
   // --- AI summary (generated at upload time, before posting) ---
   const [summary, setSummary] = useState<AiSummaryResult | null>(null);
   const [draftVideoUrl, setDraftVideoUrl] = useState<string | null>(null);
+  // Storage path of the draft copy — deleted once the real upload succeeds.
+  const [draftVideoPath, setDraftVideoPath] = useState<string | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryEditing, setSummaryEditing] = useState(false);
   const [summaryDraft, setSummaryDraft] = useState("");
   const [accuracy, setAccuracy] = useState<number>(0); // 1–5, 0 = not rated
+
+  /**
+   * Push the place's details into the summary.
+   *
+   * The summary rides along with the video, so these facts travel with it —
+   * and the same values are saved to `community_places`, the row the AI chat
+   * answers from. `price_info.level` belongs to us alone (Google's band for
+   * the confirmed place), so it is always written; the contact and the hours
+   * may also have been read by the AI out of the clip, so a value we don't
+   * have never erases one we do.
+   */
+  const writePlaceDetailsToSummary = (values: PlaceDetailsValues) => {
+    setSummary((prev) => {
+      if (!prev) return prev;
+      const place = prev.place;
+      const base: SummaryPlace = {
+        ...(place ?? {}),
+        place_name: place?.place_name ?? null,
+        location: place?.location ?? { province: null, district: null },
+        category: place?.category ?? [],
+        activities: place?.activities ?? [],
+        otop_products: place?.otop_products ?? [],
+        highlights: place?.highlights ?? [],
+        tags: place?.tags ?? [],
+        price_info: {
+          weekday: place?.price_info?.weekday ?? null,
+          weekend: place?.price_info?.weekend ?? null,
+          currency: place?.price_info?.currency ?? "THB",
+          level: values.priceLevel,
+        },
+        contact: { ...(place?.contact ?? {}) },
+        opening_hours: place?.opening_hours ?? null,
+      };
+      if (values.website) base.contact.website = values.website;
+      if (values.phone) base.contact.phone = values.phone;
+      if (values.openingHours) base.opening_hours = values.openingHours;
+      return { ...prev, place: base };
+    });
+  };
+
+  /**
+   * The host corrected something — their value is final.
+   *
+   * It goes into the card and into the summary, so what the host sees, what
+   * the video carries and what the AI chat says all agree.
+   */
+  const applyPlaceDetails = (patch: Partial<PlaceDetailsValues>) => {
+    const next: PlaceDetailsValues = { ...placeDetails };
+    const edited: Partial<Record<keyof PlaceDetailsValues, boolean>> = {};
+    (Object.keys(patch) as (keyof PlaceDetailsValues)[]).forEach((key) => {
+      const value = patch[key];
+      if (value === undefined) return;
+      next[key] = value;
+      edited[key] = true;
+    });
+    setPlaceDetails(next);
+    setPlaceDetailsEdited((prev) => ({ ...prev, ...edited }));
+    writePlaceDetailsToSummary(next);
+  };
+
+  /**
+   * A place was confirmed — seed the card with what we know about it.
+   *
+   * The place's OWN row wins (its owner may have corrected it before), then
+   * Google. A field the host set by hand is theirs and stays theirs.
+   */
+  const seedPlaceDetails = (values: PlaceDetailsValues, samePlace: boolean) => {
+    const next: PlaceDetailsValues = { ...values };
+    if (samePlace) {
+      (Object.keys(next) as (keyof PlaceDetailsValues)[]).forEach((key) => {
+        if (placeDetailsEdited[key]) next[key] = placeDetails[key];
+      });
+    } else {
+      // A different place: the corrections belonged to the one they replaced.
+      setPlaceDetailsEdited({});
+    }
+    setPlaceDetails(next);
+    writePlaceDetailsToSummary(next);
+  };
 
   const player = useVideoPlayer(videoUri ?? "", (p) => {
     p.loop = true;
@@ -210,6 +357,9 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setSummary(result);
     setSummaryDraft(result?.text ?? "");
     setAccuracy(0);
+    // The place's details are the place's, not the summary's — put them back
+    // after a regeneration, so a fresh summary never drops them.
+    writePlaceDetailsToSummary(placeDetails);
 
     // ── Host in own_business mode: location is ALWAYS locked to registered business ──
     // AI is only used for atmosphere summary, never for location extraction.
@@ -272,11 +422,11 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     const loc = place.location ?? ({} as any);
     // Backend may have already run Google Places enrichment.
     const backendCandidates: PlaceCandidate[] = (place as any).google_candidates ?? [];
-    const backendGps: string | null = (place as any).gps ?? null;
+    const aiGps: string | null = loc.gps ?? null;
 
     console.log("[verify] aiPlaceName =", aiPlaceName, "community =", aiCommunity,
       "province =", loc.province, "district =", loc.district,
-      "backendCandidates =", backendCandidates.length, "backendGps =", backendGps);
+      "backendCandidates =", backendCandidates.length, "aiGps =", aiGps);
 
     const res = verifyLocationOffline({
       placeName: aiPlaceName,
@@ -292,40 +442,8 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setCoords(null);
     setPendingConfirm(null);
 
-    // ── Priority 1: use Google Places results from backend (already fetched) ──
-    if (backendCandidates.length > 1) {
-      // Multiple locations from backend → show picker immediately
-      console.log("[verify] using", backendCandidates.length, "backend Google candidates");
-      setGoogleCandidates(backendCandidates);
-      return;
-    }
-    if (backendCandidates.length === 1) {
-      const c = backendCandidates[0];
-      console.log("[verify] single backend candidate →", c.name, "province:", c.province, "district:", c.district);
-      setPendingConfirm(c);
-      setPendingName(c.name);
-      setPendingAddress(c.address);
-      if (c.name) {
-        setPlaceName(c.name);
-        setLocationName(c.name);
-      }
-      if (c.province) setProvince(c.province);
-      if (c.district) setDistrict(c.district);
-      if (c.subdistrict) setSubdistrict(c.subdistrict);
-      if (c.latitude != null && c.longitude != null) {
-        setCoords({ lat: c.latitude, lng: c.longitude });
-      }
-      return;
-    }
-    if (backendGps) {
-      const [lat, lng] = backendGps.split(",").map(Number);
-      console.log("[verify] backend GPS received → lat:", lat, "lng:", lng);
-      if (!isNaN(lat) && !isNaN(lng)) {
-        setCoords({ lat, lng });
-      }
-    }
-
-    // Prefill fields from AI place extraction
+    // Prefill the form from what the AI read out of the clip (name / area /
+    // coords). This is the AI's own reading — the user still confirms it.
     if (aiPlaceName) setPlaceName(aiPlaceName);
     if (aiCommunity) setCommunity(aiCommunity);
     if (loc.subdistrict) setSubdistrict(loc.subdistrict);
@@ -333,6 +451,27 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     if (loc.province) setProvince(loc.province);
     const label = aiPlaceName || aiCommunity || "";
     if (label) setLocationName(label);
+    if (aiGps) {
+      const [lat, lng] = aiGps.split(",").map(Number);
+      if (!isNaN(lat) && !isNaN(lng)) setCoords({ lat, lng });
+    }
+
+    // ── Priority 1: Google Places results the backend already fetched ──
+    // Nothing is written into the form here. The user TICK-CONFIRMS first;
+    // only then do we spend one Place Details call and fill the fields.
+    if (backendCandidates.length > 1) {
+      console.log("[verify] using", backendCandidates.length, "backend Google candidates");
+      setGoogleCandidates(backendCandidates);
+      return;
+    }
+    if (backendCandidates.length === 1) {
+      const c = backendCandidates[0];
+      console.log("[verify] single backend candidate → awaiting user tick:", c.name);
+      setPendingConfirm(c);
+      setPendingName(c.name);
+      setPendingAddress(c.address);
+      return;
+    }
 
     // ── Priority 2: check our local confirmed places store ──
     if (aiPlaceName) {
@@ -362,54 +501,114 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setGoogleLoading(true);
     setPendingConfirm(null);
     setGoogleCandidates([]);
+    // A host posting a community spot may only find places inside their own
+    // community — scope the search to it instead of the whole country.
+    const scopeCommunity =
+      isHost && hostPostMode === "community_spot"
+        ? hostLocation?.community || user?.otop_village || ""
+        : community.trim();
+    const scopeSubdistrict =
+      isHost && hostPostMode === "community_spot"
+        ? hostLocation?.subdistrict || user?.business_subdistrict || user?.otop_tambol || ""
+        : subdistrict.trim();
+    const scopeDistrict =
+      isHost && hostPostMode === "community_spot"
+        ? hostLocation?.district || user?.business_district || user?.otop_amphur || ""
+        : district.trim();
+    const scopeProvince =
+      isHost && hostPostMode === "community_spot"
+        ? hostLocation?.province || user?.business_province || user?.otop_province || ""
+        : province.trim();
+
     const r = await verifyPlaceOnGoogle({
       placeName: name,
-      community: community.trim() || undefined,
-      district: district.trim() || undefined,
-      province: province.trim() || undefined,
+      community: scopeCommunity || undefined,
+      subdistrict: scopeSubdistrict || undefined,
+      district: scopeDistrict || undefined,
+      province: scopeProvince || undefined,
     });
     console.log("[google] result configured =", r.configured, "candidates =", r.candidates.length);
     setGoogleLoading(false);
     if (r.candidates.length === 1) {
+      // One result still needs the user's tick — do not fill the form yet.
       const c = r.candidates[0];
       setPendingConfirm(c);
       setPendingName(c.name);
       setPendingAddress(c.address);
-      if (c.name) {
-        setPlaceName(c.name);
-        setLocationName(c.name);
-      }
-      if (c.province) setProvince(c.province);
-      if (c.district) setDistrict(c.district);
-      if (c.subdistrict) setSubdistrict(c.subdistrict);
-      if (c.latitude != null && c.longitude != null) {
-        setCoords({ lat: c.latitude, lng: c.longitude });
-      }
     } else {
       setGoogleCandidates(r.candidates);
+    }
+  };
+
+  /**
+   * The user ticked a Google candidate.
+   *
+   * This is the ONLY place we spend a Place Details call: we fetch the full
+   * record for that one place id, write it into the form, and fold the
+   * contact/atmosphere fields (phone, website, price band, opening hours)
+   * into the AI summary.
+   */
+  const confirmGooglePlace = async (c: PlaceCandidate, nameOverride?: string) => {
+    if (confirmingPlace) return;
+    setConfirmingPlace(true);
+    setPlaceDetailsReady(false);
+    const name = (nameOverride ?? c.name).trim() || c.name;
+    let place = c;
+
+    try {
+      if (c.placeId) {
+        const details = await fetchPlaceDetails(c.placeId);
+        if (details.place) place = details.place;
+      }
+
+      const confirmed: PlaceCandidate = { ...place, name };
+      applyGoogleCandidate(confirmed);
+      setConfirmedPlace(confirmed);
+
+      // Fold the confirmed place's details into the card. We already paid for
+      // the Place Details call, so phone / website / price band / opening
+      // hours all come along for free.
+      //
+      // The place's OWN values win where we already hold them: if the owner
+      // corrected the price or the phone, the host editing this clip should
+      // see — and the AI should be told — the corrected ones, not Google's.
+      const saved = confirmed.placeId
+        ? await fetchPlaceDetailsRow(confirmed.placeId).catch(() => null)
+        : null;
+      seedPlaceDetails(
+        {
+          priceLevel: saved?.price_level ?? priceLevelLabel(confirmed.priceLevel) ?? null,
+          website: saved?.website ?? confirmed.website ?? null,
+          phone: saved?.phone ?? confirmed.phone ?? null,
+          openingHours: saved?.opening_hours ?? confirmed.openingHours ?? null,
+        },
+        confirmedPlace?.placeId === confirmed.placeId,
+      );
+      // The card opens only now, with the values already in it.
+      setPlaceDetailsReady(true);
+
+      // Save to Supabase places store immediately so it appears on the map.
+      void saveVerifiedPlace({
+        name: confirmed.name,
+        community: community.trim() || null,
+        subdistrict: (confirmed.subdistrict ?? subdistrict.trim()) || null,
+        district: (confirmed.district ?? district.trim()) || null,
+        province: (confirmed.province ?? province.trim()) || null,
+        latitude: confirmed.latitude,
+        longitude: confirmed.longitude,
+        googlePlaceId: confirmed.placeId || null,
+        source: "google",
+      });
+    } finally {
+      setConfirmingPlace(false);
     }
   };
 
   // Confirm the single Google result (after optional editing).
   const confirmPending = async () => {
     if (!pendingConfirm) return;
-    const confirmed: PlaceCandidate = {
-      ...pendingConfirm,
-      name: pendingName.trim() || pendingConfirm.name,
-    };
-    applyGoogleCandidate(confirmed);
-    // Save to Supabase places store immediately so it appears on the map.
-    void saveVerifiedPlace({
-      name: confirmed.name,
-      community: community.trim() || null,
-      subdistrict: (confirmed.subdistrict ?? subdistrict.trim()) || null,
-      district: (confirmed.district ?? district.trim()) || null,
-      province: (confirmed.province ?? province.trim()) || null,
-      latitude: confirmed.latitude,
-      longitude: confirmed.longitude,
-      googlePlaceId: confirmed.placeId || null,
-      source: "google",
-    });
+    const name = pendingName.trim() || pendingConfirm.name;
+    await confirmGooglePlace(pendingConfirm, name);
     setPendingConfirm(null);
   };
 
@@ -460,12 +659,17 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setDistrict("");
     setLocationQuery("");
     setCaptionIdeas([]);
+    setHashtagIdeas([]);
     setVerify(null);
     setLocalPlaceCandidates([]);
     setLocationConfirmed(false);
     setGoogleCandidates([]);
     setPendingConfirm(null);
     setLocationSource("manual");
+    setConfirmedPlace(null);
+    setPlaceDetails({ priceLevel: null, website: null, phone: null, openingHours: null });
+    setPlaceDetailsEdited({});
+    setPlaceDetailsReady(false);
   };
 
   const pickVideo = async () => {
@@ -486,7 +690,8 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
       // AI analyze the VIDEO directly, right after the clip is picked.
       setSummaryLoading(true);
       try {
-        const { url } = await uploadDraftVideo(uri);
+        const { path, url } = await uploadDraftVideo(uri);
+        setDraftVideoPath(path);
         setDraftVideoUrl(url);
         await runSummary({ videoUrl: url });
       } catch (e: any) {
@@ -497,8 +702,11 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
   };
 
   const removeVideo = () => {
+    // The draft copy is dead weight now — drop it so the clip isn't stored twice.
+    if (draftVideoPath) void deleteDraftVideo(draftVideoPath);
     setVideoUri(null);
     setDraftVideoUrl(null);
+    setDraftVideoPath(null);
     setSummary(null);
     setSummaryDraft("");
     setSummaryEditing(false);
@@ -550,8 +758,9 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
   const handleAiCaption = async () => {
     setCaptionLoading(true);
     setCaptionIdeas([]);
+    setHashtagIdeas([]);
     try {
-      const ideas = await suggestCaptions({
+      const { captions: ideas, hashtags: tagIdeas } = await suggestCaptions({
         draft: caption,
         locationName,
         province,
@@ -561,6 +770,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
         highlights: summary?.highlights ?? summary?.place?.highlights,
       });
       setCaptionIdeas(ideas);
+      setHashtagIdeas(tagIdeas);
       if (ideas.length === 0) {
         Alert.alert("ขออภัย", "AI ตอบกลับมาแต่ไม่มีแคปชันให้ใช้ ลองใหม่อีกครั้งนะคะ");
       }
@@ -573,6 +783,17 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     } finally {
       setCaptionLoading(false);
     }
+  };
+
+  /** Add a suggested hashtag to the field (no duplicates). */
+  const addHashtag = (tag: string) => {
+    const clean = tag.replace(/^#+/, "").trim();
+    if (!clean) return;
+    setHashtags((prev) => {
+      const existing = parseHashtags(prev).map((t) => t.replace(/^#/, ""));
+      if (existing.includes(clean)) return prev;
+      return prev.trim() ? `${prev.trim()} ${clean}` : clean;
+    });
   };
 
   const handlePost = async () => {
@@ -616,20 +837,75 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
         longitude: coords?.lng ?? null,
         aiSummary: finalSummary,
         summaryAccuracy: accuracy > 0 ? accuracy : null,
+        // The draft copy was only there so the AI could read the clip —
+        // the real upload is done, so let the service delete the draft.
+        draftPath: draftVideoPath,
       });
+
+      // The place's details are the AI's ground truth — the same row a
+      // traveller's question is answered from. Save them now that the clip is
+      // up; a failure here must not cost the host their video.
+      //
+      // A field the host set by hand travels even when it is empty (that
+      // clears the column); a field we simply don't know is left out, so a
+      // value the place's owner already saved survives.
+      const detailValue = (key: keyof PlaceDetailsValues): string | undefined =>
+        placeDetailsEdited[key]
+          ? (placeDetails[key] ?? "")
+          : (placeDetails[key] ?? undefined);
+
+      let placeSaveWarning: string | null = null;
+      if (isCommunityHost && confirmedPlace?.placeId) {
+        try {
+          await savePlaceDetails({
+            placeId: confirmedPlace.placeId,
+            placeName: placeName.trim() || confirmedPlace.name,
+            province: confirmedPlace.province || province.trim(),
+            district: confirmedPlace.district ?? (district.trim() || null),
+            subdistrict: confirmedPlace.subdistrict ?? (subdistrict.trim() || null),
+            village: community.trim() || null,
+            formattedAddress: confirmedPlace.address ?? null,
+            latitude: confirmedPlace.latitude ?? coords?.lat ?? null,
+            longitude: confirmedPlace.longitude ?? coords?.lng ?? null,
+            googleMapsUrl: confirmedPlace.googleMapsUri ?? null,
+            priceLevel: detailValue("priceLevel"),
+            website: detailValue("website"),
+            phone: detailValue("phone"),
+            openingHours: detailValue("openingHours"),
+            // What the clip said about this place — capacity, rules, zones,
+            // facilities. Same row, so the AI chat can answer "มีกี่ห้อง"
+            // without the traveller watching the clip. A clip that said
+            // nothing leaves the place's own value alone.
+            capacity: finalSummary?.place?.capacity ?? undefined,
+            rules: finalSummary?.place?.rules ?? undefined,
+            areas: finalSummary?.place?.areas ?? undefined,
+            facilities: finalSummary?.place?.facilities ?? undefined,
+          });
+        } catch (e: any) {
+          console.warn("[post] save place details failed:", e);
+          placeSaveWarning = e?.message ?? "บันทึกข้อมูลสถานที่ไม่สำเร็จ";
+        }
+      }
+
       setUploading(false);
-      Alert.alert("โพสต์สำเร็จ 🎉", "วิดีโอของคุณขึ้นฟีดแล้ว พร้อมสรุปจาก AI", [
-        {
-          text: "ตกลง",
-          onPress: () => {
-            removeVideo();
-            setCaption("");
-            setHashtags("");
-            clearLocation();
-            onPosted?.();
+      Alert.alert(
+        "โพสต์สำเร็จ 🎉",
+        placeSaveWarning
+          ? `วิดีโอของคุณขึ้นฟีดแล้ว พร้อมสรุปจาก AI\n\nแต่ข้อมูลสถานที่บันทึกไม่สำเร็จ: ${placeSaveWarning}`
+          : "วิดีโอของคุณขึ้นฟีดแล้ว พร้อมสรุปจาก AI",
+        [
+          {
+            text: "ตกลง",
+            onPress: () => {
+              removeVideo();
+              setCaption("");
+              setHashtags("");
+              clearLocation();
+              onPosted?.();
+            },
           },
-        },
-      ]);
+        ]
+      );
     } catch (e: any) {
       setUploading(false);
       Alert.alert("โพสต์ไม่สำเร็จ", e?.message ?? "เกิดข้อผิดพลาด ลองใหม่อีกครั้ง");
@@ -923,13 +1199,19 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
                 <View className="flex-row mt-2.5">
                   <TouchableOpacity
                     onPress={confirmPending}
+                    disabled={confirmingPlace}
                     activeOpacity={0.85}
-                    className="flex-1 bg-[#2D6A4F] rounded-xl py-2.5 items-center mr-1.5"
+                    className={`flex-1 rounded-xl py-2.5 items-center mr-1.5 ${
+                      confirmingPlace ? "bg-[#2D6A4F]/50" : "bg-[#2D6A4F]"
+                    }`}
                   >
-                    <Text className="text-white font-bold text-[12px]">✓ ถูกต้อง (ยืนยัน)</Text>
+                    <Text className="text-white font-bold text-[12px]">
+                      {confirmingPlace ? "กำลังดึงข้อมูล..." : "✓ ถูกต้อง (ยืนยัน)"}
+                    </Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     onPress={clearLocation}
+                    disabled={confirmingPlace}
                     activeOpacity={0.8}
                     className="flex-1 bg-gray-100 border border-gray-200 rounded-xl py-2.5 items-center"
                   >
@@ -948,25 +1230,16 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
                 {googleCandidates.map((c) => (
                   <TouchableOpacity
                     key={c.placeId}
-                    onPress={() => {
-                      applyGoogleCandidate(c);
-                      void saveVerifiedPlace({
-                        name: c.name,
-                        community: community.trim() || null,
-                        subdistrict: c.subdistrict ?? null,
-                        district: c.district ?? null,
-                        province: c.province ?? null,
-                        latitude: c.latitude,
-                        longitude: c.longitude,
-                        googlePlaceId: c.placeId || null,
-                        source: "google",
-                      });
-                    }}
+                    onPress={() => void confirmGooglePlace(c)}
+                    disabled={confirmingPlace}
                     activeOpacity={0.8}
                     className="bg-white border border-blue-200 rounded-xl px-3 py-2 mb-1.5"
                   >
                     <Text className="text-gray-900 text-[13px] font-semibold">{c.name}</Text>
                     <Text className="text-gray-400 text-[11px]" numberOfLines={1}>{c.address}</Text>
+                    <Text className="text-blue-600 text-[10px] mt-0.5">
+                      {confirmingPlace ? "กำลังดึงข้อมูล..." : "แตะเพื่อยืนยันสถานที่นี้"}
+                    </Text>
                   </TouchableOpacity>
                 ))}
               </>
@@ -1148,6 +1421,23 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
           </>
         )}
 
+        {/* ข้อมูลสถานที่ — the host checks what Google said and corrects it.
+            Saved on post, into the place's own row: that is what the AI chat
+            reads when a traveller asks about the price or the website. */}
+        {isCommunityHost && confirmedPlace?.placeId && placeDetailsReady && (
+          <PlaceDetailsCard
+            values={placeDetails}
+            onChange={applyPlaceDetails}
+            subtitle="ยืนยันข้อมูลของสถานที่นี้ — แอไอแชทจะตอบคำถามเรื่องราคา เว็บไซต์ เบอร์โทร และเวลาเปิดปิดจากข้อมูลชุดนี้"
+            clipFacts={{
+              capacity: summary?.place?.capacity ?? null,
+              rules: summary?.place?.rules ?? null,
+              areas: summary?.place?.areas ?? null,
+              facilities: summary?.place?.facilities ?? null,
+            }}
+          />
+        )}
+
         {/* 2) Caption (optional) + AI helper */}
         <View className="flex-row items-center justify-between mb-1.5">
           <Text className="text-gray-700 font-bold text-[13px]">
@@ -1206,8 +1496,29 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
           onChangeText={setHashtags}
           placeholder="เช่น เชียงใหม่ OTOP ชุมชน (เว้นวรรคคั่น)"
           placeholderTextColor="#9CA3AF"
-          className="bg-gray-100 rounded-xl px-3.5 py-3 text-[14px] text-gray-900 mb-4"
+          className="bg-gray-100 rounded-xl px-3.5 py-3 text-[14px] text-gray-900 mb-2"
         />
+
+        {/* AI hashtag suggestions — tap to add */}
+        {hashtagIdeas.length > 0 && (
+          <View className="mb-4">
+            <Text className="text-gray-400 text-[11px] mb-1.5">
+              แตะแฮชแท็กที่แนะนำเพื่อเพิ่ม:
+            </Text>
+            <View className="flex-row flex-wrap">
+              {hashtagIdeas.map((tag) => (
+                <TouchableOpacity
+                  key={tag}
+                  onPress={() => addHashtag(tag)}
+                  activeOpacity={0.75}
+                  className="bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1.5 mr-1.5 mb-1.5"
+                >
+                  <Text className="text-[#2D6A4F] text-[12px] font-semibold">#{tag}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        )}
       </ScrollView>
 
       {/* Post button — fixed above the safe-area bottom (bottom menu bar is

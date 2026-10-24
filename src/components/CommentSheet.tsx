@@ -273,6 +273,17 @@ function AiSummaryPanel({
     );
   }
 
+  // "ต.หมู่บ้าน อ.อำเภอ จ.จังหวัด" — only the parts the clip actually gave us.
+  const placeLocationLine = summary?.place?.location
+    ? [
+        summary.place.location.subdistrict,
+        summary.place.location.district,
+        summary.place.location.province,
+      ]
+        .filter(Boolean)
+        .join(" ")
+    : "";
+
   // A failed fetch used to render as "the system is still processing…", which
   // sent people off to wait for a summary that was never coming. Show the
   // actual reason and offer a retry.
@@ -334,6 +345,23 @@ function AiSummaryPanel({
           </Text>
         </View>
       </View>
+
+      {/* Where — from the structured fields, not from the prose. The
+          narration itself is two paragraphs about the clip and the
+          conditions, so the place line lives here. */}
+      {summary.place?.place_name && (
+        <View className="flex-row items-center mb-2.5 flex-wrap">
+          <Text className="text-[13px]">📍</Text>
+          <Text className="text-gray-800 font-bold text-[13.5px] ml-1.5">
+            {summary.place.place_name}
+          </Text>
+          {placeLocationLine ? (
+            <Text className="text-gray-500 text-[12px] ml-1.5">
+              · {placeLocationLine}
+            </Text>
+          ) : null}
+        </View>
+      )}
 
       {/* Main summary — 2-paragraph friendly narrative */}
       <View className="bg-amber-50/90 border border-amber-200/80 rounded-2xl p-4 shadow-sm">

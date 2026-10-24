@@ -205,8 +205,8 @@ export default function VideoFeedItem({
       >
         <VideoView
           player={player}
-          style={{ width: "100%", height: "100%" }}
-          contentFit="contain"
+          style={StyleSheet.absoluteFill}
+          contentFit="cover"
           nativeControls={false}
         />
       </View>
@@ -367,9 +367,8 @@ export default function VideoFeedItem({
           <TouchableOpacity
             onPress={() => toggleFollow(post.authorId)}
             activeOpacity={0.8}
-            className={`w-5 h-5 rounded-full items-center justify-center -mt-2.5 border border-white ${
-              isFollowing ? "bg-[#00D26A]" : "bg-[#EA580C]"
-            }`}
+            className={`w-5 h-5 rounded-full items-center justify-center -mt-2.5 border border-white ${isFollowing ? "bg-[#00D26A]" : "bg-[#EA580C]"
+              }`}
           >
             {isFollowing ? (
               <CheckIcon size={12} color="#FFFFFF" strokeWidth={3} />
@@ -467,9 +466,8 @@ export default function VideoFeedItem({
         {/* Community Name (tap → open profile) */}
         <TouchableOpacity activeOpacity={0.7} onPress={() => onOpenProfile?.(post.authorId)}>
           <Text
-            className={`text-white font-bold tracking-tight mb-1 ${
-              isSmallDevice ? "text-sm" : "text-base"
-            }`}
+            className={`text-white font-bold tracking-tight mb-1 ${isSmallDevice ? "text-sm" : "text-base"
+              }`}
           >
             {post.author.handle}
           </Text>

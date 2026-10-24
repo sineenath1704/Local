@@ -18,6 +18,13 @@ function num(name: string, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/** Boolean from an env var. Anything that isn't clearly "off" counts as on. */
+function flag(name: string, fallback: boolean): boolean {
+  const v = process.env[name]?.trim().toLowerCase();
+  if (!v) return fallback;
+  return v !== "off" && v !== "false" && v !== "0" && v !== "no";
+}
+
 export const config = {
   port: num("PORT", 4000),
 
@@ -27,6 +34,14 @@ export const config = {
     model: process.env.ANTHROPIC_MODEL?.trim() || "minimax-m3",
     timeoutMs: num("AI_TIMEOUT_MS", 120000),
     maxTokens: num("AI_MAX_TOKENS", 1024),
+    /**
+     * Proofread pass — a copy-edit round that fixes misspelled Thai in the
+     * summary + narration. Costs one extra model call per stage, so it can
+     * be switched off with PROOFREAD_ENABLED=off.
+     */
+    proofreadEnabled: flag("PROOFREAD_ENABLED", true),
+    /** Model for the proofread pass — empty = same model as the analyzer. */
+    proofreadModel: process.env.AI_PROOFREAD_MODEL?.trim() || "",
   },
 
   // Supabase (service_role — SERVER ONLY, bypasses RLS).
@@ -39,6 +54,15 @@ export const config = {
   // Google Places (SERVER ONLY) — verify a specific place & get coordinates.
   places: {
     googleKey: required("GOOGLE_PLACES_API_KEY"),
+  },
+
+  // Google AI / Gemini (SERVER ONLY) — transcribe the clip's speech.
+  // Gemini reads video/mp4 directly, so we need no ffmpeg, no GCS bucket,
+  // and none of the Cloud Speech-to-Text plumbing.
+  gemini: {
+    apiKey: required("GEMINI_API_KEY"),
+    model: process.env.GEMINI_MODEL?.trim() || "gemini-3.8-flash",
+    timeoutMs: num("GEMINI_TIMEOUT_MS", 120000),
   },
 
   // OTOP นวัตวิถี registry (CDD) — verify a community by its Village_ID.
@@ -62,6 +86,11 @@ export function isSupabaseConfigured(): boolean {
 /** True when Google Places lookups are available. */
 export function isPlacesConfigured(): boolean {
   return Boolean(config.places.googleKey);
+}
+
+/** True when Gemini transcription is available. */
+export function isGeminiConfigured(): boolean {
+  return Boolean(config.gemini.apiKey);
 }
 
 /** True when the OTOP registry lookup is available. */

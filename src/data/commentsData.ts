@@ -70,8 +70,24 @@ export interface AiPlaceData {
   atmosphere?: string | null;
   category: string[];
   activities: string[];
-  price_info: { weekday: string | null; weekend: string | null; currency?: string };
-  contact: { phone?: string | null; facebook?: string | null; line?: string | null };
+  price_info: {
+    weekday: string | null;
+    weekend: string | null;
+    currency?: string;
+    /**
+     * Google's price band for the place ("฿" / "฿฿฿" / "ฟรี"). Filled in when
+     * the user tick-confirms a Google place — it is an overall estimate, NOT
+     * a weekday/weekend price, so it lives beside them rather than in them.
+     */
+    level?: string | null;
+  };
+  contact: {
+    phone?: string | null;
+    facebook?: string | null;
+    line?: string | null;
+    /** Website of the confirmed place, from Google. */
+    website?: string | null;
+  };
   opening_hours?: string | null;
   otop_products: string[];
   highlights: string[];

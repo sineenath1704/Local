@@ -97,12 +97,23 @@ export default function EditProfileSheet({ visible, onClose }: EditProfileSheetP
           {/* Avatar */}
           <View className="items-center mb-6">
             <TouchableOpacity onPress={pickAvatar} activeOpacity={0.8} className="relative">
-              <Image
-                source={draftAvatar}
-                style={{ width: 110, height: 110, borderRadius: 55 }}
-                className="bg-gray-100 border border-gray-200"
-                resizeMode="cover"
-              />
+              {draftAvatar ? (
+                <Image
+                  source={draftAvatar}
+                  style={{ width: 110, height: 110, borderRadius: 55 }}
+                  className="bg-gray-100 border border-gray-200"
+                  resizeMode="cover"
+                />
+              ) : (
+                <View
+                  style={{ width: 110, height: 110, borderRadius: 55 }}
+                  className="bg-emerald-100 border border-gray-200 items-center justify-center"
+                >
+                  <Text className="text-[#2D6A4F] font-black text-5xl">
+                    {draftName.trim().charAt(0)}
+                  </Text>
+                </View>
+              )}
               <View className="absolute bottom-0 right-0 w-9 h-9 rounded-full bg-[#2D6A4F] items-center justify-center border-2 border-white">
                 <CameraIcon size={18} color="#FFFFFF" />
               </View>
