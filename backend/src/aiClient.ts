@@ -1,5 +1,6 @@
 import { config, isAiConfigured } from "./config";
 import { AiUpstreamError } from "./aiErrors";
+import { pickHashtagSuggestions } from "./hashtagText";
 import type { PlaceCandidate } from "./placeTypes";
 import {
   SYSTEM_PROMPT,
@@ -297,16 +298,6 @@ export interface CaptionSuggestion {
   hashtags: string[];
 }
 
-/** Strip a leading "#", spaces and anything that can't live in a hashtag. */
-function normalizeHashtag(raw: unknown): string {
-  if (typeof raw !== "string") return "";
-  return raw
-    .replace(/^#+/, "")
-    .replace(/\s+/g, "")
-    .replace(/[^\p{L}\p{N}_]/gu, "")
-    .slice(0, 40);
-}
-
 export async function generateCaptions(input: CaptionInput): Promise<CaptionSuggestion> {
   if (!isAiConfigured()) {
     // Graceful stub so the feature works before the token is set.
@@ -362,13 +353,7 @@ export async function generateCaptions(input: CaptionInput): Promise<CaptionSugg
       const captions = parsed.captions
         .filter((c: unknown) => typeof c === "string")
         .slice(0, 3) as string[];
-      const hashtags = Array.isArray(parsed.hashtags)
-        ? parsed.hashtags
-            .map(normalizeHashtag)
-            .filter(Boolean)
-            .filter((h: string) => !input.hashtags?.some((u) => normalizeHashtag(u) === h))
-            .slice(0, 8)
-        : [];
+      const hashtags = pickHashtagSuggestions(parsed.hashtags, input.hashtags);
       return { captions, hashtags };
     }
     // Fallback: split lines if JSON wasn't returned.

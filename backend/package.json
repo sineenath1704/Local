@@ -12,6 +12,8 @@
     "probe:gem": "ts-node --transpile-only scripts/gem_probe.ts",
     "probe:summary": "ts-node --transpile-only scripts/summary_probe.ts",
     "check:proofread": "ts-node --transpile-only scripts/proofread_check.ts",
+    "check:hashtag": "ts-node --transpile-only scripts/hashtag_check.ts",
+    "fix:hashtags": "ts-node --transpile-only scripts/fix_hashtags.ts",
     "lint": "expo lint"
   },
   "dependencies": {
