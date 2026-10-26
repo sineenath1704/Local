@@ -52,6 +52,17 @@ import {
   fetchPlaceDetails,
   type PlaceCandidate,
 } from "../services/placesService";
+import {
+  matchAgainstRegistered,
+  sortByMatchLevel,
+  type MatchLevel,
+} from "../services/placeMatchService";
+import {
+  findCommunitiesByArea,
+  registeredPlaceOf,
+  type CommunityRow,
+} from "../services/communityService";
+import { upsertMyPlace } from "../services/hostPlaceService";
 import { asAiError } from "../services/aiHttp";
 
 export interface InitialPostLocation {
@@ -99,7 +110,7 @@ function priceLevelLabel(level?: number | null): string | null {
 
 export default function CreatePostScreen({ onPosted, onCancel, initialLocation }: CreatePostScreenProps) {
   const insets = useSafeAreaInsets();
-  const { session, user } = useAuth();
+  const { session, user, refreshUser } = useAuth();
 
   // Pre-fill location for OTOP hosts from their verified business profile.
   const isHost = user?.role === "host" && Boolean(user?.otop_verified);
@@ -176,6 +187,24 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
   const [pendingConfirm, setPendingConfirm] = useState<PlaceCandidate | null>(null);
   const [pendingName, setPendingName] = useState("");
   const [pendingAddress, setPendingAddress] = useState("");
+  // ── การจับคู่สถานที่กับชุมชน (PLAN §6.3-§6.7) ──────────────────────
+  // สถานที่ที่ "ทะเบียน" ของขอบเขตนี้ชี้ไป — เทียบด้วย Google id เท่านั้น (D2)
+  const [registeredPlace, setRegisteredPlace] = useState<{
+    placeId: string;
+    name: string;
+    /** ป้ายบนการ์ด — ของเรา หรือ ของชุมชน */
+    label: string;
+  } | null>(null);
+  // candidate ที่ "ตรงกับทะเบียน" — ขึ้นการ์ดให้ผู้ใช้กดยืนยัน
+  const [registeredMatch, setRegisteredMatch] = useState<PlaceCandidate | null>(null);
+  // ชุมชนของสถานที่ที่ยืนยันแล้ว (null = จับคู่ไม่ได้ → ไม่บันทึก — D11)
+  const [confirmedCommunityId, setConfirmedCommunityId] = useState<string | null>(null);
+  // ระดับที่จับคู่ชุมชนได้ (D28)
+  const [communityMatchLevel, setCommunityMatchLevel] = useState<MatchLevel | "manual" | null>(null);
+  // เส้นทาง ③ — "ค้นหาใหม่ในชุมชนนี้" (null = ยังไม่ได้กด)
+  const [communitySearch, setCommunitySearch] = useState<"subdistrict" | "district" | null>(null);
+  // ชุมชนที่ตรงกับสถานที่แต่มีมากกว่าหนึ่ง → ให้ผู้ใช้เลือก
+  const [communityChoices, setCommunityChoices] = useState<CommunityRow[]>([]);
   // coordinates captured when a Google candidate is chosen or from host registration
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(
     hostLocation?.lat != null && hostLocation?.lng != null ? { lat: hostLocation.lat, lng: hostLocation.lng } : null
@@ -214,6 +243,152 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setLocationQuery("");
     setVerify(null);
     setCoords(null);
+  };
+
+  // ─────────────────────────────────────────────────────────────
+  //  การจับคู่สถานที่กับชุมชน (PLAN_PLACE_MATCHING.md §6.3-§6.7)
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * ขอบเขตที่กำลังค้นอยู่ — ชุมชน/ตำบล/อำเภอ/จังหวัด
+   *
+   * host → ของชุมชนตัวเอง (ตามโหมดโพสต์) · tourist → ที่ AI อ่านได้
+   * หรือที่ผู้ใช้กรอกเอง
+   */
+  const resolveScope = () => {
+    if (isHost && hostLocation) {
+      return {
+        community: hostLocation.community || "",
+        subdistrict: hostLocation.subdistrict || "",
+        district: hostLocation.district || "",
+        province: hostLocation.province || "",
+      };
+    }
+    return {
+      community: community.trim(),
+      subdistrict: subdistrict.trim(),
+      district: district.trim(),
+      province: province.trim(),
+    };
+  };
+
+  /**
+   * "ที่ลงทะเบียน" ของขอบเขตนี้ — สถานที่ที่ candidate จะถูกเทียบด้วย
+   *
+   * • host → สถานที่ประกอบการของตัวเอง (`users.business_place_id`)
+   * • tourist → สถานที่ที่ชุมชนนั้นลงทะเบียนไว้
+   *
+   * D2: เทียบด้วย **Google id อย่างเดียว** — ถ้าเป็น id ที่ระบบสร้างเอง
+   * (`host-…`, `otop-…`) มันไม่ใช่ Google id → เทียบกับ candidate ไม่ได้
+   * และถือว่า "ไม่ตรง" เสมอ
+   */
+  const resolveRegisteredPlace = async (): Promise<void> => {
+    // host → สถานที่ของตัวเอง
+    const ownId = user?.business_place_id ?? null;
+    if (isCommunityHost && ownId) {
+      setRegisteredPlace({
+        placeId: ownId,
+        name: user?.business_place_name || "",
+        label: "ของคุณ",
+      });
+      return;
+    }
+    // ทุกคน: ชุมชนของ host หรือชุมชนที่หาได้จากบริเวณที่กำลังค้น
+    const communityId = await resolveCommunityId(resolveScope());
+    if (!communityId) {
+      setRegisteredPlace(null);
+      return;
+    }
+    const reg = await registeredPlaceOf(communityId);
+    setRegisteredPlace(
+      reg?.place_id
+        ? { placeId: reg.place_id, name: reg.place_name ?? "", label: "ของชุมชน" }
+        : null
+    );
+  };
+
+  /**
+   * ชุมชนของสถานที่ที่กำลังค้น
+   * • host → ชุมชนของตัวเอง (`users.community_id`)
+   * • คนอื่น → หาจากตำบล/อำเภอ/จังหวัด · เจอ 1 = ใช้เลย · เจอหลาย = ให้เลือก
+   */
+  const resolveCommunityId = async (scope: {
+    subdistrict: string;
+    district: string;
+    province: string;
+  }): Promise<string | null> => {
+    if (isCommunityHost && user?.community_id) return user.community_id;
+    const list = await findCommunitiesByArea(scope);
+    if (list.length === 1) return list[0].id;
+    if (list.length > 1) {
+      setCommunityChoices(list);
+      return null;
+    }
+    return null;
+  };
+
+  /**
+   * ผูกสถานที่ที่ยืนยันแล้วเข้ากับชุมชน (D4) + บอกระดับที่จับคู่ได้ (D28)
+   *
+   * • host → ชุมชนของตัวเอง
+   * • tourist → หาจากบริเวณของสถานที่ · ไม่เจอ = ไม่บันทึก (D11)
+   */
+  const resolveCommunityFor = async (place: PlaceCandidate): Promise<string | null> => {
+    if (isCommunityHost && user?.community_id) {
+      setConfirmedCommunityId(user.community_id);
+      setCommunityChoices([]);
+      return user.community_id;
+    }
+    const list = await findCommunitiesByArea({
+      subdistrict: place.subdistrict ?? subdistrict.trim(),
+      district: place.district ?? district.trim(),
+      province: place.province ?? province.trim(),
+    });
+    if (list.length === 1) {
+      setConfirmedCommunityId(list[0].id);
+      setCommunityChoices([]);
+      return list[0].id;
+    }
+    if (list.length > 1) {
+      // มากกว่าหนึ่ง → ให้ผู้ใช้เลือกในการ์ดยืนยัน
+      setCommunityChoices(list);
+      setConfirmedCommunityId(null);
+      return null;
+    }
+    setConfirmedCommunityId(null);
+    setCommunityChoices([]);
+    return null;
+  };
+
+  /** ระดับที่จับคู่ชุมชนได้ของสถานที่ที่เพิ่งยืนยัน */
+  const matchLevelOf = (c: PlaceCandidate): MatchLevel | "manual" | null => {
+    // ผู้ใช้เลือกเองจากผลค้น "ในชุมชน" = manual (เชื่อถือที่สุด)
+    if (communitySearch) return "manual";
+    // ตรงกับทะเบียนของชุมชนอยู่แล้ว = ชุมชนมีสถานที่นี้อยู่แล้ว
+    // → ไม่ต้องเขียนระดับซ้ำ (ระดับเดิมของแถวนั้นถูกต้องกว่า)
+    if (registeredMatch && c.placeId && c.placeId === registeredMatch.placeId) return null;
+    return c.matchLevel ?? null;
+  };
+
+  /** เขียนชุมชน/ชื่อที่ยืนยันแล้วกลับลง summary (PLAN §6.9) */
+  const writeConfirmedPlaceToSummary = (place: PlaceCandidate, communityName?: string | null) => {
+    setSummary((prev) => {
+      if (!prev) return prev;
+      const p = prev.place;
+      if (!p) return prev;
+      const base: SummaryPlace = {
+        ...p,
+        place_name: p.place_name ?? place.name,
+        community: communityName ?? p.community ?? null,
+        location: {
+          ...p.location,
+          province: place.province ?? p.location.province ?? null,
+          district: place.district ?? p.location.district ?? null,
+          subdistrict: place.subdistrict ?? p.location.subdistrict ?? null,
+        },
+      };
+      return { ...prev, place: base };
+    });
   };
 
   // --- AI summary (generated at upload time, before posting) ---
@@ -374,14 +549,15 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     // after a regeneration, so a fresh summary never drops them.
     writePlaceDetailsToSummary(placeDetails);
 
-    // ── Host in own_business mode: location is ALWAYS locked to registered business ──
-    // AI is only used for atmosphere summary, never for location extraction.
+    // ── Host in own_business mode: ต้อง "ตรวจเทียบเสมอ" (D5) ──
+    // เดิมล็อกตำแหน่งจากทะเบียนโดยไม่เคยตรวจ (สำเร็จเสมอ เพราะไม่เคยเทียบ)
+    // ตอนนี้ต้องเทียบกับทะเบียนจริง และผู้ใช้ต้องกดยืนยันเสมอ (D27)
     if (isHost && hostLocation && hostPostMode === "own_business") {
-      console.log("[summary] host own_business → keeping OTOP location locked");
+      console.log("[summary] host own_business → verify against the registered place");
       setLocationSource("otop");
-      setLocationConfirmed(true);
+      setLocationConfirmed(false);
       setVerify(null);
-      // Restore host coords in case they were cleared
+      // ค่าเริ่มต้นยังเป็นตำแหน่งทะเบียน — ผู้ใช้ต้องยืนยันเอง
       if (hostLocation.lat != null && hostLocation.lng != null) {
         setCoords({ lat: hostLocation.lat, lng: hostLocation.lng });
       }
@@ -391,6 +567,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
       setSubdistrict(hostLocation.subdistrict);
       setDistrict(hostLocation.district);
       setProvince(hostLocation.province);
+      await verifyOwnBusiness();
     } else if (result?.place) {
       // Tourist or host in community_spot mode: verify AI location normally
       const aiPlaceName = result.place.place_name ?? null;
@@ -429,6 +606,11 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
 
   // Verify + reconcile the AI's location against local data; never auto-pick
   // when ambiguous — surface candidates for the user to choose.
+  //
+  // PLAN §6.3 — สามขั้น:
+  //   ① มี candidate จาก backend → เทียบกับทะเบียน (D2) → การ์ด "ตรง / ไม่ตรง"
+  //   ② ไม่มี candidate → เช็ค cache ตาราง places → ไม่เจอก็ค้น Google เอง
+  //   ③ ผู้ใช้กด "ไม่ใช่ที่นี่" → searchInCommunity()
   const runLocationVerify = async (place: NonNullable<AiSummaryResult["place"]>) => {
     const aiPlaceName = place.place_name ?? null;
     const aiCommunity = (place as any).community ?? null;
@@ -454,6 +636,8 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setGoogleCandidates([]);
     setCoords(null);
     setPendingConfirm(null);
+    setRegisteredMatch(null);
+    setCommunitySearch(null);
 
     // Prefill the form from what the AI read out of the clip (name / area /
     // coords). This is the AI's own reading — the user still confirms it.
@@ -469,24 +653,19 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
       if (!isNaN(lat) && !isNaN(lng)) setCoords({ lat, lng });
     }
 
-    // ── Priority 1: Google Places results the backend already fetched ──
+    // รู้จัก "ที่ลงทะเบียน" ของขอบเขตนี้ก่อน — เทียบด้วย Google id (D2)
+    await resolveRegisteredPlace();
+
+    // ── ① Google Places results the backend already fetched ──
     // Nothing is written into the form here. The user TICK-CONFIRMS first;
     // only then do we spend one Place Details call and fill the fields.
-    if (backendCandidates.length > 1) {
+    if (backendCandidates.length > 0) {
       console.log("[verify] using", backendCandidates.length, "backend Google candidates");
-      setGoogleCandidates(backendCandidates);
-      return;
-    }
-    if (backendCandidates.length === 1) {
-      const c = backendCandidates[0];
-      console.log("[verify] single backend candidate → awaiting user tick:", c.name);
-      setPendingConfirm(c);
-      setPendingName(c.name);
-      setPendingAddress(c.address);
+      showCandidates(sortByMatchLevel(backendCandidates));
       return;
     }
 
-    // ── Priority 2: check our local confirmed places store ──
+    // ── ② check our local confirmed places store ──
     if (aiPlaceName) {
       const local = await findLocalPlaces({
         name: aiPlaceName,
@@ -494,11 +673,9 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
         district: loc.district,
       });
       setLocalPlaceCandidates(local);
-      if (local.length === 1 && res.status !== "needs_choice") {
-        applyLocalPlace(local[0]);
-        return;
-      }
-      // ── Priority 3: call Google ourselves if backend didn't enrich ──
+      // ไม่ auto-pick แล้ว (D7) — การเทียบด้วยชื่อทำให้เลือกผิดได้
+      // ("บ้านปาย" ไปตรงกับ "บ้านปายใหม่") และเลิกค้น Google ทิ้ง
+      // ── ③ call Google ourselves if backend didn't enrich ──
       if (local.length === 0) {
         void lookupOnGoogle(aiPlaceName);
       }
@@ -507,12 +684,120 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     }
   };
 
+  /**
+   * แสดงผลค้นของ Google ให้ผู้ใช้เลือก
+   *
+   * เทียบกับทะเบียนก่อนเสมอ (D2): ถ้าตรง → การ์ด "✓ ตรงกับที่ลงทะเบียน"
+   * ถ้าไม่ตรง → รายการให้เลือก (หรือการ์ดเดียวถ้ามีอันเดียว)
+   */
+  const showCandidates = (list: PlaceCandidate[]) => {
+    // เส้นทาง ③: ผู้ใช้บอกแล้วว่า "ไม่ใช่ที่ลงทะเบียน" → ไม่ต้องเทียบทะเบียนซ้ำ
+    // (ไม่งั้นจะวนกลับมาการ์ดเดิมทุกครั้งที่กด "ค้นกว้างขึ้น")
+    const hit = communitySearch
+      ? { kind: "none" as const, candidate: null }
+      : matchAgainstRegistered(list, registeredPlace?.placeId ?? null);
+    setRegisteredMatch(hit.candidate);
+    if (hit.candidate) {
+      setPendingName(hit.candidate.name);
+      setPendingAddress(hit.candidate.address);
+      setGoogleCandidates([]);
+      return;
+    }
+    if (list.length === 1) {
+      // One result still needs the user's tick — do not fill the form yet.
+      setPendingConfirm(list[0]);
+      setPendingName(list[0].name);
+      setPendingAddress(list[0].address);
+      setGoogleCandidates([]);
+      return;
+    }
+    setGoogleCandidates(list);
+  };
+
+  /**
+   * โหมด own_business — เทียบกับทะเบียนเสมอ (D5)
+   *
+   * • ตรง → การ์ด "✓ ตรงกับที่ลงทะเบียนของคุณ" → ยืนยัน → ใช้ตำแหน่งทะเบียน
+   * • ไม่ตรง → รายการให้เลือก (โหมด "สถานที่ใหม่ในชุมชน")
+   * • ไม่มี candidate → ให้ host เลือกหมุดเอง (D17)
+   */
+  const verifyOwnBusiness = async () => {
+    const scope = resolveScope();
+    const name = hostBusinessName.trim();
+    await resolveRegisteredPlace();
+    setVerify(
+      verifyLocationOffline({
+        placeName: name || null,
+        community: scope.community || null,
+        subdistrict: scope.subdistrict || null,
+        district: scope.district || null,
+        province: scope.province || null,
+      })
+    );
+    if (!name) {
+      // ไม่มีชื่อที่จะค้น — host ต้องยืนยันเอง
+      setRegisteredMatch(null);
+      return;
+    }
+    setGoogleLoading(true);
+    const r = await verifyPlaceOnGoogle({
+      placeName: name,
+      community: scope.community || undefined,
+      subdistrict: scope.subdistrict || undefined,
+      district: scope.district || undefined,
+      province: scope.province || undefined,
+    });
+    console.log("[own_business] candidates =", r.candidates.length);
+    setGoogleLoading(false);
+    if (r.candidates.length === 0) {
+      setRegisteredMatch(null);
+      setGoogleCandidates([]);
+      return;
+    }
+    showCandidates(sortByMatchLevel(r.candidates));
+  };
+
+  /**
+   * เส้นทาง ③ — "ค้นหาใหม่ในชุมชนนี้" (PLAN §6.5 · D24)
+   *
+   * ค้นระดับตำบลก่อน (strict) → ถ้ายังไม่มีอะไรที่อยู่ "ในหมู่บ้าน" จริง
+   * ผู้ใช้กด "ค้นกว้างขึ้น (ทั้งอำเภอ)" → ค้นใหม่โดยถอดตำบลออก
+   */
+  const searchInCommunity = async (level: "subdistrict" | "district" = "subdistrict") => {
+    const scope = resolveScope();
+    const name = placeName.trim() || locationName.trim();
+    if (!name) return;
+    setCommunitySearch(level);
+    setGoogleLoading(true);
+    setPendingConfirm(null);
+    setRegisteredMatch(null);
+    setGoogleCandidates([]);
+    const r = await verifyPlaceOnGoogle({
+      placeName: name,
+      community: scope.community || undefined,
+      // ระดับอำเภอ = ถอดตำบลออก (คำค้นกว้างขึ้นจริง ๆ)
+      subdistrict: level === "subdistrict" ? scope.subdistrict || undefined : undefined,
+      district: scope.district || undefined,
+      province: scope.province || undefined,
+      strict: true,
+      scopeLevel: level,
+    });
+    console.log("[community-search] level =", level, "candidates =", r.candidates.length);
+    setGoogleLoading(false);
+    if (r.candidates.length === 0) {
+      setGoogleCandidates([]);
+      return;
+    }
+    showCandidates(sortByMatchLevel(r.candidates));
+  };
+
   const lookupOnGoogle = async (
     name: string
   ) => {
     console.log("[google] lookupOnGoogle name =", name);
     setGoogleLoading(true);
     setPendingConfirm(null);
+    setRegisteredMatch(null);
     setGoogleCandidates([]);
     // A host posting a community spot may only find places inside their own
     // community — scope the search to it instead of the whole country.
@@ -542,15 +827,11 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     });
     console.log("[google] result configured =", r.configured, "candidates =", r.candidates.length);
     setGoogleLoading(false);
-    if (r.candidates.length === 1) {
-      // One result still needs the user's tick — do not fill the form yet.
-      const c = r.candidates[0];
-      setPendingConfirm(c);
-      setPendingName(c.name);
-      setPendingAddress(c.address);
-    } else {
-      setGoogleCandidates(r.candidates);
+    if (r.candidates.length === 0) {
+      setGoogleCandidates([]);
+      return;
     }
+    showCandidates(sortByMatchLevel(r.candidates));
   };
 
   /**
@@ -600,6 +881,16 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
       // The card opens only now, with the values already in it.
       setPlaceDetailsReady(true);
 
+      // ผูกกับชุมชน (D4) + ระดับที่จับคู่ได้ (D28)
+      // host → ชุมชนของตัวเอง · tourist → หาจากบริเวณของสถานที่
+      // (ถ้าหลายชุมชน → resolveCommunityFor จะเปิดการ์ดให้ผู้ใช้เลือก)
+      await resolveCommunityFor(confirmed);
+      const level = matchLevelOf(confirmed);
+      setCommunityMatchLevel(level);
+
+      // เขียนชุมชน/ชื่อที่ยืนยันแล้วกลับลง summary (PLAN §6.9)
+      writeConfirmedPlaceToSummary(confirmed, community.trim() || null);
+
       // Save to Supabase places store immediately so it appears on the map.
       void saveVerifiedPlace({
         name: confirmed.name,
@@ -612,8 +903,45 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
         googlePlaceId: confirmed.placeId || null,
         source: "google",
       });
+
+      // D17 — host เลือกหมุดที่ไม่ใช่ที่ลงทะเบียน → บันทึกกลับไว้
+      // เป็น "ที่ของฉัน" เพื่อให้ครั้งหน้าเทียบได้ตรง (D2 ใช้ได้จริง)
+      if (
+        isCommunityHost &&
+        confirmed.placeId &&
+        confirmed.placeId !== user?.business_place_id
+      ) {
+        void rememberBusinessPlace(confirmed);
+      }
     } finally {
       setConfirmingPlace(false);
+    }
+  };
+
+  /**
+   * D17 — จำ "ที่ของฉัน" ใหม่ (host เลือกเองตอนโพสต์)
+   *
+   * เขียนกลับ `users.business_place_id` ผ่าน backend เดียวกับที่โปรไฟล์ใช้
+   * → ครั้งหน้าที่โพสต์จะเทียบกับทะเบียนได้ตรง (D2)
+   */
+  const rememberBusinessPlace = async (c: PlaceCandidate) => {
+    try {
+      await upsertMyPlace({
+        users: {
+          businessPlaceId: c.placeId,
+          businessPlaceName: c.name,
+          businessLat: c.latitude,
+          businessLng: c.longitude,
+          businessAddress: c.address,
+          businessSubdistrict: c.subdistrict,
+          businessDistrict: c.district,
+          businessProvince: c.province,
+        },
+      });
+      await refreshUser();
+      console.log("[own_business] saved the chosen place as the host's own");
+    } catch (e: any) {
+      console.warn("[own_business] could not save the chosen place:", e?.message ?? e);
     }
   };
 
@@ -683,6 +1011,13 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setPlaceDetails({ priceLevel: null, website: null, phone: null, openingHours: null });
     setPlaceDetailsEdited({});
     setPlaceDetailsReady(false);
+    // สถานะการจับคู่กับชุมชน — ล้างตาม
+    setRegisteredMatch(null);
+    setRegisteredPlace(null);
+    setConfirmedCommunityId(null);
+    setCommunityMatchLevel(null);
+    setCommunitySearch(null);
+    setCommunityChoices([]);
   };
 
   const pickVideo = async () => {
@@ -868,7 +1203,15 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
           : (placeDetails[key] ?? undefined);
 
       let placeSaveWarning: string | null = null;
-      if (isCommunityHost && confirmedPlace?.placeId) {
+      // D11 — จับคู่ชุมชนไม่ได้ = ไม่บันทึกสถานที่ (ไม่มีแถว "รอตรวจ")
+      // host บันทึกได้เสมอ · tourist ต้องรู้ชุมชนก่อน
+      const canSavePlace =
+        !!confirmedPlace?.placeId && (isCommunityHost || !!confirmedCommunityId);
+      if (confirmedPlace?.placeId && !canSavePlace) {
+        placeSaveWarning =
+          "ยังไม่ทราบว่าสถานที่นี้อยู่ชุมชนไหน — ข้อมูลสถานที่จึงยังไม่ถูกบันทึกเข้าชุมชน";
+      }
+      if (canSavePlace && confirmedPlace?.placeId) {
         try {
           await savePlaceDetails({
             placeId: confirmedPlace.placeId,
@@ -881,10 +1224,14 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
             latitude: confirmedPlace.latitude ?? coords?.lat ?? null,
             longitude: confirmedPlace.longitude ?? coords?.lng ?? null,
             googleMapsUrl: confirmedPlace.googleMapsUri ?? null,
-            priceLevel: detailValue("priceLevel"),
-            website: detailValue("website"),
-            phone: detailValue("phone"),
-            openingHours: detailValue("openingHours"),
+            // ชุมชน + ระดับการจับคู้ (D4 / D28)
+            communityId: confirmedCommunityId,
+            communityMatchLevel: communityMatchLevel,
+            // ข้อมูลของเจ้าของสถานที่ — host แก้ได้เท่านั้น (D6)
+            priceLevel: isCommunityHost ? detailValue("priceLevel") : undefined,
+            website: isCommunityHost ? detailValue("website") : undefined,
+            phone: isCommunityHost ? detailValue("phone") : undefined,
+            openingHours: isCommunityHost ? detailValue("openingHours") : undefined,
             // What the clip said about this place — capacity, rules, zones,
             // facilities. Same row, so the AI chat can answer "มีกี่ห้อง"
             // without the traveller watching the clip. A clip that said
@@ -1251,6 +1598,55 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
               </View>
             )}
 
+            {/* ── ตรงกับที่ลงทะเบียนของชุมชน (D2 · PLAN §6.4) ──
+                candidate ที่ id ตรงกับทะเบียนเป๊ะ → ให้ผู้ใช้กดยืนยัน
+                ปุ่ม "ไม่ใช่ที่นี่" ไม่ล้างข้อมูล แต่ไปสู่เส้นทาง ③ */}
+            {registeredMatch && !googleLoading && (
+              <View className="bg-emerald-50 border-2 border-emerald-300 rounded-xl p-3 mb-2">
+                <Text className="text-emerald-800 text-[12px] font-bold mb-1.5">
+                  ✓ ตรงกับที่ลงทะเบียน{registeredPlace?.label ?? "ของชุมชน"}
+                </Text>
+
+                <Text className="text-gray-500 text-[11px] mb-0.5">ชื่อสถานที่</Text>
+                <TextInput
+                  value={pendingName}
+                  onChangeText={setPendingName}
+                  className="bg-white border border-emerald-200 rounded-lg px-2.5 py-2 text-[13px] text-gray-900 mb-1.5"
+                />
+
+                <Text className="text-gray-400 text-[11px]" numberOfLines={1}>{registeredMatch.address}</Text>
+                <Text className="text-gray-500 text-[11px] mt-1">
+                  {[registeredMatch.subdistrict && `ต.${registeredMatch.subdistrict}`,
+                    registeredMatch.district && `อ.${registeredMatch.district}`,
+                    registeredMatch.province && `จ.${registeredMatch.province}`]
+                    .filter(Boolean).join(" • ")}
+                </Text>
+
+                <View className="flex-row mt-2.5">
+                  <TouchableOpacity
+                    onPress={() => void confirmGooglePlace(registeredMatch, pendingName)}
+                    disabled={confirmingPlace}
+                    activeOpacity={0.85}
+                    className={`flex-1 rounded-xl py-2.5 items-center mr-1.5 ${
+                      confirmingPlace ? "bg-[#2D6A4F]/50" : "bg-[#2D6A4F]"
+                    }`}
+                  >
+                    <Text className="text-white font-bold text-[12px]">
+                      {confirmingPlace ? "กำลังดึงข้อมูล..." : "✓ ยืนยันถูกต้อง"}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() => void searchInCommunity("subdistrict")}
+                    disabled={confirmingPlace}
+                    activeOpacity={0.8}
+                    className="flex-1 bg-white border border-gray-200 rounded-xl py-2.5 items-center"
+                  >
+                    <Text className="text-gray-600 font-bold text-[12px]">✕ ไม่ใช่ที่นี่</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+
             {/* Single Google result → confirmation card (editable before confirming) */}
             {pendingConfirm && !googleLoading && (
               <View className="bg-blue-50 border border-blue-300 rounded-xl p-3 mb-2">
@@ -1320,8 +1716,62 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
               </>
             )}
 
+            {/* ── เส้นทาง ③: "ค้นหาใหม่ในชุมชนนี้" (PLAN §6.5 · D24) ──
+                สถานที่ที่ AI อ่านมาไม่ตรงกับทะเบียน → ค้นใหม่ในขอบเขตชุมชน
+                ถ้ายังไม่มีผลระดับหมู่บ้าน ให้บอกตรง ๆ และเสนอ "ค้นกว้างขึ้น" */}
+            {placeName && !googleLoading && !pendingConfirm && !registeredMatch && (
+              <TouchableOpacity
+                onPress={() => void searchInCommunity("subdistrict")}
+                activeOpacity={0.8}
+                className="flex-row items-center justify-center bg-indigo-100 border border-indigo-200 rounded-xl py-2.5 mb-1 mt-1"
+              >
+                <MapPinIcon size={15} color="#4338CA" />
+                <Text className="text-indigo-700 font-bold text-[12px] ml-1.5">
+                  ค้นหาใหม่ในชุมชนนี้
+                </Text>
+              </TouchableOpacity>
+            )}
+
+            {communitySearch && !googleLoading && (
+              <>
+                <View className="bg-indigo-50 border border-indigo-200 rounded-xl p-3 mb-2 mt-1">
+                  <Text className="text-indigo-800 text-[11px] font-bold mb-1">
+                    {communitySearch === "subdistrict"
+                      ? "🔎 ผลค้นในระดับตำบล"
+                      : "🔎 ผลค้นในระดับอำเภอ (กว้างขึ้น)"}
+                  </Text>
+                  {googleCandidates.length === 0 ? (
+                    <Text className="text-indigo-700 text-[12px] leading-5">
+                      ไม่พบสถานที่ในขอบเขตนี้ — ลองค้นกว้างขึ้นที่ระดับอำเภอ หรือกรอกชื่อสถานที่เองด้านล่าง
+                    </Text>
+                  ) : googleCandidates.some((c) => c.matchLevel === "village") ? (
+                    <Text className="text-indigo-700 text-[12px] leading-5">
+                      พบ {googleCandidates.length} แห่ง — เลือกที่ถูกต้องด้านล่าง
+                    </Text>
+                  ) : (
+                    <Text className="text-amber-700 text-[12px] leading-5">
+                      ⚠️ ยังไม่มีสถานที่ที่อยู่ “ในหมู่บ้าน” จริงในผลนี้ — ที่เห็นอยู่ในตำบล/อำเภอเดียวกันเท่านั้น
+                    </Text>
+                  )}
+                </View>
+
+                {communitySearch === "subdistrict" && (
+                  <TouchableOpacity
+                    onPress={() => void searchInCommunity("district")}
+                    activeOpacity={0.8}
+                    className="flex-row items-center justify-center bg-white border border-indigo-200 rounded-xl py-2.5 mb-1"
+                  >
+                    <ArrowPathIcon size={15} color="#4338CA" />
+                    <Text className="text-indigo-700 font-bold text-[12px] ml-1.5">
+                      ค้นกว้างขึ้น (ทั้งอำเภอ)
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </>
+            )}
+
             {/* Manual Google search trigger (if auto lookup found nothing) */}
-            {placeName && !googleLoading && googleCandidates.length === 0 && !pendingConfirm && (
+            {placeName && !googleLoading && googleCandidates.length === 0 && !pendingConfirm && !registeredMatch && (
               <TouchableOpacity
                 onPress={() => lookupOnGoogle(placeName)}
                 activeOpacity={0.8}
@@ -1496,14 +1946,61 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
           </>
         )}
 
+        {/* ── เลือกชุมชนที่สถานที่นี้อยู่ (PLAN §6.7) ──
+            จับคู่ชุมชนได้หลายแห่งในตำบลเดียวกัน → ให้ผู้ใช้เลือกเอง
+            เลือกไม่ได้ = ไม่บันทึกสถานที่ (D11) */}
+        {communityChoices.length > 0 && (
+          <View className="bg-amber-50 border border-amber-200 rounded-2xl p-3.5 mb-4">
+            <Text className="text-amber-900 font-bold text-[13px] mb-1">
+              🏘️ เลือกชุมชนที่สถานที่นี้อยู่
+            </Text>
+            <Text className="text-amber-800 text-[11px] mb-2">
+              พบ {communityChoices.length} ชุมชนในตำบลนี้ — เลือกชุมชนที่ถูกต้องเพื่อบันทึกสถานที่
+            </Text>
+            {communityChoices.map((c) => (
+              <TouchableOpacity
+                key={c.id}
+                onPress={() => {
+                  setConfirmedCommunityId(c.id);
+                  setCommunityChoices([]);
+                }}
+                activeOpacity={0.8}
+                className="bg-white border border-amber-200 rounded-xl px-3 py-2 mb-1.5"
+              >
+                <Text className="text-gray-900 text-[13px] font-semibold">{c.name}</Text>
+                <Text className="text-gray-400 text-[11px]">
+                  {[c.subdistrict && `ต.${c.subdistrict}`,
+                    c.district && `อ.${c.district}`,
+                    c.province && `จ.${c.province}`]
+                    .filter(Boolean).join(" • ")}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
+
         {/* ข้อมูลสถานที่ — the host checks what Google said and corrects it.
             Saved on post, into the place's own row: that is what the AI chat
-            reads when a traveller asks about the price or the website. */}
-        {isCommunityHost && confirmedPlace?.placeId && placeDetailsReady && (
+            reads when a traveller asks about the price or the website.
+
+            §6.8: นักท่องเที่ยวก็เห็นการ์ดนี้ แต่แก้เฉพาะช่องที่เป็นของเจ้าของไม่ได้ (D6/D26) */}
+        {confirmedPlace?.placeId && placeDetailsReady && (
           <PlaceDetailsCard
             values={placeDetails}
             onChange={applyPlaceDetails}
-            subtitle="ยืนยันข้อมูลของสถานที่นี้ — แอไอแชทจะตอบคำถามเรื่องราคา เว็บไซต์ เบอร์โทร และเวลาเปิดปิดจากข้อมูลชุดนี้"
+            canEditOwnerFields={isCommunityHost}
+            matchLevel={communityMatchLevel}
+            sources={{
+              priceLevel: placeDetailsEdited.priceLevel ? "owner" : "google",
+              website: placeDetailsEdited.website ? "owner" : "google",
+              phone: placeDetailsEdited.phone ? "owner" : "google",
+              openingHours: placeDetailsEdited.openingHours ? "owner" : "google",
+            }}
+            subtitle={
+              isCommunityHost
+                ? "ยืนยันข้อมูลของสถานที่นี้ — แอไอแชทจะตอบคำถามเรื่องราคา เว็บไซต์ เบอร์โทร และเวลาเปิดปิดจากข้อมูลชุดนี้"
+                : "ข้อมูลสถานที่นี้มาจาก Google — เจ้าของสถานที่เป็นผู้ยืนยันค่าที่ถูกต้อง"
+            }
             clipFacts={{
               capacity: summary?.place?.capacity ?? null,
               rules: summary?.place?.rules ?? null,

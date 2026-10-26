@@ -34,18 +34,31 @@ CREATE INDEX IF NOT EXISTS idx_community_places_owner ON public.community_places
 ALTER TABLE public.community_places ENABLE ROW LEVEL SECURITY;
 
 -- Allow public read access (for search and AI Chat)
-CREATE POLICY "Allow public read access on community_places"
+-- NOTE: the canonical RLS list lives in supabase/policies.sql — this file is
+-- kept in sync so re-running the migration does not reintroduce the old,
+-- too-permissive INSERT policy.
+drop policy if exists "Allow public read access on community_places" on public.community_places;
+create policy "Allow public read access on community_places"
   ON public.community_places
   FOR SELECT
   USING (true);
 
 -- Allow authenticated users to insert/update their own places
-CREATE POLICY "Allow authenticated users to insert community_places"
+--
+-- PLAN_PLACE_MATCHING.md §2.6.4 — the old check was
+--   WITH CHECK (auth.uid() = owner_id OR auth.uid() IS NOT NULL)
+-- The second clause is always true for any signed-in user, so anyone could
+-- insert a row carrying somebody else's owner_id. Now a user may only insert
+-- rows they own themselves, or ownerless rows (a place a tourist recorded).
+drop policy if exists "Allow authenticated users to insert community_places" on public.community_places;
+create policy "Allow authenticated users to insert community_places"
   ON public.community_places
   FOR INSERT
-  WITH CHECK (auth.uid() = owner_id OR auth.uid() IS NOT NULL);
+  WITH CHECK (owner_id IS NULL OR auth.uid() = owner_id);
 
-CREATE POLICY "Allow owners to update their community_places"
+drop policy if exists "Allow owners to update their community_places" on public.community_places;
+create policy "Allow owners to update their community_places"
   ON public.community_places
   FOR UPDATE
-  USING (auth.uid() = owner_id);
+  USING (auth.uid() = owner_id)
+  WITH CHECK (owner_id IS NULL OR auth.uid() = owner_id);

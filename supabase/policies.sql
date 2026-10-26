@@ -59,6 +59,37 @@ create policy "services write via community" on public.services
     exists (select 1 from public.communities c where c.id = community_id and c.host_user_id = auth.uid())
   );
 
+-- ---------- COMMUNITY PLACES (public read = แหล่งจริงของข้อมูลสถานที่) ----------
+--
+-- PLAN_PLACE_MATCHING.md §2.6.4 — policy เดิมใน create_community_places.sql
+--   WITH CHECK (auth.uid() = owner_id OR auth.uid() IS NOT NULL)
+-- เงื่อนไขหลังทำให้เงื่อนไขแรกเป็นจริงเสมอ → ใครก็ insert แถวที่ owner_id
+-- ของคนอื่นได้ → ผู้ใช้ทั่วไป insert ได้เฉพาะแถวที่ owner_id = NULL
+-- (หรือเป็นของตัวเอง)
+--
+-- หมายเหตุ: ตารางนี้เป็น "แหล่งจริง" ของสถานที่ (D1) ทั้ง AI Chat และแอป
+-- ต้องอ่านได้ → select เปิดให้สาธารณะ
+alter table public.community_places enable row level security;
+
+drop policy if exists "Allow public read access on community_places" on public.community_places;
+create policy "Allow public read access on community_places"
+  on public.community_places
+  for select
+  using (true);
+
+drop policy if exists "Allow authenticated users to insert community_places" on public.community_places;
+create policy "Allow authenticated users to insert community_places"
+  on public.community_places
+  for insert
+  with check (owner_id is null or owner_id = auth.uid());
+
+drop policy if exists "Allow owners to update their community_places" on public.community_places;
+create policy "Allow owners to update their community_places"
+  on public.community_places
+  for update
+  using (auth.uid() = owner_id)
+  with check (owner_id is null or owner_id = auth.uid());
+
 -- ---------- VIDEOS (public read non-deleted, owner writes) ----------
 create policy "videos readable by all" on public.videos
   for select using (is_deleted = false or auth.uid() = user_id);

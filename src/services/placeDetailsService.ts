@@ -49,6 +49,14 @@ export interface PlaceDetailsInput {
   latitude?: number | null;
   longitude?: number | null;
   googleMapsUrl?: string | null;
+  /** ชุมชนที่สถานที่นี้อยู่ (D4) — จับคู่ชุมชนไม่ได้ = ไม่บันทึก (D11) */
+  communityId?: string | null;
+  /**
+   * ระดับที่จับคู่ชุมชนได้ (D28)
+   * village = อยู่ในหมู่บ้านนี้ · subdistrict = ตำบลเดียวกัน
+   * district = อำเภอเดียวกัน · manual = ผู้ใช้ระบุเอง
+   */
+  communityMatchLevel?: "village" | "subdistrict" | "district" | "manual" | null;
   /** Price tier: ฟรี / ฿ / ฿฿ / ฿฿฿ / ฿฿฿฿. */
   priceLevel?: string | null;
   website?: string | null;
@@ -153,6 +161,10 @@ export async function savePlaceDetails(input: PlaceDetailsInput): Promise<void> 
     longitude: input.longitude ?? null,
     googleMapsUrl: input.googleMapsUrl ?? null,
   };
+  // ชุมชน + ระดับการจับคู่ — เดินทางไปกับข้อมูลสถานที่เสมอ
+  // (ถ้าไม่ระบุชุมชน = จับคู่ไม่ได้ = ไม่บันทึก — D11)
+  if (input.communityId) body.communityId = input.communityId;
+  if (input.communityMatchLevel) body.communityMatchLevel = input.communityMatchLevel;
   // Only the fields we actually know travel. "Cleared" travels as "" so the
   // server empties that column; "unknown" is left out, so a value the owner
   // already set survives.

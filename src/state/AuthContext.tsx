@@ -51,6 +51,11 @@ export interface AppUser {
   otop_cbt_village?: string | null;
   // Host business profile (Ground truth for posts)
   business_place_name?: string | null;
+  /**
+   * Google Place ID ของสถานที่ที่ host ลงทะเบียนไว้ — ตัวตนของสถานที่
+   * ใช้เทียบกับ candidate จาก Google เพื่อบอกว่า "ตรงกับที่ลงทะเบียน"
+   */
+  business_place_id?: string | null;
   business_price_info?: string | null;
   business_opening_hours?: string | null;
   business_phone?: string | null;
@@ -60,6 +65,12 @@ export interface AppUser {
   business_subdistrict?: string | null;
   business_district?: string | null;
   business_province?: string | null;
+  /**
+   * ชุมชนที่ผู้ใช้สังกัด — host ใช้ชุมชนนี้เป็นขอบเขตตอนค้นสถานที่
+   * (คอลัมน์นี้มากับ add_place_matching.sql — ถ้ายังไม่รัน migration
+   * ค่าจะเป็น undefined และระบบทำงานแบบเดิมได้)
+   */
+  community_id?: string | null;
 }
 
 export interface OtopRegInfo {
@@ -73,6 +84,19 @@ export interface OtopRegInfo {
   otopForTourism: string | null;
   cbtVillage: string | null;
   raw?: any;
+}
+
+/**
+ * PostgREST บอกว่าคอลัมน์ไม่มีในตารางหรือเปล่า
+ *
+ * คอลัมน์ของขั้น 1.1 (`community_id`, `business_place_id`) มากับ
+ * `add_place_matching.sql` — ถ้ายังไม่ได้รัน migration การอัปเดตแถวผู้ใช้
+ * จะพังทั้งแถว ต้องตัดคอลัมน์นั้นออกแล้วลองใหม่ ไม่งั้นฟีเจอร์อื่นที่
+ * ใช้งานได้อยู่แล้วจะพังตามไปด้วย
+ */
+function isMissingColumn(message: string | undefined, column: string): boolean {
+  const m = (message ?? "").toLowerCase();
+  return m.includes(column.toLowerCase()) && m.includes("does not exist");
 }
 
 export interface OnboardingInput {
@@ -125,6 +149,17 @@ interface AuthState {
     businessSubdistrict?: string | null;
     businessDistrict?: string | null;
     businessProvince?: string | null;
+  }) => Promise<{ error: string | null }>;
+  /**
+   * D16 — เลื่อนบทบาทเป็น host หลังยืนยันเลขทะเบียน OTOP
+   *
+   * คนที่สมัครเป็นนักท่องเที่ยวแต่เป็นเจ้าของชุมชนจริง ต้องมีทางกลับมา
+   * ไม่งั้นการยืนยันตัวตนครั้งแรก = การตัดทางออกจากระบบถาวร
+   */
+  claimHostRole: (input: {
+    otop: OtopRegInfo;
+    /** ชุมชนที่ host สังกัด (ถ้าหาเจอในทะเบียน) */
+    communityId?: string | null;
   }) => Promise<{ error: string | null }>;
   /** Permanently delete the calling account and its data. */
   deleteAccount: () => Promise<{ error: string | null }>;
@@ -271,6 +306,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const displayName = input.displayName.trim();
       if (!username) return { error: "กรุณาตั้งชื่อผู้ใช้ (username)" };
       if (!displayName) return { error: "กรุณากรอกชื่อที่แสดง" };
+
+      // D9 — host ต้องมีทะเบียน OTOP ที่ยืนยันแล้ว ถึงจะเป็น host ได้
+      // ไม่งั้น "ชุมชน" ของเขาจะผูกกับหมู่บ้านไหนไม่ได้เลย
+      // และการค้นหาสถานที่ในชุมชนจะไม่มีขอบเขตให้กรอง
+      if (input.role === "host" && !input.otop?.idNumber?.trim()) {
+        return { error: "ยังยืนยันตัวตนเป็น host ไม่ได้ — กรุณากรอกเลขทะเบียน OTOP ให้ครบก่อน" };
+      }
 
       // Final uniqueness guard (race-safe-ish; the DB unique constraint is the real guard).
       if (!(await isUsernameAvailable(username))) {
@@ -419,6 +461,55 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [session, loadUserRow]
   );
 
+  /**
+   * D16 — เลื่อนบทบาทเป็น host หลังยืนยันเลขทะเบียน OTOP
+   *
+   * เขียนทั้งบทบาทและข้อมูลทะเบียน OTOP ในครั้งเดียว เพื่อให้ host ที่ยืนยัน
+   * ได้มีขอบเขตชุมชนให้ค้นหาสถานที่ต่อได้ทันที (D9)
+   */
+  const claimHostRole = useCallback(
+    async (input: { otop: OtopRegInfo; communityId?: string | null }): Promise<{ error: string | null }> => {
+      const uid = session?.user?.id;
+      if (!uid) return { error: "ยังไม่ได้เข้าสู่ระบบ" };
+      const o = input.otop;
+      if (!o.idNumber?.trim()) {
+        return { error: "กรุณากรอกเลขทะเบียน OTOP ให้ครบก่อน" };
+      }
+
+      const row: Record<string, any> = {
+        role: "host",
+        otop_verified: true,
+        otop_village_id: o.idNumber,
+        otop_region: o.region,
+        otop_province: o.province,
+        otop_amphur: o.amphur,
+        otop_tambol: o.tambol,
+        otop_village: o.village,
+        otop_nawatwithi: o.otopNawatwithi,
+        otop_for_tourism: o.otopForTourism,
+        otop_cbt_village: o.cbtVillage,
+        otop_raw: o.raw ?? null,
+      };
+      if (input.communityId) row.community_id = input.communityId;
+
+      const { error } = await supabase.from("users").update(row).eq("id", uid);
+      // คอลัมน์ community_id มากับ add_place_matching.sql — ถ้ายังไม่ได้รัน
+      // migration การอัปเดตทั้งแถวจะพัง → ตัดคอลัมน์นั้นแล้วลองใหม่
+      // (การเป็น host ต้องได้เสมอ แม้ยังผูกชุมชนไม่ได้)
+      if (error && input.communityId && isMissingColumn(error.message, "community_id")) {
+        const { community_id, ...rest } = row;
+        const retry = await supabase.from("users").update(rest).eq("id", uid);
+        if (retry.error) return { error: retry.error.message };
+        await loadUserRow(uid);
+        return { error: null };
+      }
+      if (error) return { error: error.message };
+      await loadUserRow(uid);
+      return { error: null };
+    },
+    [session, loadUserRow]
+  );
+
   const signOut = useCallback(async () => {
     await supabase.auth.signOut();
     setUser(null);
@@ -494,9 +585,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       completeOnboarding,
       updateProfile,
       updateBusinessProfile,
+      claimHostRole,
       deleteAccount,
     }),
-    [loading, session, user, needsOnboarding, signInWithGoogle, signOut, refreshUser, isUsernameAvailable, completeOnboarding, updateProfile, updateBusinessProfile, deleteAccount]
+    [loading, session, user, needsOnboarding, signInWithGoogle, signOut, refreshUser, isUsernameAvailable, completeOnboarding, updateProfile, updateBusinessProfile, claimHostRole, deleteAccount]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

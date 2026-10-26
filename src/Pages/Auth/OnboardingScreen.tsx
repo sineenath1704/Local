@@ -46,6 +46,7 @@ import EditableValueRow from "../../components/EditableValueRow";
 import DayPickerSheet from "../../components/DayPickerSheet";
 import TimeRangeSheet, { type TimeRangeSheetProps } from "../../components/TimeRangeSheet";
 import { upsertMyPlace, syntheticPlaceId, mapsUrlFor } from "../../services/hostPlaceService";
+import { findCommunityByOtopVillage } from "../../services/communityService";
 
 /**
  * OnboardingScreen — shown once after a first Google sign-in, before the app.
@@ -58,7 +59,9 @@ type Step = "role" | "otop" | "business" | "username" | "details";
 
 export default function OnboardingScreen() {
   const insets = useSafeAreaInsets();
-  const { isUsernameAvailable, completeOnboarding, user } = useAuth();
+  const { isUsernameAvailable, completeOnboarding, user, session } = useAuth();
+  // id ของผู้ใช้ที่ล็อกอินอยู่ — ใช้เป็นกุญแจของแถวที่สังเคราะห์ (ไม่มี timestamp)
+  const uid = session?.user?.id ?? user?.id ?? null;
 
   const [step, setStep] = useState<Step>("role");
 
@@ -132,6 +135,13 @@ export default function OnboardingScreen() {
   const [searchingPin, setSearchingPin] = useState(false);
   const [pinCandidates, setPinCandidates] = useState<PlaceCandidate[]>([]);
   const [confirmedPlace, setConfirmedPlace] = useState<PlaceCandidate | null>(null);
+  /**
+   * Google Place ID ของหมุดที่ host เลือก — เก็บแยกจาก `confirmedPlace`
+   * เพราะหมุดที่ไม่ได้มาจาก Google (fallback ของ OTOP) จะมี placeId เป็น
+   * id สังเคราะห์ ซึ่ง **ห้าม** เขียนลง `users.business_place_id`
+   * (D2 เทียบด้วย Google id เท่านั้น — id ปลอมเทียบไม่ได้)
+   */
+  const [googlePlaceId, setGooglePlaceId] = useState<string | null>(null);
   // What Google actually said, kept separate from the editable fields so the
   // registrant can compare the two instead of guessing what was prefilled.
   const [googleHours, setGoogleHours] = useState<ParsedGoogleHours | null>(null);
@@ -226,6 +236,7 @@ export default function OnboardingScreen() {
 
   const selectCandidate = (c: PlaceCandidate) => {
     setConfirmedPlace(c);
+    setGooglePlaceId(c.placeId || null);
     if (c.name) setBusinessPlaceName(c.name);
     // Don't stomp a number the host already typed — Google often has none.
     if (c.phone && !businessPhone.trim()) setBusinessPhone(c.phone);
@@ -270,7 +281,10 @@ export default function OnboardingScreen() {
     setConfirmedPlace({
       name: fallbackName,
       address: fallbackAddress,
-      placeId: `otop-${villageId}-${Date.now()}`,
+      // ⚠️ ห้ามใส่ timestamp — `place_id` ต้องนิ่ง (PLAN §2.6.1)
+      // ถ้ามี timestamp ทุกครั้งที่บันทึกจะได้แถวใหม่ แล้วแอปต้องเลือก
+      // ระหว่างของเก่ากับของใหม่ตอน AI ตอบ
+      placeId: uid ? syntheticPlaceId(uid) : "",
       latitude: null,
       longitude: null,
       province: otop?.province ?? null,
@@ -278,6 +292,8 @@ export default function OnboardingScreen() {
       subdistrict: otop?.tambol ?? null,
       types: ["community"],
     });
+    // หมุดนี้ไม่ได้มาจาก Google → ยังไม่มี Google id ให้ผูก (D2)
+    setGooglePlaceId(null);
     // No Google pin means no Google data to show — clear it so the card
     // doesn't imply anything was fetched.
     setGoogleHours(null);
@@ -390,7 +406,17 @@ export default function OnboardingScreen() {
     // this alongside anything else in one transaction.
     if (role === "host" && confirmedPlace && user?.id) {
       try {
+        // ชุมชนของ host — ผูกด้วยเลขทะเบียน OTOP (CDD Village_ID)
+        // ซึ่งคือ `communities.otop_village_id` (ไม่เดาจากชื่อ — ชื่อซ้ำกันเยอะ)
+        // ถ้ายังไม่มีชุมชนนี้ในทะเบียน (ยังไม่ได้ seed) → null = ยังไม่ผูก
+        const community = await findCommunityByOtopVillage(otop?.idNumber ?? null);
         await upsertMyPlace({
+          users: {
+            // Google Place ID ของหมุดที่ host เลือก — กุญแจที่ผูก host
+            // กับสถานที่ของตัวเอง (D2) · null = ยังไม่มีหมุดจาก Google
+            businessPlaceId: googlePlaceId,
+            communityId: community?.id ?? null,
+          },
           place: {
             placeId: confirmedPlace.placeId || syntheticPlaceId(user.id),
             placeName: businessPlaceName.trim(),
@@ -412,6 +438,8 @@ export default function OnboardingScreen() {
             rating: confirmedPlace.rating ?? null,
             userRatingsTotal: confirmedPlace.userRatingCount ?? null,
             website: confirmedPlace.website ?? null,
+            // ชุมชนที่สถานที่นี้อยู่ — เป็นที่มาของชื่อ hierarchy (D18)
+            communityId: community?.id ?? null,
             // Machine-readable twins of the two strings above.
             businessHours: composeHoursJson({
               weekdayDays,

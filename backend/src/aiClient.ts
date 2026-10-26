@@ -1,5 +1,6 @@
 import { config, isAiConfigured } from "./config";
 import { AiUpstreamError } from "./aiErrors";
+import { callAiText } from "./aiStream";
 import { pickHashtagSuggestions } from "./hashtagText";
 import { DiagLog, errorDetail } from "./summaryDiag";
 import type { PlaceCandidate } from "./placeTypes";
@@ -27,6 +28,16 @@ import {
  * (งบจริงยังตั้งผ่าน env ได้ แต่ลืมตั้งไม่ควรทำให้สรุดว่างเงียบ ๆ)
  */
 const RETRY_MAX_TOKENS = 32768;
+
+/**
+ * งบขั้นต่ำของรอบสรุป
+ * -------------------------------------------------------------
+ * AI_MAX_TOKENS เคยเป็น 1024 บน Vercel (ลืมตั้งค่า) → โมเดลตอบกลาง JSON
+ * → สรุปว่างเงียบ ๆ ตัวแก้ไขนี้กันไว้ในโค้ด: ถ้า env ตั้งไว้ต่ำกว่านี้
+ * ให้ยกขึ้นมาที่ขั้นต่ำเสมอ (max_tokens เป็น "เพดาน" ไม่ใช่เป้าหมาย
+ * → ยกไม่ทำให้โมเดลยาวขึ้น แต่กันไม่ให้คำตอบถูกตัดกลาง JSON)
+ */
+const MIN_SUMMARY_TOKENS = 8192;
 
 /** Structured place data extracted from the clip (Video Content Analyzer). */
 export interface PlaceData {
@@ -215,84 +226,112 @@ export async function generateSummary(
     };
   }
 
-  // Build comprehensive prompt containing transcript from Speech-to-Text,
-  // on-screen text, visual description, and anti-hallucination rules.
-  const promptText = buildSummaryPrompt(input);
-  const messageContent: any = input.videoUrl
-    ? [
-        { type: "text", text: promptText },
-        { type: "video", source: { type: "url", url: input.videoUrl, fps: 1 } },
-      ]
-    : promptText;
-
   /**
    * เรียกโมเดลหนึ่งครั้ง — คืนข้อความดิบ พร้อมบอกว่า "จบ" หรือ "ถูกตัด"
+   * ------------------------------------------------------------------
+   * เรียกผ่าน callAiText → สตรีมก่อนเสมอ เพราะ proxy ข้างหน้าปลายทาง
+   * ตัดการเชื่อมต่อเมื่อไม่มีข้อมูลไหลมา ~60 วินาที (nginx proxy_read_timeout)
+   * → 504 ตอนที่โมเดลยัง "คิด" อยู่ (เคยเห็น 61.6 วินาที แล้วขั้นตอน
+   * "สรุปโครงสร้าง (M3)" ล้มเหลวด้วย 504)
    */
-  const askModel = async (maxTokens: number) => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), config.ai.timeoutMs);
-    try {
-      const res = await fetch(`${config.ai.baseUrl}/v1/messages`, {
-        method: "POST",
-        signal: controller.signal,
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": config.ai.authToken,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          model: config.ai.model,
-          max_tokens: maxTokens,
-          temperature: 0.0,
-          system: SYSTEM_PROMPT,
-          messages: [{ role: "user", content: messageContent }],
-        }),
-      });
+  const askModel = async (
+    maxTokens: number,
+    opts: { compact?: boolean } = {},
+  ) => {
+    const compact = opts.compact === true;
+    // Build comprehensive prompt containing transcript from Speech-to-Text,
+    // on-screen text, visual description, and anti-hallucination rules.
+    // โหมดย่อใช้ schema ที่เล็กลงมาก (ตัด reasoning / scene_inventory ออก)
+    const promptText = buildSummaryPrompt({ ...input, compact });
+    const messageContent: any = input.videoUrl
+      ? [
+          { type: "text", text: promptText },
+          { type: "video", source: { type: "url", url: input.videoUrl, fps: 1 } },
+        ]
+      : promptText;
 
-      if (!res.ok) {
-        const errText = await res.text().catch(() => "");
-        throw new AiUpstreamError(res.status, errText);
-      }
+    const res = await callAiText({
+      url: `${config.ai.baseUrl}/v1/messages`,
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": config.ai.authToken,
+        "anthropic-version": "2023-06-01",
+      },
+      body: {
+        model: config.ai.model,
+        max_tokens: maxTokens,
+        temperature: 0.0,
+        system: SYSTEM_PROMPT,
+        messages: [{ role: "user", content: messageContent }],
+      },
+      timeoutMs: config.ai.timeoutMs,
+    });
 
-      const data: any = await res.json();
-
-      // Why the answer stopped — "max_tokens" means the reply was CUT OFF
-      // mid-JSON, which is what silently empties the whole summary.
-      const stopReason: string | null =
-        typeof data?.stop_reason === "string" ? data.stop_reason : null;
-      const usage: any = data?.usage ?? null;
-
-      // Anthropic Messages API: content is an array of { type: "text", text }
-      const rawText: string = Array.isArray(data?.content)
-        ? data.content.map((c: any) => c?.text ?? "").join("\n").trim()
-        : typeof data?.content === "string"
-        ? data.content
-        : "";
-
-      return {
-        rawText,
-        stopReason,
-        maxTokens,
-        outputTokens:
-          typeof usage?.output_tokens === "number" ? usage.output_tokens : null,
-        parsed: extractJson(rawText),
-        truncated: stopReason === "max_tokens" || stopReason === "length",
-      };
-    } finally {
-      clearTimeout(timer);
+    if (!res.ok) {
+      throw new AiUpstreamError(res.status, res.body);
     }
+
+    return {
+      rawText: res.text,
+      stopReason: res.stopReason,
+      maxTokens,
+      outputTokens: res.outputTokens,
+      parsed: extractJson(res.text),
+      truncated: res.stopReason === "max_tokens" || res.stopReason === "length",
+      streamed: res.streamed,
+    };
   };
 
+  /** เรียกโมเดลหนึ่งครั้ง (ถอยแบบไม่สตรีมอยู่ใน callAiText แล้ว) */
+  const callModel = async (
+    maxTokens: number,
+    opts: { compact?: boolean } = {},
+  ) => askModel(maxTokens, opts);
+
   try {
-    let attempt = await askModel(config.ai.maxTokens);
+    // งบขั้นต่ำกันคำตอบถูกตัดกลาง JSON (AI_MAX_TOKENS เคยเป็น 1024 บน Vercel)
+    const firstTokens = Math.max(config.ai.maxTokens, MIN_SUMMARY_TOKENS);
+    let attempt: Awaited<ReturnType<typeof callModel>>;
+
+    try {
+      attempt = await callModel(firstTokens);
+    } catch (err: any) {
+      // ปลายทางตอบ 5xx (504 = proxy ตัดสายกลางทาง) → ลองใหม่แบบ "ย่อ"
+      // (schema เล็กลงมาก → โมเดลตอบจบก่อนที่ proxy จะตัดการเชื่อมต่อ)
+      const canCompact =
+        err instanceof AiUpstreamError &&
+        err.upstreamStatus >= 500 &&
+        input.compact !== true;
+      if (!canCompact) throw err;
+
+      const tCompact = Date.now();
+      attempt = await callModel(firstTokens, { compact: true });
+      if (diag) {
+        diag.add({
+          id: "analyze-compact",
+          label: "สรุปโครงสร้าง (M3) — โหมดย่อ",
+          status: attempt.truncated ? "failed" : "ok",
+          ms: Date.now() - tCompact,
+          detail: `ปลายทางตอบ ${err.upstreamStatus} → ลองใหม่แบบย่อ (JSON เล็กลง)`,
+          data: {
+            upstreamStatus: err.upstreamStatus,
+            parsedOk: attempt.parsed !== null,
+            rawChars: attempt.rawText.length,
+          },
+        });
+      }
+    }
 
     // ถูกตัด = ข้อมูลตายเงียบ (place ว่าง → Google ค้นไม่ได้ → สรุดว่าง)
     // แก้ให้เอง: ลองใหม่ด้วยงบที่มากกว่า แทนที่จะปล่อยให้ผู้ใช้เจอสรุปเปล่า
     if (attempt.truncated) {
-      const firstTokens = attempt.maxTokens;
-      const retryTokens = Math.max(config.ai.maxTokens, RETRY_MAX_TOKENS);
+      const firstTokensUsed = attempt.maxTokens;
+      const retryTokens = Math.max(attempt.maxTokens, RETRY_MAX_TOKENS);
       const tRetry = Date.now();
-      const retry = await askModel(retryTokens);
+      // งบเท่าเดิม = ลองซ้ำก็ถูกตัดแบบเดิม → เปลี่ยนไปลองแบบย่อแทน
+      const retry = await callModel(retryTokens, {
+        compact: retryTokens === firstTokensUsed ? true : undefined,
+      });
       if (diag) {
         diag.add({
           id: "analyze-retry",
@@ -301,10 +340,10 @@ export async function generateSummary(
           ms: Date.now() - tRetry,
           detail: retry.truncated
             ? `ถูกตัดอีกครั้งที่ ${retryTokens} tokens — งบ token ไม่พอสำหรับสรุปนี้`
-            : `คำตอบแรกถูกตัดที่ ${firstTokens} tokens → ลองใหม่ด้วยงบ ${retryTokens} แล้วได้ JSON ที่อ่านได้`,
+            : `คำตอบแรกถูกตัดที่ ${firstTokensUsed} tokens → ลองใหม่${retryTokens === firstTokensUsed ? "แบบย่อ" : `ด้วยงบ ${retryTokens}`} แล้วได้ JSON ที่อ่านได้`,
           data: {
             stopReason: retry.stopReason,
-            firstTokens,
+            firstTokens: firstTokensUsed,
             maxTokens: retryTokens,
             parsedOk: retry.parsed !== null,
           },
@@ -336,6 +375,7 @@ export async function generateSummary(
           maxTokens: usedTokens,
           parsedOk,
           rawChars: rawText.length,
+          streamed: attempt.streamed,
           hasPlaceName: typeof parsed?.place_name === "string" && !!parsed.place_name,
         },
       });
@@ -602,40 +642,37 @@ export async function generateNarration(
     return noteFallback("ยังไม่ได้ตั้งค่า AI");
   }
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.ai.timeoutMs);
   try {
-    const res = await fetch(`${config.ai.baseUrl}/v1/messages`, {
-      method: "POST",
-      signal: controller.signal,
+    const requestBody = {
+      model: config.ai.model,
+      // Paragraph 1 is written at maximum detail (every object described by
+      // material / count / condition), so the old 1024 budget truncated it
+      // mid-sentence.
+      max_tokens: 4096,
+      temperature: 0.6,
+      system: SUMMARY_NARRATION_PROMPT,
+      messages: [{ role: "user", content: buildNarrationPrompt(analysisJson) }],
+    };
+
+    // สตรีมก่อนเสมอ (กัน proxy ตัดสายตอนโมเดลคิดนาน) — ถอยเป็นแบบ
+    // ไม่สตรีมอัตโนมัติอยู่ใน callAiText
+    const r = await callAiText({
+      url: `${config.ai.baseUrl}/v1/messages`,
       headers: {
         "Content-Type": "application/json",
         "x-api-key": config.ai.authToken,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify({
-        model: config.ai.model,
-        // Paragraph 1 is written at maximum detail (every object described by
-        // material / count / condition), so the old 1024 budget truncated it
-        // mid-sentence.
-        max_tokens: 4096,
-        temperature: 0.6,
-        system: SUMMARY_NARRATION_PROMPT,
-        messages: [{ role: "user", content: buildNarrationPrompt(analysisJson) }],
-      }),
+      body: requestBody,
+      timeoutMs: config.ai.timeoutMs,
     });
 
-    if (!res.ok) {
-      console.warn("[generateNarration] AI returned status", res.status, "→ fallback");
-      return noteFallback(`AI ตอบกลับสถานะ ${res.status}`);
+    if (!r.ok) {
+      console.warn("[generateNarration] AI returned status", r.status, "→ fallback");
+      return noteFallback(`AI ตอบกลับสถานะ ${r.status}`);
     }
 
-    const data: any = await res.json();
-    const rawText: string = Array.isArray(data?.content)
-      ? data.content.map((c: any) => c?.text ?? "").join("\n").trim()
-      : typeof data?.content === "string"
-      ? data.content.trim()
-      : "";
+    const rawText = r.text;
 
     // Guards:
     // 1. If AI accidentally returned JSON
@@ -671,7 +708,5 @@ export async function generateNarration(
   } catch (err) {
     console.warn("[generateNarration] error:", err);
     return noteFallback(errorDetail(err));
-  } finally {
-    clearTimeout(timer);
   }
 }

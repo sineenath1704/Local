@@ -58,6 +58,18 @@ export const PLACE_CATEGORIES = [
 /** ประเภทสถานที่หนึ่งค่า — ได้จากรายการคำคงทีข้างบนเท่านั้น */
 export type PlaceCategory = (typeof PLACE_CATEGORIES)[number];
 
+/**
+ * ระดับที่สถานที่หนึ่งจับคู่กับชุมชนได้
+ * -------------------------------------------------------------
+ * PLAN_PLACE_MATCHING.md §2.2.2 — การกรอง 3 ชั้น
+ *   village    = อยู่ตำบลเดียวกัน และชื่อหมู่บ้านปรากฏในที่อยู่
+ *   subdistrict = อยู่ตำบลเดียวกัน แต่ยังไม่เจอชื่อหมู่บ้าน
+ *   district   = อยู่อำเภอเดียวกัน (หรือ parse ตำบลไม่ได้ → ให้ผู้ใช้ตัดสิน)
+ *
+ * ค่านี้เป็น "คำเดา" ของระบบ ไม่ใช่การยืนยัน — ผู้ใช้ต้องกดยืนยันเสมอ
+ */
+export type CommunityMatchLevel = "village" | "subdistrict" | "district";
+
 export interface PlaceCandidate {
   name: string;
   address: string;
@@ -81,4 +93,9 @@ export interface PlaceCandidate {
   primaryTypeDisplayName?: string | null;
   /** 0-4, Google's guess at price band. Context only — never the real price. */
   priceLevel?: number | null;
+  /**
+   * ระดับที่สถานที่นี้อยู่ในชุมชน/ตำบล/อำเภอของ scope ที่ส่งมา
+   * มีเฉพาะตอนที่คำขอมี scope — ไม่มี scope = ยังไม่รู้ว่าอยู่ที่ไหน
+   */
+  matchLevel?: CommunityMatchLevel | null;
 }

@@ -1,4 +1,5 @@
 import { API_BASE_URL, API_TIMEOUT_MS } from "./apiConfig";
+import type { MatchLevel } from "./placeMatchService";
 
 /**
  * Google Places verification (via our backend). Called only when offline +
@@ -28,6 +29,11 @@ export interface PlaceCandidate {
   primaryTypeDisplayName?: string | null;
   /** 0-4, Google's guess at price band. Context only — never the real price. */
   priceLevel?: number | null;
+  /**
+   * ระดับที่สถานที่นี้อยู่ในชุมชน/ตำบล/อำเภอของ scope ที่ส่งมา
+   * มีเฉพาะตอนที่คำขอมี scope — ไม่มี scope = ยังไม่รู้ว่าอยู่ที่ไหน
+   */
+  matchLevel?: MatchLevel | null;
 }
 
 export interface VerifyPlacesResult {
@@ -46,6 +52,13 @@ export async function verifyPlaceOnGoogle(input: {
   subdistrict?: string | null;
   district?: string | null;
   province?: string | null;
+  /**
+   * true = กรองจริงตามขอบเขต (ไม่เหลือก็คืนรายการว่าง)
+   * ใช้ตอน "ค้นใหม่ในชุมชน" — default false เพื่อไม่ให้ผู้เรียกเดิมได้ผลเปลี่ยน
+   */
+  strict?: boolean;
+  /** ระดับที่กรอง — ตำบล (ค่าเริ่มต้น) หรืออำเภอ (ปุ่ม "ค้นกว้างขึ้น") */
+  scopeLevel?: "subdistrict" | "district";
 }): Promise<VerifyPlacesResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS * 3);

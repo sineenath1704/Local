@@ -18,6 +18,7 @@
 
 import { config, isAiConfigured } from "./config";
 import { AiUpstreamError } from "./aiErrors";
+import { callAiText } from "./aiStream";
 import { extractJson, type AiSummaryResult, type PlaceData } from "./aiClient";
 import { DiagLog, errorDetail } from "./summaryDiag";
 import {
@@ -123,42 +124,30 @@ function acceptList(original: string[] | undefined, corrected: unknown): string[
 async function callModel(userPrompt: string, maxTokens: number): Promise<string | null> {
   if (!isAiConfigured() || !config.ai.proofreadEnabled) return null;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.ai.timeoutMs);
-  try {
-    const res = await fetch(`${config.ai.baseUrl}/v1/messages`, {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": config.ai.authToken,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: config.ai.proofreadModel || config.ai.model,
-        max_tokens: maxTokens,
-        // Copy task — keep it as close to the source wording as possible.
-        temperature: 0,
-        system: PROOFREAD_SYSTEM_PROMPT,
-        messages: [{ role: "user", content: userPrompt }],
-      }),
-    });
+  // สตรีมก่อนเสมอ — คำตอบแก้สะกดคำบรยายยาวมาก (งบ 8192) ถ้าไม่มีข้อมูล
+  // ไหลมาเกิน ~60 วินาที proxy ข้างหน้าปลายทางจะตัดสาย (504)
+  const res = await callAiText({
+    url: `${config.ai.baseUrl}/v1/messages`,
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": config.ai.authToken,
+      "anthropic-version": "2023-06-01",
+    },
+    body: {
+      model: config.ai.proofreadModel || config.ai.model,
+      max_tokens: maxTokens,
+      // Copy task — keep it as close to the source wording as possible.
+      temperature: 0,
+      system: PROOFREAD_SYSTEM_PROMPT,
+      messages: [{ role: "user", content: userPrompt }],
+    },
+    timeoutMs: config.ai.timeoutMs,
+  });
 
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      throw new AiUpstreamError(res.status, errText);
-    }
-
-    const data: any = await res.json();
-    const rawText: string = Array.isArray(data?.content)
-      ? data.content.map((c: any) => c?.text ?? "").join("\n").trim()
-      : typeof data?.content === "string"
-      ? data.content.trim()
-      : "";
-    return rawText || null;
-  } finally {
-    clearTimeout(timer);
+  if (!res.ok) {
+    throw new AiUpstreamError(res.status, res.body);
   }
+  return res.text || null;
 }
 
 // ============================================================

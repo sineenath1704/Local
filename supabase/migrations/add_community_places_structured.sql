@@ -2,6 +2,11 @@
 --
 -- Structured business data for AI ground truth.
 --
+-- ⚠️ ลำดับที่ต้องรัน: `add_place_matching.sql` **ก่อน** ไฟล์นี้
+--    (ฟังก์ชันนี้อ้างถึงคอลัมน์ community_places.community_id / recorded_by
+--     ที่ถูกเพิ่มใน migration แรก — ถ้ายังไม่มีคอลัมน์ `create or replace` จะ error
+--     และฟังก์ชันเดิมจะยังทำงานอยู่)
+--
 -- Why: `opening_hours` and `price_info` are free-text blobs. The AI reads
 -- them verbatim, so a host who wrote "เช็คอิน 14:00 / เช็คเอาท์ 11:00" or
 -- "วันธรรมดา 500 บาท/ คืน | วันหยุด 750 บาท/ คืน" has to be re-parsed by the
@@ -68,10 +73,31 @@ declare
   v_key text;
   v_value text;
   v_place_id text;
+  v_community_id uuid;
+  v_province text;
+  v_district text;
+  v_subdistrict text;
+  v_village text;
 begin
   if coalesce(auth.role(), '') <> 'service_role' then
     raise exception 'forbidden: service_role only'
       using errcode = '42501';
+  end if;
+
+  -- ── กันดัก: ฟังก์ชันนี้อ้างถึงคอลัมน์ของ add_place_matching.sql ──
+  --
+  -- ถ้ารันไฟล์นี้ก่อน add_place_matching.sql ฟังก์ชันจะถูกสร้างได้
+  -- (plpgsql ไม่ตรวจคอลัมน์ตอน create) แล้วพังตอนใช้งานจริง
+  -- → ตรวจก่อนแล้วบอกให้ชัดว่าต้องรัน migration ไหนก่อน
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'community_places'
+      and column_name = 'community_id'
+  ) then
+    raise exception 'migration required: run add_place_matching.sql before this function'
+      using errcode = '3F000';
   end if;
 
   if p_user_id is null then
@@ -101,6 +127,18 @@ begin
         'update public.users set %I = nullif($1, '''')::double precision where id = $2',
         v_key
       ) using v_value, p_user_id;
+    elsif v_key = 'community_id' then
+      -- uuid → ต้อง cast เอง (ค่าว่าง = ไม่ผูกชุมชน)
+      execute format(
+        'update public.users set community_id = nullif($1, '''')::uuid where id = $2',
+        v_key
+      ) using v_value, p_user_id;
+    elsif v_key = 'business_place_id' then
+      -- Google Place ID — ค่าว่าง = ยังไม่ได้ผูกกับสถานที่ของ Google
+      execute format(
+        'update public.users set business_place_id = nullif($1, '''') where id = $2',
+        v_key
+      ) using v_value, p_user_id;
     elsif v_key in (
       'business_place_name', 'business_price_info', 'business_opening_hours',
       'business_phone', 'business_address', 'business_subdistrict',
@@ -126,7 +164,36 @@ begin
     raise exception 'missing place_id' using errcode = '22023';
   end if;
 
-  if coalesce(btrim(p_place_payload->>'province'), '') = '' then
+  -- --- 3b-1) ชุมชนของสถานที่ (D4/D13) -----------------------------
+  --
+  -- ชุมชนคือแหล่งของชื่อ hierarchy (D18) — client ไม่ต้องส่ง
+  -- province/district/subdistrict/village มาอีกแล้ว แต่ยังรับ payload เป็น
+  -- fallback ไว้ เผื่อ client รุ่นเก่าที่ยังไม่ส่ง community_id
+  v_community_id := nullif(btrim(p_place_payload->>'community_id'), '')::uuid;
+
+  select c.name, c.province, c.district, c.subdistrict
+    into v_village, v_province, v_district, v_subdistrict
+  from public.communities c
+  where c.id = v_community_id;
+
+  v_province := coalesce(
+    nullif(btrim(v_province), ''),
+    nullif(btrim(p_place_payload->>'province'), '')
+  );
+  v_district := coalesce(
+    nullif(btrim(v_district), ''),
+    nullif(btrim(p_place_payload->>'district'), '')
+  );
+  v_subdistrict := coalesce(
+    nullif(btrim(v_subdistrict), ''),
+    nullif(btrim(p_place_payload->>'subdistrict'), '')
+  );
+  v_village := coalesce(
+    nullif(btrim(v_village), ''),
+    nullif(btrim(p_place_payload->>'village'), '')
+  );
+
+  if coalesce(btrim(v_province), '') = '' then
     raise exception 'missing province' using errcode = '22023';
   end if;
 
@@ -140,15 +207,15 @@ begin
     place_id, place_name, formatted_address, province, district, subdistrict,
     village, latitude, longitude, google_maps_url, phone, opening_hours,
     price_info, rating, user_ratings_total, website, source, owner_id,
-    business_hours, business_pricing
+    recorded_by, community_id, business_hours, business_pricing
   ) values (
     v_place_id,
     btrim(p_place_payload->>'place_name'),
     nullif(p_place_payload->>'formatted_address', ''),
-    btrim(p_place_payload->>'province'),
-    nullif(p_place_payload->>'district', ''),
-    nullif(p_place_payload->>'subdistrict', ''),
-    nullif(p_place_payload->>'village', ''),
+    v_province,
+    v_district,
+    v_subdistrict,
+    v_village,
     nullif(p_place_payload->>'latitude', '')::double precision,
     nullif(p_place_payload->>'longitude', '')::double precision,
     nullif(p_place_payload->>'google_maps_url', ''),
@@ -160,6 +227,8 @@ begin
     nullif(p_place_payload->>'website', ''),
     coalesce(nullif(p_place_payload->>'source', ''), 'host_verified'),
     p_user_id,
+    p_user_id,
+    v_community_id,
     -- nullif(..., 'null'::jsonb) turns a JSON null from the client into a
     -- real SQL NULL, so "no structured data" stays NULL rather than a
     -- non-null jsonb holding the value null.
@@ -167,16 +236,23 @@ begin
     nullif(p_place_payload->'business_pricing', 'null'::jsonb)
   )
   on conflict (place_id) do update set
-    -- owner_id is deliberately not reassigned: a host who edits their listing
-    -- must not be able to take over a row that belongs to someone else, and
-    -- the ON CONFLICT target isn't scoped to owner. updated_at is left to
-    -- trg_community_places_updated.
+    -- owner_id เดิม "ไม่ถูกย้าย" — ผ่อนเป็น "ย้ายได้เฉพาะตอนยังไม่มีเจ้าของ"
+    -- (D14): แถวที่ยังไม่มี owner = แถวที่ host เพิ่งเข้ามายึด → owner เดิมคือ
+    -- คนที่ยืนยันเป็นเจ้าของก่อนห้ามถูกย้าย (D14 เคยเป็นแบบนี้)
+    owner_id = case
+      when community_places.owner_id is null then excluded.owner_id
+      else community_places.owner_id
+    end,
+    -- คนที่บันทึกครั้งแรกเท่านั้นที่ถูกเก็บไว้
+    recorded_by = coalesce(community_places.recorded_by, excluded.recorded_by),
+    -- ชุมชนจาก client ชนะเดิม · ถ้าไม่ส่งมาให้คงเดิมไว้
+    community_id = coalesce(excluded.community_id, community_places.community_id),
     place_name           = excluded.place_name,
     formatted_address    = excluded.formatted_address,
     province             = excluded.province,
-    district             = excluded.district,
-    subdistrict          = excluded.subdistrict,
-    village              = excluded.village,
+    district             = coalesce(excluded.district, community_places.district),
+    subdistrict          = coalesce(excluded.subdistrict, community_places.subdistrict),
+    village              = coalesce(excluded.village, community_places.village),
     latitude             = excluded.latitude,
     longitude            = excluded.longitude,
     google_maps_url      = excluded.google_maps_url,

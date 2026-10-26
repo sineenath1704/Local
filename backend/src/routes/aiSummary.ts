@@ -8,7 +8,7 @@ import {
 } from "../thaiProofread";
 import { getSummary, saveSummary, hasSummary } from "../summaryStore";
 import { VideoAnalysisInput } from "../prompt";
-import { enrichWithGooglePlaces } from "./places";
+import { enrichWithGooglePlaces, type LocationScope } from "./places";
 import { transcribeVideo, type TranscriptResult } from "../geminiTranscribe";
 import { DiagLog, errorDetail } from "../summaryDiag";
 import { errorBody } from "../middleware/errors";
@@ -28,6 +28,39 @@ function readInput(body: any): VideoAnalysisInput {
     location: body?.location,
     videoUrl: body?.videoUrl,
   };
+}
+
+/**
+ * ขอบเขตทางภูมิศาสตร์ของการค้นสถานที่ — มาจาก `body.locationScope`
+ * -------------------------------------------------------------
+ * PLAN_PLACE_MATCHING.md §5.3
+ *
+ * ทำไมต้องมี
+ *   โหมด `community_spot` ส่ง `uploaderType: "tourist"` และ `location: undefined`
+ *   → backend ไม่รู้ว่าสถานที่อยู่ชุมชนไหน → ค้น Google ได้แค่ระดับประเทศ
+ *   client จึงต้องบอก "ชุมชนนี้" มาด้วย (หมู่บ้าน / ตำบล / อำเภอ / จังหวัด)
+ *   แล้ว backend จะกรอง candidate ให้เหลือแต่ในขอบเขตนั้น (§5.2)
+ *
+ * ทุกช่องเป็น optional — ขาดไปหนึ่งช่องก็ยังค้นได้ แค่กรองแคบลง
+ */
+function readScope(body: any): LocationScope | undefined {
+  const raw = body?.locationScope;
+  if (!raw || typeof raw !== "object") return undefined;
+  const pick = (v: unknown): string | null => {
+    const s = typeof v === "string" ? v.trim() : "";
+    return s ? s : null;
+  };
+  const scope: LocationScope = {
+    community: pick(raw.community),
+    subdistrict: pick(raw.subdistrict),
+    district: pick(raw.district),
+    province: pick(raw.province),
+  };
+  // ไม่มีสักช่องที่ใช้ได้ → ไม่ต้องส่ง scope ไป (พฤติกรรมเดิม)
+  if (!scope.community && !scope.subdistrict && !scope.district && !scope.province) {
+    return undefined;
+  }
+  return scope;
 }
 
 /**
@@ -113,12 +146,16 @@ router.post("/preview", async (req: Request, res: Response) => {
       : cleanSummary;
 
     // Step 3: Google Places returns candidate places for the user to tick.
-    const enriched = await enrichWithGooglePlaces(summaryWithCtx, diag).catch(
-      (err: any) => {
-        diag.problem(`ค้น Google Places ล้มเหลว: ${errorDetail(err)}`);
-        return cleanSummary;
-      }
-    );
+    // The scope (community / tambol / amphur) comes from the client — without
+    // it we can only search the whole country. PLAN §5.3
+    const enriched = await enrichWithGooglePlaces(
+      summaryWithCtx,
+      diag,
+      readScope(req.body)
+    ).catch((err: any) => {
+      diag.problem(`ค้น Google Places ล้มเหลว: ${errorDetail(err)}`);
+      return cleanSummary;
+    });
 
     // Step 4: Stage 2 Storytelling Narration
     const narrationText = await generateNarration(enriched, diag).catch(() => enriched.text);
@@ -184,12 +221,14 @@ router.post("/:postId/generate", async (req: Request, res: Response) => {
     const summaryWithCtx = input.transcript
       ? { ...cleanSummary, _transcript: input.transcript }
       : cleanSummary;
-    const enriched = await enrichWithGooglePlaces(summaryWithCtx, diag).catch(
-      (err: any) => {
-        diag.problem(`ค้น Google Places ล้มเหลว: ${errorDetail(err)}`);
-        return cleanSummary;
-      }
-    );
+    const enriched = await enrichWithGooglePlaces(
+      summaryWithCtx,
+      diag,
+      readScope(req.body)
+    ).catch((err: any) => {
+      diag.problem(`ค้น Google Places ล้มเหลว: ${errorDetail(err)}`);
+      return cleanSummary;
+    });
     const narrationText = await generateNarration(enriched, diag).catch(() => enriched.text);
     const cleanNarration = await proofreadNarration(
       narrationText,

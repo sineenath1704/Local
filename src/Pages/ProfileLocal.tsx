@@ -69,6 +69,15 @@ import {
   type BizType,
 } from "../lib/businessProfile";
 import { upsertMyPlace, syntheticPlaceId, mapsUrlFor } from "../services/hostPlaceService";
+import {
+  communitySourceLabel,
+  fetchCommunityPlaces,
+  findCommunityById,
+  findCommunityByOtopVillage,
+  type CommunityPlaceRow,
+  type CommunityRow,
+} from "../services/communityService";
+import { verifyOtop, type OtopProfile } from "../services/otopService";
 import EditProfileSheet from "../components/EditProfileSheet";
 import SettingsSheet from "../components/SettingsSheet";
 import MyVideoViewer from "../components/MyVideoViewer";
@@ -76,19 +85,33 @@ import EditableValueRow from "../components/EditableValueRow";
 import DayPickerSheet from "../components/DayPickerSheet";
 import TimeRangeSheet from "../components/TimeRangeSheet";
 
-type ProfileTabKey = "videos" | "saved" | "liked";
+type ProfileTabKey = "videos" | "saved" | "liked" | "community";
 
 interface ProfileLocalProps {
   onOpenFolder?: (folderId: string) => void;
   onFullScreenChange?: (full: boolean) => void;
+  /**
+   * เปิด flow "เป็นคนแรกที่เพิ่มสถานที่ในชุมชน" (PLAN §7.1 · empty state)
+   * — ส่งพื้นที่ของชุมชนไปให้หน้าเพิ่มโพสต์เติมให้
+   */
+  onAddFirstPlace?: (area: {
+    community?: string | null;
+    subdistrict?: string | null;
+    district?: string | null;
+    province?: string | null;
+  }) => void;
 }
 
-export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: ProfileLocalProps) {
+export default function ProfileLocal({
+  onOpenFolder,
+  onFullScreenChange,
+  onAddFirstPlace,
+}: ProfileLocalProps) {
   const insets = useSafeAreaInsets();
   const { width: screenWidth } = useWindowDimensions();
 
   const { name, username, bio, avatar, location } = useMyProfile();
-  const { user, refreshUser } = useAuth();
+  const { user, refreshUser, claimHostRole } = useAuth();
   const { followingCount, likedVideoIds, savedVideoIds, folders, createFolder } = useInteractions();
 
   const isOtopHost = user?.role === "host" && user?.otop_verified;
@@ -106,6 +129,14 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
   const [viewerVideoId, setViewerVideoId] = useState<string | null>(null);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
+
+  // ── D16 — ทางกลับมา: ยืนยันตัวตนเป็น host จากหน้าโปรไฟล์ ──
+  // คนที่สมัครเป็นนักท่องเที่ยวแต่เป็นเจ้าของชุมชนจริง ต้องเลื่อนบทบาท
+  // ได้เอง โดยยืนยันเลขทะเบียน OTOP (D9 บังคับให้ host ต้องมี OTOP)
+  const [showClaimHost, setShowClaimHost] = useState(false);
+  const [claimVillageId, setClaimVillageId] = useState("");
+  const [claimChecking, setClaimChecking] = useState(false);
+  const [claimProfile, setClaimProfile] = useState<OtopProfile | null>(null);
 
   // Business Profile Edit state (Smart Ergonomics)
   const [bizType, setBizType] = useState<BizType>("homestay");
@@ -184,6 +215,32 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
   const [bizGpsCandidates, setBizGpsCandidates] = useState<PlaceCandidate[]>([]);
   const [bizGpsLoading, setBizGpsLoading] = useState(false);
   const [bizConfirmedPlace, setBizConfirmedPlace] = useState<PlaceCandidate | null>(null);
+  /**
+   * Google Place ID ของหมุดที่ host เลือก — เก็บแยกจาก `bizConfirmedPlace`
+   * เพราะหมุด fallback (ไม่ได้มาจาก Google) มี placeId เป็น id สังเคราะห์
+   * ซึ่ง **ห้าม** เขียนลง `users.business_place_id` (D2 เทียบด้วย Google id เท่านั้น)
+   */
+  const [bizGooglePlaceId, setBizGooglePlaceId] = useState<string | null>(null);
+
+  // ── ชุมชนของฉัน (PLAN §7.1) ────────────────────────────────────────
+  // ชุมชนมาจาก `users.community_id` ก่อน — ถ้ายังไม่มี (migration ยังไม่รัน
+  // หรือ host เก่าที่ยังไม่ได้ผูก) → หาจากเลขทะเบียน OTOP ที่ยืนยันไว้
+  const [myCommunity, setMyCommunity] = useState<CommunityRow | null>(null);
+  const [communityPlaces, setCommunityPlaces] = useState<CommunityPlaceRow[]>([]);
+  const [communityPartial, setCommunityPartial] = useState(false);
+  const [communityShown, setCommunityShown] = useState(20);
+
+  // แท็บ "ชุมชน" มีได้เฉพาะคนที่มีชุมชนจริง — tourist ที่ยังไม่มีชุมชน
+  // ไม่ต้องเห็นแท็บเปล่า (PLAN §2.2.4: ห้ามเป็นหน้าว่าง)
+  const showCommunityTab = user?.role === "host" || Boolean(user?.community_id);
+
+  /** พื้นที่ของชุมชนที่แสดงในหัวแท็บ — ถ้าไม่มีในทะเบียน ใช้ข้อมูล OTOP ของ host */
+  const communityArea = {
+    community: myCommunity?.name ?? user?.otop_village ?? null,
+    subdistrict: myCommunity?.subdistrict ?? user?.otop_tambol ?? null,
+    district: myCommunity?.district ?? user?.otop_amphur ?? null,
+    province: myCommunity?.province ?? user?.otop_province ?? null,
+  };
 
   const handleSelectBizType = (type: BizType) => {
     setBizType(type);
@@ -283,7 +340,10 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
       const cand: PlaceCandidate = {
         name: user.business_place_name,
         address: user.business_address || "",
-        placeId: "",
+        // กุญแจของสถานที่ = Google id ที่ host เคยเลือกไว้
+        // (ถ้าใช้ id สังเคราะห์แทน การบันทึกครั้งต่อไปจะกลายเป็นแถวใหม่
+        //  แล้วแถวเดิมที่ AI ตอบอยู่จะกลายเป็นขยะ)
+        placeId: user.business_place_id || "",
         latitude: user.business_lat,
         longitude: user.business_lng,
         province: user.business_province || user.otop_province || null,
@@ -292,6 +352,7 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
         types: [],
       };
       setBizConfirmedPlace(cand);
+      setBizGooglePlaceId(user.business_place_id || null);
       const detected = detectBusinessProfile([], cand.name);
       setBizType(detected.bizType);
       const wdParsed = parseDayGroupFromLabel(detected.weekdayLabel);
@@ -307,6 +368,7 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
 
   const selectBizCandidate = (c: PlaceCandidate) => {
     setBizConfirmedPlace(c);
+    setBizGooglePlaceId(c.placeId || null);
     setBizPlaceName(c.name);
     if (c.phone) setBizPhone(c.phone);
 
@@ -334,6 +396,58 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
     setBizGpsCandidates([]);
   };
 
+  /**
+   * D16 — ยืนยันตัวตนเป็น host จากหน้าโปรไฟล์
+   *
+   * ขั้นที่ 1: กรอกเลขทะเบียน → เช็กกับทะเบียน CDD
+   * ขั้นที่ 2: เจอแล้ว → ผูกชุมชน (ถ้ามีในทะเบียน) → เลื่อน role = host
+   */
+  const checkClaimVillage = async () => {
+    const id = claimVillageId.trim();
+    if (!id) {
+      Alert.alert("กรอกเลขทะเบียน", "กรุณากรอกเลขทะเบียน OTOP นวัตวิถี");
+      return;
+    }
+    setClaimChecking(true);
+    const r = await verifyOtop(id);
+    setClaimChecking(false);
+    if (!r.configured) {
+      Alert.alert("ยังพร้อมใช้งานไม่ได้", "ระบบยืนยัน OTOP ยังไม่ได้ตั้งค่าบนเซิร์ฟเวอร์");
+      return;
+    }
+    if (!r.verified || !r.profile) {
+      setClaimProfile(null);
+      Alert.alert("ไม่พบทะเบียน", r.error ?? "ไม่พบเลขทะเบียนนี้ในระบบ OTOP กรุณาตรวจสอบอีกครั้ง");
+      return;
+    }
+    setClaimProfile(r.profile);
+  };
+
+  const confirmClaimHost = async () => {
+    if (!claimProfile) return;
+    setClaimChecking(true);
+    const community = await findCommunityByOtopVillage(claimProfile.idNumber);
+    const { error } = await claimHostRole({
+      otop: claimProfile,
+      communityId: community?.id ?? null,
+    });
+    setClaimChecking(false);
+    if (error) {
+      Alert.alert("ยืนยันไม่สำเร็จ", error);
+      return;
+    }
+    await refreshUser();
+    setShowClaimHost(false);
+    setClaimProfile(null);
+    setClaimVillageId("");
+    Alert.alert(
+      "ยืนยันตัวตนเป็น host แล้ว",
+      community
+        ? `ผูกกับชุมชน "${community.name}" เรียบร้อยแล้ว — แก้ไขข้อมูลร้านได้จากปุ่ม "แก้ไขร้าน"`
+        : "ยืนยันเรียบร้อยแล้ว — แก้ไขข้อมูลร้านได้จากปุ่ม \"แก้ไขร้าน\""
+    );
+  };
+
   const applyBizOtopFallback = () => {
     const otopFallback: PlaceCandidate = {
       name: bizPlaceName.trim(),
@@ -345,7 +459,7 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
       ]
         .filter(Boolean)
         .join(" "),
-      placeId: `otop-fallback-${user?.otop_village_id || user?.id || Date.now()}`,
+      placeId: user?.id ? syntheticPlaceId(user.id) : "",
       latitude: user?.business_lat ?? 0,
       longitude: user?.business_lng ?? 0,
       province: user?.otop_province ?? null,
@@ -354,6 +468,8 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
       types: ["point_of_interest"],
     };
     setBizConfirmedPlace(otopFallback);
+    // หมุดนี้ไม่ได้มาจาก Google → ยังไม่มี Google id ให้ผูก (D2)
+    setBizGooglePlaceId(null);
     setBizGpsCandidates([]);
   };
 
@@ -445,6 +561,12 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
     }
 
     try {
+      // ชุมชนของ host — ผูกด้วยเลขทะเบียน OTOP (CDD Village_ID) ซึ่งคือ
+      // `communities.otop_village_id` · ถ้ายังไม่มีในทะเบียน → null (ยังไม่ผูก)
+      const community = user?.community_id
+        ? { id: user.community_id }
+        : await findCommunityByOtopVillage(user?.otop_village_id);
+
       // One transaction covers the profile AND the community_places row the AI
       // reads. Previously these were two round-trips and the second was
       // fire-and-forget, so a rejected write left the host looking saved while
@@ -463,6 +585,10 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
           businessSubdistrict: bizConfirmedPlace?.subdistrict ?? user?.business_subdistrict ?? user?.otop_tambol ?? null,
           businessDistrict: bizConfirmedPlace?.district ?? user?.business_district ?? user?.otop_amphur ?? null,
           businessProvince: bizConfirmedPlace?.province ?? user?.business_province ?? user?.otop_province ?? null,
+          // กุญแจที่ผูก host กับสถานที่ของตัวเอง (D2) — null = ยังไม่มีหมุดจาก Google
+          businessPlaceId: bizGooglePlaceId,
+          // ชุมชนที่ host สังกัด
+          communityId: community?.id ?? null,
         },
         // Skipped when the host hasn't confirmed a location on the map — their
         // profile still saves, and they can add the place later.
@@ -488,6 +614,8 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
             rating: bizConfirmedPlace.rating ?? null,
             userRatingsTotal: bizConfirmedPlace.userRatingCount ?? null,
             website: bizConfirmedPlace.website ?? null,
+            // ชุมชนที่สถานที่นี้อยู่ — เป็นที่มาของชื่อ hierarchy (D18)
+            communityId: community?.id ?? null,
             // Machine-readable twins of the two strings above — this is what
             // lets the AI answer "เปิดวันอาทิตย์ไหม" without re-parsing prose.
             businessHours: composeHoursJson({
@@ -561,6 +689,32 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [looseKey]);
+
+  // ── โหลดชุมชน + สถานที่ในชุมชน (PLAN §7.1) ─────────────────────────
+  // ชุมชนมาจาก `users.community_id` ก่อน ถ้าไม่มีค่อยหาจากเลขทะเบียน OTOP
+  // (ชื่อหมู่บ้านซ้ำกันเยอะ — เลขทะเบียนคือตัวระบุที่เชื่อถือได้)
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      const byId = await findCommunityById(user?.community_id);
+      const row = byId ?? (await findCommunityByOtopVillage(user?.otop_village_id));
+      if (!active) return;
+      setMyCommunity(row);
+      if (!row?.id) {
+        setCommunityPlaces([]);
+        setCommunityPartial(false);
+        return;
+      }
+      const { places, partial } = await fetchCommunityPlaces(row.id);
+      if (!active) return;
+      setCommunityPlaces(places);
+      setCommunityPartial(partial);
+    };
+    void load();
+    return () => {
+      active = false;
+    };
+  }, [user?.id, user?.community_id, user?.otop_village_id]);
 
   const gridItemWidth = (screenWidth - 4) / 3;
 
@@ -668,7 +822,7 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
               </View>
             </View>
 
-            {isOtopHost && (
+            {isOtopHost ? (
               <View style={{ flexDirection: "row", gap: 8 }}>
                 <TouchableOpacity
                   onPress={() => setShowInfoModal(true)}
@@ -687,6 +841,19 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
                   <Text className="text-white text-xs font-bold tracking-wide ml-1">แก้ไขร้าน</Text>
                 </TouchableOpacity>
               </View>
+            ) : (
+              /* D16 — ทางกลับมา: ผู้ใช้ที่สมัครเป็นนักท่องเที่ยวแต่เป็นเจ้าของ
+                 ชุมชนจริง ยืนยันเลขทะเบียน OTOP เพื่อเลื่อนบทบาทเองได้ */
+              <TouchableOpacity
+                onPress={() => setShowClaimHost(true)}
+                activeOpacity={0.8}
+                className="bg-[#D47A3A] px-3.5 py-2.5 rounded-xl flex-row items-center justify-center shadow-sm self-start"
+              >
+                <ShieldCheckIcon size={14} color="#FFFFFF" />
+                <Text className="text-white text-xs font-bold tracking-wide ml-1">
+                  ยืนยันตัวตนเป็น host
+                </Text>
+              </TouchableOpacity>
             )}
           </View>
 
@@ -716,6 +883,17 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
               <HeartSolid size={14} color={activeTab === "liked" ? "#EF4444" : "#6B7280"} />
               <Text className={`ml-1.5 text-xs ${activeTab === "liked" ? "font-bold text-black" : "font-medium text-gray-500"}`}>วิดีโอที่ถูกใจ</Text>
             </TouchableOpacity>
+            {/* แท็บ "ชุมชน" — มีเฉพาะคนที่มีชุมชนจริง (host หรือผู้ที่ผูกชุมชนไว้) */}
+            {showCommunityTab && (
+              <TouchableOpacity
+                onPress={() => setActiveTab("community")}
+                activeOpacity={0.7}
+                className={`flex-1 py-3 items-center flex-row justify-center border-b-2 ${activeTab === "community" ? "border-black" : "border-transparent"}`}
+              >
+                <MapPinSolid size={14} color={activeTab === "community" ? "#2D6A4F" : "#6B7280"} />
+                <Text className={`ml-1.5 text-xs ${activeTab === "community" ? "font-bold text-black" : "font-medium text-gray-500"}`}>ชุมชน</Text>
+              </TouchableOpacity>
+            )}
           </View>
 
           {/* 6a. VIDEOS tab — owned videos (tap → feed-style viewer w/ edit & delete) */}
@@ -853,6 +1031,135 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
               )}
             </View>
           )}
+
+          {/* 6d. COMMUNITY tab — สถานที่ในชุมชนของฉัน (PLAN §7.1 · D20/D21) */}
+          {activeTab === "community" && (
+            <View className="px-4 pt-4">
+              {/* หัวชุมชน */}
+              <View className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3.5 mb-3">
+                <Text className="text-emerald-900 font-black text-[15px]">
+                  🏘️ {communityArea.community || "ชุมชนของฉัน"}
+                </Text>
+                <Text className="text-emerald-700 text-[11px] mt-0.5">
+                  {[
+                    communityArea.subdistrict && `ต.${communityArea.subdistrict}`,
+                    communityArea.district && `อ.${communityArea.district}`,
+                    communityArea.province && `จ.${communityArea.province}`,
+                  ]
+                    .filter(Boolean)
+                    .join(" • ") || "ยังไม่ทราบพื้นที่"}
+                </Text>
+                <Text className="text-emerald-700 text-[11px] mt-1.5 font-semibold">
+                  {communityPlaces.length > 0
+                    ? `มี ${communityPlaces.length} แห่งที่ยืนยันแล้ว`
+                    : "ยังไม่มีสถานที่ที่ยืนยันแล้วในชุมชนนี้"}
+                </Text>
+                {!myCommunity && communityArea.community ? (
+                  <Text className="text-amber-700 text-[11px] mt-1 leading-4">
+                    ชุมชนนี้ยังไม่อยู่ในทะเบียนของระบบ — ข้อมูลที่เพิ่มจะผูกกับชุมชน
+                    เมื่อมีการ seed ทะเบียน
+                  </Text>
+                ) : null}
+                {communityPartial ? (
+                  <Text className="text-amber-700 text-[11px] mt-1 leading-4">
+                    ระบบยังอ่านข้อมูลบางส่วนไม่ได้ (เช่น ราคา/เวลาเปิด) — แสดงเฉพาะที่อ่านได้
+                  </Text>
+                ) : null}
+              </View>
+
+              {communityPlaces.length > 0 ? (
+                <>
+                  {communityPlaces.slice(0, communityShown).map((p) => {
+                    const priceBits = [
+                      p.price_info && `ราคา: ${p.price_info}`,
+                      p.price_level && `ระดับราคา: ${p.price_level}`,
+                    ].filter(Boolean) as string[];
+                    return (
+                      <TouchableOpacity
+                        key={p.place_id || p.place_name}
+                        onPress={() => {
+                          if (p.google_maps_url) void Linking.openURL(p.google_maps_url);
+                        }}
+                        activeOpacity={0.8}
+                        className="bg-white border border-gray-200 rounded-2xl p-3.5 mb-2.5"
+                      >
+                        <View className="flex-row items-start justify-between mb-1">
+                          <Text className="text-gray-900 font-bold text-[14px] flex-1 mr-2">
+                            {p.place_name}
+                          </Text>
+                          {/* ป้ายที่มาของข้อมูล (D21) */}
+                          <View className="px-2 py-0.5 rounded-full bg-gray-100">
+                            <Text className="text-[10px] font-bold text-gray-600">
+                              {communitySourceLabel(p.source)}
+                            </Text>
+                          </View>
+                        </View>
+
+                        {p.formatted_address ? (
+                          <Text className="text-gray-500 text-[11px] leading-4">
+                            📍 {p.formatted_address}
+                          </Text>
+                        ) : null}
+
+                        {priceBits.length > 0 ? (
+                          <Text className="text-gray-700 text-[12px] font-semibold mt-1.5">
+                            💰 {priceBits.join(" • ")}
+                          </Text>
+                        ) : null}
+
+                        {p.opening_hours ? (
+                          <Text className="text-gray-600 text-[11px] mt-1">
+                            🕒 เปิด: {p.opening_hours}
+                          </Text>
+                        ) : null}
+                        {p.phone ? (
+                          <Text className="text-gray-600 text-[11px] mt-0.5">📞 {p.phone}</Text>
+                        ) : null}
+                        {p.website ? (
+                          <Text className="text-gray-600 text-[11px] mt-0.5" numberOfLines={1}>
+                            🌐 {p.website}
+                          </Text>
+                        ) : null}
+                      </TouchableOpacity>
+                    );
+                  })}
+
+                  {communityPlaces.length > communityShown ? (
+                    <TouchableOpacity
+                      onPress={() => setCommunityShown((n) => n + 20)}
+                      activeOpacity={0.85}
+                      className="bg-gray-100 border border-gray-200 rounded-2xl py-3 items-center justify-center mt-1"
+                    >
+                      <Text className="text-gray-700 font-bold text-[12.5px]">
+                        ดูเพิ่มเติม (อีก {Math.min(20, communityPlaces.length - communityShown)} แห่ง)
+                      </Text>
+                    </TouchableOpacity>
+                  ) : null}
+                </>
+              ) : (
+                /* Empty state — ห้ามเป็นหน้าว่าง (PLAN §2.2.4) */
+                <View className="items-center py-10 px-4">
+                  <Text className="text-gray-700 font-bold text-[14px] text-center">
+                    ยังไม่มีสถานที่ในชุมชนนี้
+                  </Text>
+                  <Text className="text-gray-400 text-[11.5px] text-center mt-1.5 leading-5">
+                    เป็นคนแรกที่เพิ่มสถานที่ให้ชุมชน — AI จะใช้ข้อมูลนี้ตอบคำถามนักท่องเที่ยว
+                    ว่าที่ไหนเปิด ราคาเท่าไร และมีอะไรให้ทำบ้าง
+                  </Text>
+                  <TouchableOpacity
+                    onPress={() => onAddFirstPlace?.(communityArea)}
+                    activeOpacity={0.85}
+                    className="mt-4 bg-emerald-700 px-5 py-3 rounded-2xl flex-row items-center shadow-sm"
+                  >
+                    <PlusIcon size={16} color="#FFFFFF" />
+                    <Text className="text-white font-bold text-[13px] ml-1.5">
+                      เป็นคนแรกที่เพิ่ม
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
+          )}
         </ScrollView>
       </View>
 
@@ -937,6 +1244,83 @@ export default function ProfileLocal({ onOpenFolder, onFullScreenChange }: Profi
             <TouchableOpacity onPress={() => setShowInfoModal(false)} className="bg-[#2D6A4F] py-3 rounded-xl items-center">
               <Text className="text-white text-sm font-bold">ตกลง</Text>
             </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+      {/* D16 — ทางกลับมา: ยืนยันตัวตนเป็น host */}
+      <Modal visible={showClaimHost} transparent animationType="fade" onRequestClose={() => setShowClaimHost(false)}>
+        <View className="flex-1 bg-black/60 items-center justify-center px-5">
+          <View className="bg-white rounded-3xl w-full max-w-sm p-6 shadow-2xl">
+            <View className="flex-row items-center justify-between pb-3 border-b border-gray-100 mb-4">
+              <View className="flex-row items-center">
+                <ShieldCheckIcon size={22} color="#D47A3A" />
+                <Text className="text-lg font-bold text-gray-900 ml-2">ยืนยันตัวตนเป็น host</Text>
+              </View>
+              <TouchableOpacity onPress={() => setShowClaimHost(false)} className="w-8 h-8 rounded-full bg-gray-100 items-center justify-center">
+                <XMarkIcon size={18} color="#4B5563" />
+              </TouchableOpacity>
+            </View>
+
+            {!claimProfile ? (
+              <>
+                <Text className="text-gray-600 text-[13px] leading-5 mb-3">
+                  กรอกเลขทะเบียนผู้ประกอบการ OTOP นวัตวิถี เพื่อยืนยันว่าเป็นเจ้าของชุมชน — บทบาทจะเปลี่ยนเป็น host และค้นหาสถานที่ในชุมชนได้
+                </Text>
+                <TextInput
+                  value={claimVillageId}
+                  onChangeText={(t) => {
+                    setClaimVillageId(t);
+                    setClaimProfile(null);
+                  }}
+                  keyboardType="numeric"
+                  placeholder="เช่น 123456"
+                  placeholderTextColor="#9CA3AF"
+                  className="bg-gray-100 rounded-xl px-3.5 py-3 text-[15px] text-gray-900 mb-3"
+                />
+                <TouchableOpacity
+                  onPress={() => void checkClaimVillage()}
+                  disabled={claimChecking || !claimVillageId.trim()}
+                  activeOpacity={0.85}
+                  className={`py-3.5 rounded-xl items-center ${
+                    claimChecking || !claimVillageId.trim() ? "bg-gray-200" : "bg-[#D47A3A]"
+                  }`}
+                >
+                  {claimChecking ? (
+                    <ActivityIndicator color="#FFFFFF" />
+                  ) : (
+                    <Text className={`font-bold text-[14px] ${claimVillageId.trim() ? "text-white" : "text-gray-400"}`}>
+                      ตรวจสอบทะเบียน
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <View className="bg-emerald-50 rounded-xl p-3 border border-emerald-200 mb-4">
+                  <Text className="text-[#1B4332] text-[13px] font-semibold">
+                    {claimProfile.otopNawatwithi || claimProfile.village || "ยืนยันแล้ว"}
+                  </Text>
+                  <Text className="text-gray-600 text-[12px] mt-0.5">
+                    {[claimProfile.village, claimProfile.tambol && `ต.${claimProfile.tambol}`,
+                      claimProfile.amphur && `อ.${claimProfile.amphur}`, claimProfile.province]
+                      .filter(Boolean)
+                      .join(" • ")}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => void confirmClaimHost()}
+                  disabled={claimChecking}
+                  activeOpacity={0.85}
+                  className={`py-3.5 rounded-xl items-center ${claimChecking ? "bg-gray-200" : "bg-[#2D6A4F]"}`}
+                >
+                  {claimChecking ? (
+                    <ActivityIndicator color="#FFFFFF" />
+                  ) : (
+                    <Text className="text-white font-bold text-[14px]">ยืนยันเป็น host</Text>
+                  )}
+                </TouchableOpacity>
+              </>
+            )}
           </View>
         </View>
       </Modal>

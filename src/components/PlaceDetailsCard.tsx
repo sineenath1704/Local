@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Text, TextInput, TouchableOpacity, View } from "react-native";
 import EditableValueRow from "./EditableValueRow";
+import { SOURCE_LABEL, type MatchLevel } from "../services/placeMatchService";
 
 /**
  * A place's own details — the facts the AI chat answers from.
@@ -14,10 +15,16 @@ import EditableValueRow from "./EditableValueRow";
  *
  * The price band is a tier (ฟรี / ฿ / ฿฿ / ฿฿฿ / ฿฿฿฿), not a number, so it
  * gets chips rather than a numeric keypad.
+ *
+ * ทุกกลุ่มข้อมูลมีป้ายบอกที่มา (D21) — ผู้ใช้ต้องรู้ว่าค่าที่เห็นเป็นของ
+ * เจ้าของ, มาจากคลิป, หรือมาจาก Google
  */
 
 /** Google's price tiers, as users read them. */
 export const PRICE_LEVELS = ["ฟรี", "฿", "฿฿", "฿฿฿", "฿฿฿฿"] as const;
+
+/** ที่มาของค่าแต่ละช่อง (D21) */
+export type DetailSource = keyof typeof SOURCE_LABEL;
 
 export interface PlaceDetailsValues {
   /** "฿฿", "ฟรี"… — null when the place has no tier. */
@@ -65,6 +72,17 @@ export interface PlaceDetailsCardProps {
   subtitle?: string;
   /** What the clip said about this place — shown, not edited. */
   clipFacts?: PlaceClipFacts;
+  /**
+   * ผู้ใช้แก้ข้อมูลของเจ้าของสถานที่ได้ไหม (D6)
+   *
+   * tourist = false → ราคา/เวลาเปิด/โทร/เว็บ เป็นของเจ้าของสถานที่
+   * แก้ไม่ได้ (D26) — การ์ดยังต้องเห็น แต่ห้ามแตะ
+   */
+  canEditOwnerFields?: boolean;
+  /** ที่มาของแต่ละช่อง (D21) — ถ้าไม่ระบุ ใช้ค่าเริ่มต้นตามบทบาท */
+  sources?: Partial<Record<keyof PlaceDetailsValues, DetailSource>>;
+  /** ระดับที่จับคู่กับชุมชนได้ (D28) — แสดงเป็นป้ายกำกับหัวการ์ด */
+  matchLevel?: MatchLevel | "manual" | null;
 }
 
 export default function PlaceDetailsCard({
@@ -72,6 +90,9 @@ export default function PlaceDetailsCard({
   onChange,
   subtitle,
   clipFacts,
+  canEditOwnerFields = true,
+  sources,
+  matchLevel,
 }: PlaceDetailsCardProps) {
   const [editing, setEditing] = useState<{
     priceLevel?: boolean;
@@ -93,14 +114,53 @@ export default function PlaceDetailsCard({
     onChange({ [key]: value.trim() ? value.trim() : null } as Partial<PlaceDetailsValues>);
   };
 
+  // ป้ายที่มา — ค่าเริ่มต้นคือ "จาก Google" (ยังไม่มีใครแก้) · เจ้าของแก้แล้ว = "เจ้าของแจ้ง"
+  const sourceOf = (key: keyof PlaceDetailsValues): DetailSource =>
+    sources?.[key] ?? "google";
+  const badgeOf = (key: keyof PlaceDetailsValues) => ({
+    text: SOURCE_LABEL[sourceOf(key)],
+    tone: (sourceOf(key) === "owner" ? "green" : sourceOf(key) === "clip" ? "amber" : "blue") as
+      | "green"
+      | "amber"
+      | "blue"
+      | "gray",
+  });
+
+  const matchBadge =
+    matchLevel === "manual"
+      ? { text: "ผู้ใช้ระบุเอง", tone: "gray" as const }
+      : matchLevel
+        ? {
+            text:
+              matchLevel === "village"
+                ? "อยู่ในหมู่บ้านนี้"
+                : matchLevel === "subdistrict"
+                  ? "อยู่ตำบลเดียวกัน"
+                  : "อยู่ในอำเภอเดียวกัน",
+            tone: "green" as const,
+          }
+        : null;
+
   return (
     <View className="mb-4">
-      <View className="flex-row items-center mb-1.5">
+      <View className="flex-row items-center mb-1.5 flex-wrap">
         <Text className="text-[15px] mr-1.5">🏪</Text>
         <Text className="text-gray-700 font-bold text-[13px]">ข้อมูลสถานที่</Text>
+        {matchBadge ? (
+          <View className="ml-2 px-2 py-0.5 rounded-full border border-emerald-200 bg-emerald-100">
+            <Text className="text-[10px] font-bold text-emerald-800">
+              📍 {matchBadge.text}
+            </Text>
+          </View>
+        ) : null}
       </View>
       {subtitle ? (
         <Text className="text-gray-400 text-[11px] mb-2">{subtitle}</Text>
+      ) : null}
+      {!canEditOwnerFields ? (
+        <Text className="text-gray-400 text-[11px] mb-2">
+          ข้อมูลชุดนี้เป็นของเจ้าของสถานที่ — ดูอ่านได้ แต่แก้ไขไม่ได้ (ข้อมูลจากคลิปที่คุณเพิ่มจะถูกบันทึกให้)
+        </Text>
       ) : null}
 
       {/* ระดับราคา */}
@@ -111,6 +171,8 @@ export default function PlaceDetailsCard({
         editing={!!editing.priceLevel}
         onToggle={() => toggle("priceLevel")}
         emptyHint="ยังไม่ได้ระบุ"
+        readOnly={!canEditOwnerFields}
+        badge={badgeOf("priceLevel")}
       >
         <View className="flex-row flex-wrap gap-2">
           {PRICE_LEVELS.map((level) => {
@@ -159,6 +221,8 @@ export default function PlaceDetailsCard({
         editing={!!editing.website}
         onToggle={() => toggle("website")}
         emptyHint="ยังไม่ได้ระบุ"
+        readOnly={!canEditOwnerFields}
+        badge={badgeOf("website")}
       >
         <TextInput
           value={draft.website ?? ""}
@@ -181,6 +245,8 @@ export default function PlaceDetailsCard({
         editing={!!editing.phone}
         onToggle={() => toggle("phone")}
         emptyHint="ยังไม่ได้ระบุ"
+        readOnly={!canEditOwnerFields}
+        badge={badgeOf("phone")}
       >
         <TextInput
           value={draft.phone ?? ""}
@@ -201,6 +267,8 @@ export default function PlaceDetailsCard({
         editing={!!editing.openingHours}
         onToggle={() => toggle("openingHours")}
         emptyHint="ยังไม่ได้ระบุ"
+        readOnly={!canEditOwnerFields}
+        badge={badgeOf("openingHours")}
       >
         <TextInput
           value={draft.openingHours ?? ""}
@@ -216,9 +284,14 @@ export default function PlaceDetailsCard({
           place's row so the AI chat can answer from it. */}
       {clipFacts && hasClipFacts(clipFacts) ? (
         <View className="bg-gray-50 border border-gray-200 rounded-2xl p-3 mt-3">
-          <Text className="text-gray-500 text-[12px] font-bold mb-1.5">
-            📖 ที่อ่านได้จากคลิปนี้
-          </Text>
+          <View className="flex-row items-center mb-1.5">
+            <Text className="text-gray-500 text-[12px] font-bold">📖 ที่อ่านได้จากคลิปนี้</Text>
+            <View className="ml-2 px-2 py-0.5 rounded-full border border-amber-200 bg-amber-100">
+              <Text className="text-[10px] font-bold text-amber-800">
+                {SOURCE_LABEL.clip}
+              </Text>
+            </View>
+          </View>
           {clipFacts.capacity && capacityText(clipFacts.capacity) ? (
             <Text className="text-gray-700 text-[12.5px] leading-5 mb-1">
               ที่พักได้: {capacityText(clipFacts.capacity)}

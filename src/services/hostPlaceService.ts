@@ -30,6 +30,14 @@ export interface HostPlaceWrite {
     businessSubdistrict?: string | null;
     businessDistrict?: string | null;
     businessProvince?: string | null;
+    /**
+     * Google Place ID ของสถานที่ที่ host เลือกบนแผนที่ — กุญแจที่ผูก
+     * host กับสถานที่ของตัวเอง (PLAN §6.10) — ต้องเป็น id จริงเท่านั้น
+     * ถ้ายังไม่มี migration คอลัมน์นี้ แอปยังทำงานได้ตามเดิม
+     */
+    businessPlaceId?: string | null;
+    /** ชุมชนที่ host สังกัด (PLAN §1.1 ข้อ 2 · D1) */
+    communityId?: string | null;
   };
   /** Omit when the host hasn't picked a location on the map yet. */
   place?: {
@@ -53,6 +61,8 @@ export interface HostPlaceWrite {
     /** Machine-readable hours/pricing — what the AI reads. */
     businessHours?: StructuredHours | null;
     businessPricing?: StructuredPricing | null;
+    /** ชุมชนที่สถานที่นี้อยู่ (D4) */
+    communityId?: string | null;
   };
 }
 

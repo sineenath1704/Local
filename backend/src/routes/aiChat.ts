@@ -1,6 +1,12 @@
 import { Router, Request, Response } from "express";
 import { callAi, isAiConfigured, AiMessage } from "../aiCore";
 import { buildChatSystemPrompt, FolderContext, HostSelfContext, PlaceContext } from "../tripPrompt";
+import {
+  formatCommunityContext,
+  loadCommunityBundle,
+  loadNearbyCommunities,
+  resolveCommunityByName,
+} from "../communityContext";
 
 import { getSupabaseAdmin } from "../supabaseAdmin";
 import { requestId } from "../middleware/requestContext";
@@ -16,7 +22,8 @@ import { sendError } from "../middleware/errors";
  *   messages: { role: "user" | "assistant", content: string }[],
  *   folder?: { folderName: string, places: string[] },   // optional folder context
  *   place?: PlaceContext,                                // optional specific place context
- *   mode?:  "tourist" | "host-self"                      // host-self = JWT-gated advisor
+ *   mode?:  "tourist" | "host-self",                     // host-self = JWT-gated advisor
+ *   communityId?: string,                                // optional community context (D22)
  * }
  *
  * `mode: "host-self"` flips the handler into private advisor mode: the
@@ -24,6 +31,10 @@ import { sendError } from "../middleware/errors";
  * community_places row, and the prompt is rebuilt with their structured
  * business data. Tourist mode remains unauthenticated — anyone can ask
  * about a public place.
+ *
+ * `communityId` บอกว่าผู้ใช้กำลังถามเรื่องชุมชนไหน — ถ้าไม่ส่งมา ระบบจะ
+ * หาชุมชนจากชื่อที่ผู้ใช้พิมพ์เอง (D22) แล้วแนบสถานที่ของชุมชนนั้น
+ * รวมถึงชุมชนอื่นในจังหวัดเดียวกัน (D23) เข้า prompt
  */
 function toHostSelfContext(
   userRow: any,
@@ -88,6 +99,10 @@ router.post("/", async (req: Request, res: Response) => {
 
   let resolvedPlace: PlaceContext | undefined = place;
   let resolvedHostSelf: HostSelfContext | undefined;
+  // ชุมชนที่จะใช้เป็นบริบท (D22) — host ได้จากบัญชีตัวเอง, tourist มาจาก
+  // ที่ผู้ใช้ระบุ / ชื่อที่พิมพ์ / สถานที่ที่เจอ
+  let communityId: string | null =
+    typeof body.communityId === "string" ? body.communityId.trim() || null : null;
 
   if (mode === "host-self") {
     // ---- host-self: JWT-gated advisor mode ------------------------------
@@ -132,13 +147,25 @@ router.post("/", async (req: Request, res: Response) => {
     // the host's own video total without a second round-trip. community_places
     // holds the structured JSONB twins — fetched separately because the embed
     // could land on any of the host's rows (a homestay + a cafe, etc.).
-    const { data: userRow, error: userErr } = await admin
-      .from("users")
-      .select(
-        "display_name, bio, avatar_url, role, business_place_name, business_address, business_subdistrict, business_district, business_province, business_phone, business_price_info, business_lat, business_lng, otop_village_id, otop_village, otop_tambol, otop_amphur, otop_province, otop_nawatwithi, otop_for_tourism, otop_cbt_village, otop_verified, total_likes_received, followers_count, videos(count)"
-      )
-      .eq("id", userId)
-      .single();
+    //
+    // `community_id` มาจาก add_place_matching.sql — ถ้ายังไม่รัน migration
+    // คอลัมน์จะไม่มี → ทั้ง statement ล้ม → ต้องถอยไปอ่านชุดพื้นฐาน
+    const USER_COLUMNS =
+      "display_name, bio, avatar_url, role, business_place_name, business_address, business_subdistrict, business_district, business_province, business_phone, business_price_info, business_lat, business_lng, otop_village_id, otop_village, otop_tambol, otop_amphur, otop_province, otop_nawatwithi, otop_for_tourism, otop_cbt_village, otop_verified, total_likes_received, followers_count, videos(count)";
+    const readUser = async (columns: string) =>
+      admin.from("users").select(columns).eq("id", userId).single();
+    let userRow: any = null;
+    let userErr: any = null;
+    {
+      const first = await readUser(`${USER_COLUMNS}, community_id`);
+      userRow = first.data;
+      userErr = first.error;
+      if (userErr) {
+        const retry = await readUser(USER_COLUMNS);
+        userRow = retry.data;
+        userErr = retry.error;
+      }
+    }
 
     if (userErr || !userRow) {
       return res.status(404).json({
@@ -154,6 +181,10 @@ router.post("/", async (req: Request, res: Response) => {
         requestId: requestId(req),
       });
     }
+
+    // ชุมชนของ host — ถ้ายังไม่มีคอลัมน์ (migration ยังไม่รัน) จะเป็น null
+    // → ไม่มีบริบทชุมชน แต่โหมด host ยังทำงานได้ตามปกติ
+    communityId = (userRow as any).community_id ?? communityId;
 
     // Latest place the host owns. maybeSingle because a host may have saved
     // their profile but not yet picked a place on the map.
@@ -196,6 +227,8 @@ router.post("/", async (req: Request, res: Response) => {
             "opening_hours", "price_info", "price_level", "website",
             "rating", "user_ratings_total", "business_hours",
             "business_pricing",
+            // ชุมชนของสถานที่นี้ (D22) — คอลัมน์ของ add_place_matching.sql
+            "community_id",
             // The four clip-derived facts — they need their migration.
             "capacity", "house_rules", "areas", "facilities",
             "users:owner_id (display_name, bio, avatar_url, total_likes_received, business_phone, business_address, business_subdistrict, business_district, business_province, otop_village_id, otop_village, otop_province, otop_nawatwithi, otop_verified, videos(count))",
@@ -203,6 +236,7 @@ router.post("/", async (req: Request, res: Response) => {
           const withoutFacts = placeColumns.filter(
             (c) => !["capacity", "house_rules", "areas", "facilities"].includes(c)
           );
+          const withoutCommunity = withoutFacts.filter((c) => c !== "community_id");
           const widePlaces = (await admin
             .from("community_places")
             .select(placeColumns.join(", "))
@@ -215,6 +249,10 @@ router.post("/", async (req: Request, res: Response) => {
             ((await admin
               .from("community_places")
               .select(withoutFacts.join(", "))
+              .limit(50)).data as any[] | null) ??
+            ((await admin
+              .from("community_places")
+              .select(withoutCommunity.join(", "))
               .limit(50)).data as any[] | null);
 
           if (places && places.length > 0) {
@@ -235,6 +273,10 @@ router.post("/", async (req: Request, res: Response) => {
               // owner_id is nullable (ON DELETE SET NULL), so a place whose
               // host deleted their account comes back with no embed at all.
               const host = Array.isArray(matched.users) ? matched.users[0] : matched.users;
+              // สถานที่ที่เจอ = ชุมชนของมัน (ถ้าผูกไว้แล้ว) → ใช้เป็นบริบทชุมชน (D22)
+              if (!communityId && matched.community_id) {
+                communityId = String(matched.community_id);
+              }
               resolvedPlace = {
                 placeName: matched.place_name,
                 address: matched.formatted_address,
@@ -280,7 +322,37 @@ router.post("/", async (req: Request, res: Response) => {
     }
   }
 
-  const system = buildChatSystemPrompt(folder, resolvedPlace, resolvedHostSelf);
+  // ── บริบทชุมชน (D22 + D23) ────────────────────────────────────────
+  // ไฟล์นี้อ่าน "ทุกที่ในหมู่บ้าน" ของชุมชนนั้น + ชุมชนอื่นในจังหวัดเดียวกัน
+  // มาแนบท้าย system prompt (ไม่แตะ tripPrompt.ts — PLAN §8)
+  let communityBlock = "";
+  try {
+    const admin = getSupabaseAdmin();
+    if (admin) {
+      const lastUser = [...messages].reverse().find((m) => m.role === "user");
+      // tourist ที่ยังไม่รู้ชุมชน → หาจากชื่อที่พิมพ์ (ต้องมีจังหวัดในข้อความ
+      // ไม่งั้นชุมชนชื่อซ้ำกันทั้งประเทศ → เดาแล้วผิด worse than ไม่ตอบ)
+      //
+      // ลำดับสำคัญ: **ชื่อที่พิมพ์มาชนะ** communityId ที่ client ส่งมา
+      // เพราะ client ส่ง "ชุมชนของฉัน" เป็นค่าเริ่มต้น แต่ถ้าผู้ใช้ถาม
+      // ชุมชนอื่นด้วยชื่อ + จังหวัด → ต้องตอบชุมชนนั้น ไม่ใช่ชุมชนของผู้ใช้
+      if (mode === "tourist" && lastUser?.content) {
+        const byName = await resolveCommunityByName(admin, lastUser.content);
+        if (byName) communityId = byName.id;
+      }
+      if (communityId) {
+        const bundle = await loadCommunityBundle(admin, communityId);
+        const nearby = bundle.community?.province
+          ? await loadNearbyCommunities(admin, bundle.community.province, communityId)
+          : [];
+        communityBlock = formatCommunityContext(bundle, nearby, mode === "host-self" ? "host" : "tourist");
+      }
+    }
+  } catch {
+    // บริบทชุมชนเป็นส่วนเสริม — ล้มเหลวไม่ได้ทำให้แชทใช้ไม่ได้
+  }
+
+  const system = buildChatSystemPrompt(folder, resolvedPlace, resolvedHostSelf) + communityBlock;
 
   if (!isAiConfigured()) {
     // Graceful stub so the app works before the token is set.

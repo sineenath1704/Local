@@ -39,6 +39,12 @@ const USER_FIELDS: Record<string, string> = {
   businessSubdistrict: "business_subdistrict",
   businessDistrict: "business_district",
   businessProvince: "business_province",
+  // Google Place ID ของสถานที่ — id นี้คือกุญแจที่ผูก host กับสถานที่ของตัวเอง
+  // (PLAN §5.5 · ขั้น 1.1 เพิ่มคอลัมน์ `users.business_place_id`)
+  businessPlaceId: "business_place_id",
+  // ชุมชนของ host — ย้ายความเป็นเจ้าของชุมชนมาจาก `communities.host_user_id`
+  // (PLAN §1.1 ข้อ 2 · D1)
+  communityId: "community_id",
 };
 
 const PLACE_FIELDS: Record<string, string> = {
@@ -59,7 +65,35 @@ const PLACE_FIELDS: Record<string, string> = {
   userRatingsTotal: "user_ratings_total",
   website: "website",
   source: "source",
+  // ชุมชนที่สถานที่นี้อยู่ — เป็นแหล่งของชื่อ hierarchy (D18) และเป็นตัวตั้งของ
+  // "สถานที่ใกล้ชุมชน" (PLAN §5.5 · ขั้น 1.1 เพิ่ม `community_places.community_id`)
+  communityId: "community_id",
 };
+
+/**
+ * ฟิลด์ของ `users` ที่มากับ add_place_matching.sql (ขั้น 1.1)
+ *
+ * ถ้ายังไม่ได้รัน migration → คอลัมน์ไม่มีในตาราง → RPC จะพังทั้งฟังก์ชัน
+ * (ฟังก์ชันเขียนทั้งแถว `users` และทั้งแถว `community_places` ในทรานแซกชันเดียว)
+ * → ต้องลองอีกครั้งโดยตัดฟิลด์ใหม่ออก ไม่งั้น host ที่เพิ่งแก้ข้อมูลร้าน
+ * จะบันทึกไม่ได้เลยทั้งที่ระบบเดิมทำงานได้
+ *
+ * อีกกรณีคือ RPC ยังเป็นเวอร์ชันเก่า (ยังไม่รู้จักฟิลด์ใหม่) → จะตอบ
+ * `unknown field business_place_id` → เจอข้อความนี้ต้องตัดฟิลด์นั้นออกแล้วลองใหม่
+ */
+const NEW_USER_FIELDS = ["business_place_id", "community_id"] as const;
+
+/**
+ * ชื่อฟิลด์ใหม่ที่ทำให้ RPC พัง — null = ไม่ใช่ปัญหาฟิลด์ใหม่ (พังจริง)
+ */
+function unsupportedNewField(message: string): string | null {
+  const m = (message ?? "").toLowerCase();
+  for (const key of NEW_USER_FIELDS) {
+    if (m.includes(`unknown field ${key}`)) return key;
+    if (m.includes("does not exist") && m.includes(key)) return key;
+  }
+  return null;
+}
 
 function pick(source: Record<string, unknown> | undefined, map: Record<string, string>) {
   const out: Record<string, unknown> = {};
@@ -83,6 +117,13 @@ function humanizeRpcError(message: string): string {
   if (m.includes("missing place_name")) return "ยังไม่ได้กรอกชื่อสถานที่ประกอบการ";
   if (m.includes("missing user id")) return "ยังไม่ได้เข้าสู่ระบบ";
   if (m.includes("unknown field")) return "มีข้อมูลบางส่วนที่ไม่ถูกต้อง กรุณาลองใหม่อีกครั้ง";
+  // ฟิลด์ใหม่ของ add_place_matching.sql ยังไม่ได้รัน → อธิบายให้ชัด
+  if (
+    (m.includes("does not exist") && (m.includes("community_id") || m.includes("business_place_id"))) ||
+    m.includes("migration required")
+  ) {
+    return "ยังไม่ได้อัปเดตฐานข้อมูล — กรุณาแจ้งทีมงานให้รัน migration add_place_matching.sql";
+  }
   if (m.includes("host_save_business_profile") && m.includes("does not exist")) {
     return "ยังไม่ได้อัปเดตฐานข้อมูล — กรุณาแจ้งทีมงานให้รัน migration add_community_places_structured.sql";
   }
@@ -149,11 +190,28 @@ router.post("/upsert-host-place", async (req: Request, res: Response) => {
   }
 
   try {
-    const { error } = await admin.rpc("host_save_business_profile", {
-      p_user_id: uid,
-      p_users_payload: usersPayload,
-      p_place_payload: Object.keys(placePayload).length > 0 ? placePayload : null,
-    });
+    const runRpc = async () => {
+      const { error } = await admin.rpc("host_save_business_profile", {
+        p_user_id: uid,
+        p_users_payload: usersPayload,
+        p_place_payload: Object.keys(placePayload).length > 0 ? placePayload : null,
+      });
+      return error;
+    };
+
+    let error = await runRpc();
+
+    // ฟิลด์ใหม่ยังไม่มีใน DB/RPC → ตัดออกแล้วลองใหม่
+    // (ระบบเดิมต้องยังบันทึกได้ แม้ migration ยังไม่ได้รัน)
+    if (error) {
+      const bad = unsupportedNewField(error.message);
+      if (bad && bad in usersPayload) {
+        delete usersPayload[bad];
+        console.warn(`[hostPlace ${uid}] "${bad}" not supported yet — retrying without it`);
+        error = await runRpc();
+      }
+    }
+
     if (error) {
       console.error(`[hostPlace ${uid}] rpc failed:`, error.message);
       return sendError(res, new Error(humanizeRpcError(error.message)), req, 400);

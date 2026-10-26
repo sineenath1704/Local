@@ -1,10 +1,12 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   View,
   Text,
   TouchableOpacity,
   ScrollView,
   TextInput,
+  Linking,
+  ActivityIndicator,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
@@ -13,9 +15,15 @@ import {
   VideoCameraIcon,
   SparklesIcon,
   MagnifyingGlassIcon,
+  MapPinIcon,
 } from "react-native-heroicons/outline";
 import { CheckCircleIcon as CheckCircleSolid } from "react-native-heroicons/solid";
 import { DistrictItem, PlaceItem } from "../../data/thailandGeographicData";
+import {
+  communitySourceLabel,
+  fetchDistrictPlaces,
+  type CommunityPlaceRow,
+} from "../../services/communityService";
 import ThailandMapSvg from "./ThailandMapSvg";
 
 interface MapPlacesLevelProps {
@@ -29,6 +37,9 @@ interface MapPlacesLevelProps {
 
 type CategoryFilter = "ทั้งหมด" | "ชุมชนท่องเที่ยว OTOP นวัตวิถี" | "ชุมชน OTOP เพื่อการท่องเที่ยว" | "หมู่บ้านท่องเที่ยวโดยชุมชน";
 
+/** ชั้นบนแผนที่ — ชุมชน OTOP หรือสถานที่ที่ยืนยันแล้ว (PLAN §7.2) */
+type MapLayer = "community" | "place";
+
 export default function MapPlacesLevel({
   district,
   places,
@@ -40,6 +51,31 @@ export default function MapPlacesLevel({
   const insets = useSafeAreaInsets();
   const [selectedCategory, setSelectedCategory] = useState<CategoryFilter>("ทั้งหมด");
   const [searchQuery, setSearchQuery] = useState("");
+  const [layer, setLayer] = useState<MapLayer>("community");
+
+  // ── ชั้นหมุดระดับสถานที่ (D20) ─────────────────────────────────
+  // สถานที่ที่ยืนยันแล้วในอำเภอนี้ มาจาก `community_places` (ผ่าน backend)
+  // key ใช้บอกว่าเป็นผลของอำเภอไหน — ถ้าไม่ตรง = ยังโหลดไม่เสร็จ
+  const placeKey = `${district.provinceName}|${district.name}`;
+  const [placeLayer, setPlaceLayer] = useState<{
+    key: string;
+    rows: CommunityPlaceRow[];
+  }>({ key: "", rows: [] });
+
+  useEffect(() => {
+    if (layer !== "place") return;
+    let active = true;
+    fetchDistrictPlaces(district.provinceName, district.name).then((rows) => {
+      if (!active) return;
+      setPlaceLayer({ key: placeKey, rows });
+    });
+    return () => {
+      active = false;
+    };
+  }, [layer, placeKey, district.provinceName, district.name]);
+
+  const placeLoading = layer === "place" && placeLayer.key !== placeKey;
+  const registeredPlaces = placeLayer.key === placeKey ? placeLayer.rows : [];
 
   const visitedCount = places.filter((p) => p.isVisited).length;
   const totalCount = places.length;
@@ -53,6 +89,16 @@ export default function MapPlacesLevel({
       p.name.toLowerCase().includes(searchQuery.trim().toLowerCase()) ||
       p.subdistrict.toLowerCase().includes(searchQuery.trim().toLowerCase());
     return matchesCat && matchesQuery;
+  });
+
+  // ชั้นสถานที่: กรองด้วยคำค้นอย่างเดียว (ไม่มีหมวดหมู่ OTOP)
+  const filteredRegistered = registeredPlaces.filter((p) => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      (p.place_name ?? "").toLowerCase().includes(q) ||
+      (p.formatted_address ?? "").toLowerCase().includes(q)
+    );
   });
 
   // Count by category for filter tabs
@@ -99,19 +145,72 @@ export default function MapPlacesLevel({
           </Text>
         </View>
 
-        {/* 2.5 Map Graphic Zoomed into Province for Places Context */}
+        {/* 2.5 Toggle ชั้นข้อมูล: ชุมชน OTOP / สถานที่ที่ยืนยันแล้ว (PLAN §7.2) */}
+        <View className="flex-row bg-gray-100 rounded-full p-1 mb-4 self-stretch">
+          <TouchableOpacity
+            onPress={() => setLayer("community")}
+            activeOpacity={0.8}
+            className={`flex-1 py-2 rounded-full items-center justify-center flex-row ${
+              layer === "community" ? "bg-white shadow-sm" : ""
+            }`}
+          >
+            <Text
+              className={`text-[12.5px] font-bold ${
+                layer === "community" ? "text-gray-900" : "text-gray-500"
+              }`}
+            >
+              🏘️ ชุมชน ({totalCount})
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => setLayer("place")}
+            activeOpacity={0.8}
+            className={`flex-1 py-2 rounded-full items-center justify-center flex-row ${
+              layer === "place" ? "bg-white shadow-sm" : ""
+            }`}
+          >
+            <Text
+              className={`text-[12.5px] font-bold ${
+                layer === "place" ? "text-gray-900" : "text-gray-500"
+              }`}
+            >
+              📍 สถานที่ ({placeLoading ? "…" : registeredPlaces.length})
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* 2.6 Map Graphic Zoomed into Province for Places Context */}
         <View className="items-center justify-center my-1 bg-gray-50/70 py-3 rounded-3xl border border-gray-100 overflow-hidden">
-          <ThailandMapSvg 
-            width={300} 
-            height={400} 
-            viewLevel="places" 
+          <ThailandMapSvg
+            width={300}
+            height={400}
+            viewLevel="places"
             selectedProvinceName={district.provinceName}
             selectedDistrictName={district.name}
-            places={filteredPlaces}
-            onPressPlace={(place) => onViewPlaceVideo?.(place)}
+            places={
+              layer === "place"
+                ? filteredRegistered.map((p) => ({
+                    id: p.place_id,
+                    name: p.place_name,
+                    subdistrict: p.subdistrict ?? "",
+                    kind: "registered",
+                    row: p,
+                  }))
+                : filteredPlaces
+            }
+            onPressPlace={(place) => {
+              if (place?.kind === "registered") {
+                const url = place.row?.google_maps_url;
+                if (url) void Linking.openURL(url);
+                return;
+              }
+              onViewPlaceVideo?.(place);
+            }}
           />
           <Text className="text-gray-400 text-[11px] mt-1 text-center font-medium">
-            แตะหมุดหรือชื่อสถานที่เพื่อเปิดชมวิดีโอ • ใช้สองนิ้วซูมเข้า–ออก ลากเพื่อเลื่อน • แตะสองครั้งเพื่อรีเซ็ต
+            {layer === "place"
+              ? "หมุดเขียว = สถานที่ที่ยืนยันแล้วในอำเภอนี้ (แตะเพื่อเปิด Google Maps)"
+              : "แตะหมุดหรือชื่อสถานที่เพื่อเปิดชมวิดีโอ • ใช้สองนิ้วซูมเข้า–ออก ลากเพื่อเลื่อน • แตะสองครั้งเพื่อรีเซ็ต"}
           </Text>
         </View>
 
@@ -133,7 +232,11 @@ export default function MapPlacesLevel({
         <View className="flex-row items-center bg-gray-100 rounded-2xl px-3.5 py-2.5 mb-3 border border-gray-200">
           <MagnifyingGlassIcon size={18} color="#9CA3AF" />
           <TextInput
-            placeholder={`ค้นหาชุมชนใน อ.${district.name}...`}
+            placeholder={
+              layer === "place"
+                ? `ค้นหาสถานที่ที่ยืนยันแล้วใน อ.${district.name}...`
+                : `ค้นหาชุมชนใน อ.${district.name}...`
+            }
             placeholderTextColor="#9CA3AF"
             value={searchQuery}
             onChangeText={setSearchQuery}
@@ -141,7 +244,8 @@ export default function MapPlacesLevel({
           />
         </View>
 
-        {/* 5. The 3 OTOP Categories Tabs Filter */}
+        {/* 5. The 3 OTOP Categories Tabs Filter — เฉพาะชั้น "ชุมชน" (ชั้นสถานที่ไม่มีหมวด OTOP) */}
+        {layer === "community" && (
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -226,8 +330,96 @@ export default function MapPlacesLevel({
             </Text>
           </TouchableOpacity>
         </ScrollView>
+        )}
 
         {/* 6. Places List strictly for this District */}
+        {layer === "place" ? (
+          /* ── ชั้นสถานที่: สถานที่ที่ยืนยันแล้วในอำเภอ (D20) ── */
+          <View className="space-y-3.5 mb-5">
+            {placeLoading ? (
+              <View className="py-12 items-center justify-center">
+                <ActivityIndicator size="large" color="#2D6A4F" />
+                <Text className="text-gray-400 text-sm mt-3">
+                  กำลังโหลดสถานที่ที่ยืนยันแล้วในอำเภอ{district.name}...
+                </Text>
+              </View>
+            ) : filteredRegistered.length > 0 ? (
+              filteredRegistered.map((p) => (
+                <View
+                  key={`${p.place_id}-${p.id}`}
+                  className="bg-white border border-gray-200/90 rounded-2xl p-4 shadow-sm"
+                >
+                  <View className="flex-row items-start justify-between mb-1.5">
+                    <View className="flex-1 mr-2">
+                      <Text className="text-base font-bold text-gray-900 leading-snug">
+                        {p.place_name}
+                      </Text>
+                      {p.formatted_address ? (
+                        <Text className="text-xs text-gray-500 mt-0.5">
+                          {p.formatted_address}
+                        </Text>
+                      ) : (
+                        <Text className="text-xs text-gray-500 mt-0.5">
+                          {[p.subdistrict, p.district, p.province]
+                            .filter(Boolean)
+                            .join(" • ") || "ไม่ระบุที่ตั้ง"}
+                        </Text>
+                      )}
+                    </View>
+                    <View className="bg-emerald-100 px-2.5 py-0.5 rounded-full">
+                      <Text className="text-[10px] font-bold text-emerald-800">
+                        {communitySourceLabel(p.source)}
+                      </Text>
+                    </View>
+                  </View>
+
+                  {(p.price_info || p.price_level) && (
+                    <Text className="text-xs text-gray-600 mb-1">
+                      💰{" "}
+                      {p.price_info ||
+                        "ราคา: " + "฿".repeat(Math.max(1, Number(p.price_level) || 1))}
+                    </Text>
+                  )}
+                  {p.opening_hours ? (
+                    <Text className="text-xs text-gray-600 mb-1">
+                      🕒 {p.opening_hours}
+                    </Text>
+                  ) : null}
+                  {p.phone ? (
+                    <Text className="text-xs text-gray-600 mb-1">📞 {p.phone}</Text>
+                  ) : null}
+                  {p.website ? (
+                    <Text className="text-xs text-gray-600 mb-1">
+                      🌐 {p.website}
+                    </Text>
+                  ) : null}
+
+                  {p.google_maps_url ? (
+                    <TouchableOpacity
+                      onPress={() => void Linking.openURL(p.google_maps_url as string)}
+                      activeOpacity={0.8}
+                      className="flex-row items-center bg-[#266348] px-3 py-2 rounded-xl mt-2 self-start"
+                    >
+                      <MapPinIcon size={14} color="#FFFFFF" />
+                      <Text className="text-[11px] font-bold text-white ml-1">
+                        เปิดใน Google Maps
+                      </Text>
+                    </TouchableOpacity>
+                  ) : null}
+                </View>
+              ))
+            ) : (
+              <View className="py-12 items-center justify-center">
+                <Text className="text-gray-400 text-sm text-center px-6">
+                  ยังไม่มีสถานที่ที่ยืนยันแล้วในอำเภอ{district.name}
+                </Text>
+                <Text className="text-gray-400 text-xs text-center px-6 mt-1">
+                  สถานที่จะปรากฏหลังจากมีผู้ใช้ยืนยันจากคลิป หรือเจ้าของชุมชนเพิ่มข้อมูล
+                </Text>
+              </View>
+            )}
+          </View>
+        ) : (
         <View className="space-y-3.5 mb-5">
           {filteredPlaces.length > 0 ? (
             filteredPlaces.map((place) => {
@@ -330,8 +522,10 @@ export default function MapPlacesLevel({
             </View>
           )}
         </View>
+        )}
 
-        {/* 7. Action Button: [ เลือกดูทั้งหมดในอำเภอนี้ ] */}
+        {/* 7. Action Button: [ เลือกดูทั้งหมดในอำเภอนี้ ] — เฉพาะชั้นชุมชน */}
+        {layer === "community" && (
         <TouchableOpacity
           onPress={onViewAllInDistrict}
           activeOpacity={0.85}
@@ -341,6 +535,7 @@ export default function MapPlacesLevel({
             เลือกดูทั้งหมดในอำเภอ{district.name}
           </Text>
         </TouchableOpacity>
+        )}
       </ScrollView>
     </View>
   );

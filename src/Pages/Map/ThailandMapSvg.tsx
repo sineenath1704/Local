@@ -174,7 +174,7 @@ export default function ThailandMapSvg({
     })
   ).current;
 
-  const { pathGenerator, renderFeatures, isAmphoe, activeDistrictFeat } = useMemo(() => {
+  const { pathGenerator, projection, renderFeatures, isAmphoe, activeDistrictFeat } = useMemo(() => {
     let featuresToRender: any[] = THAILAND_GEOJSON.features as any[];
     let featuresToFit: any[] = THAILAND_GEOJSON.features as any[];
     let usingAmphoe = false;
@@ -227,6 +227,7 @@ export default function ThailandMapSvg({
 
     return {
       pathGenerator: d3.geoPath().projection(proj),
+      projection: proj,
       renderFeatures: featuresToRender,
       isAmphoe: usingAmphoe,
       activeDistrictFeat: districtFeat,
@@ -326,10 +327,34 @@ export default function ThailandMapSvg({
     const [cx, cy] = center;
 
     const count = places.length;
-    return places.map((place, i) => {
+    return places.map((place: any, i: number) => {
       let x: number;
       let y: number;
-      if (count === 1) {
+
+      // สถานที่ที่ยืนยันแล้ว (`community_places`) มี lat/lng จริง
+      // → หมุดตรงตำแหน่งจริงบนแผนที่ (PLAN §7.2)
+      // ส่วนหมู่บ้าน OTOP ไม่มีพิกัด → เรียงกระจายรอบใจกลางอำเภอ (เหมือนเดิม)
+      const lat = place?.row?.latitude ?? place?.latitude;
+      const lng = place?.row?.longitude ?? place?.longitude;
+      const hasCoords =
+        typeof lat === 'number' &&
+        typeof lng === 'number' &&
+        Number.isFinite(lat) &&
+        Number.isFinite(lng);
+
+      if (hasCoords) {
+        const pt = projection([lng as number, lat as number]);
+        if (!pt || isNaN(pt[0]) || isNaN(pt[1])) {
+          x = cx;
+          y = cy;
+        } else {
+          x = pt[0];
+          y = pt[1];
+          // กันหมุดลอกออกนอกเขตอำเภอ
+          x = Math.max(box.x0 + 8, Math.min(box.x1 - 8, x));
+          y = Math.max(box.y0 + 10, Math.min(box.y1 - 6, y));
+        }
+      } else if (count === 1) {
         x = cx;
         y = cy;
       } else {
@@ -348,7 +373,7 @@ export default function ThailandMapSvg({
       }
       return { x, y, place, name: place.name || '' };
     });
-  }, [places, activeDistrictFeat, renderFeatures, pathGenerator, viewLevel, width, height]);
+  }, [places, activeDistrictFeat, renderFeatures, pathGenerator, projection, viewLevel, width, height]);
 
   // MapPin SVG path (Heroicons MapPinIcon solid path, viewBox 24x24)
   const PIN_PATH = 'm11.54 22.351.07.04.028.016a.76.76 0 0 0 .723 0l.028-.015.071-.041a16.975 16.975 0 0 0 1.144-.742 19.58 19.58 0 0 0 2.683-2.282c1.944-1.99 3.963-4.98 3.963-8.827a8.25 8.25 0 0 0-16.5 0c0 3.846 2.02 6.837 3.963 8.827a19.58 19.58 0 0 0 2.682 2.282 16.975 16.975 0 0 0 1.145.742ZM12 13.5a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z';
@@ -439,6 +464,9 @@ export default function ThailandMapSvg({
             {viewLevel === 'places' && placePins.map((pin, i) => {
               const badgeWidth = Math.min(Math.max(pin.name.length * 9.5 + 16, 60), 130) * labelScale;
               const s = 0.75 * labelScale;
+              // หมุดสถานที่ที่ยืนยันแล้ว (จาก community_places) = สีเขียว
+              // หมุดชุมชน OTOP = สีแดง (เหมือนเดิม)
+              const pinColor = pin.place?.kind === 'registered' ? '#2D6A4F' : '#EF4444';
               return (
                 <G
                   key={`pin-${i}`}
@@ -446,7 +474,7 @@ export default function ThailandMapSvg({
                 >
                   {/* Map Pin Icon */}
                   <G transform={`translate(${pin.x - 9 * s}, ${pin.y - 18 * s}) scale(${s})`}>
-                    <Path fill="#EF4444" stroke="#FFFFFF" strokeWidth={0.8} fillRule="evenodd" clipRule="evenodd" d={PIN_PATH} />
+                    <Path fill={pinColor} stroke="#FFFFFF" strokeWidth={0.8} fillRule="evenodd" clipRule="evenodd" d={PIN_PATH} />
                   </G>
                   {/* Name Badge */}
                   <Rect

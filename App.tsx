@@ -43,6 +43,13 @@ function AppContent() {
   const [profileFolderId, setProfileFolderId] = useState<string | null>(null);
   // Post location prefilled from a finished trip stop check-in
   const [pendingPostLocation, setPendingPostLocation] = useState<any | null>(null);
+  // พื้นที่ของชุมชนที่ส่งมาจากหน้าโปรไฟล์ → flow "เป็นคนแรกที่เพิ่มสถานที่"
+  const [pendingCommunityArea, setPendingCommunityArea] = useState<{
+    community?: string | null;
+    subdistrict?: string | null;
+    district?: string | null;
+    province?: string | null;
+  } | null>(null);
 
   const tabLabels: Record<TabKey, string> = {
     home: "หน้าหลัก",
@@ -136,6 +143,12 @@ function AppContent() {
             <ProfileLocal
               onOpenFolder={(folderId) => setProfileFolderId(folderId)}
               onFullScreenChange={setProfileFullScreen}
+              onAddFirstPlace={(area) => {
+                // หน้าโปรไฟล์กด "เป็นคนแรกที่เพิ่ม" → ไปหน้าเพิ่มโพสต์
+                // พร้อมพื้นที่ของชุมชน (ค้นในระดับตำบลได้เลย — PLAN §7.1)
+                setPendingCommunityArea(area);
+                handleTabChange("create");
+              }}
             />
           )
         ) : activeTab === "chat" ? (
@@ -150,13 +163,25 @@ function AppContent() {
           />
         ) : activeTab === "create" ? (
           <CreatePostScreen
-            initialLocation={pendingPostLocation ?? undefined}
+            initialLocation={
+              pendingPostLocation ??
+              (pendingCommunityArea
+                ? {
+                    community: pendingCommunityArea.community ?? undefined,
+                    subdistrict: pendingCommunityArea.subdistrict ?? undefined,
+                    district: pendingCommunityArea.district ?? undefined,
+                    province: pendingCommunityArea.province ?? undefined,
+                  }
+                : undefined)
+            }
             onPosted={() => {
               setPendingPostLocation(null);
+              setPendingCommunityArea(null);
               handleTabChange("home");
             }}
             onCancel={() => {
               setPendingPostLocation(null);
+              setPendingCommunityArea(null);
               handleTabChange("home");
             }}
           />

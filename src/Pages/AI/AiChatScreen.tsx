@@ -188,6 +188,8 @@ export default function AiChatScreen({
         folder: folderCtx,
         mode: chatMode,
         token: chatMode === "host-self" ? session?.access_token ?? undefined : undefined,
+        // ชุมชนของผู้ใช้เอง → ให้ backend ดึงสถานที่ในชุมชนนั้นมาตอบ (D22)
+        communityId: user?.community_id ?? null,
       });
       appendMessage(threadId, { role: "assistant", content: reply });
       setAttachedFolderId(null); // attachment is one-shot per send

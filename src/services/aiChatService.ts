@@ -39,6 +39,11 @@ export interface SendChatOptions {
   mode?: "tourist" | "host-self";
   /** Supabase access token. Required when mode === "host-self", unused otherwise. */
   token?: string;
+  /**
+   * ชุมชนที่กำลังคุยอยู่ (D22) — ให้ backend ดึงเฉพาะสถานที่ในชุมชนนั้น
+   * ถ้าไม่ส่ง backend จะเดาจากชื่อชุมชนในข้อความแทน
+   */
+  communityId?: string | null;
 }
 
 export async function sendChat(
@@ -83,6 +88,7 @@ export async function sendChat(
       messages,
       folder: opts.folder,
       mode: opts.mode ?? "tourist",
+      communityId: opts.communityId ?? undefined,
     },
     timeoutMs: API_TIMEOUT_MS * 3,
   });
