@@ -1,6 +1,7 @@
 import { config, isAiConfigured } from "./config";
 import { AiUpstreamError } from "./aiErrors";
 import { pickHashtagSuggestions } from "./hashtagText";
+import { DiagLog, errorDetail } from "./summaryDiag";
 import type { PlaceCandidate } from "./placeTypes";
 import {
   SYSTEM_PROMPT,
@@ -13,6 +14,19 @@ import {
   SUMMARY_NARRATION_PROMPT,
   buildNarrationPrompt,
 } from "./prompt";
+
+/**
+ * งบ token สำรอง ตอนคำตอบถูกตัดกลางคัน
+ * -------------------------------------------------------------
+ * prompt สรุปขอ JSON ~70 คีย์ ซึ่งกิน token 1,400–3,000
+ * ถ้า AI_MAX_TOKENS ตั้งไว้ต่ำกว่านั้น (เคยเป็น 1024 บน Vercel)
+ * โมเดลจะตอบกลาง JSON → `place` ว่าง → Google Places ไม่มีอะไรให้ค้น
+ * → ผู้ใช้เห็นสรุปเปล่าโดยไม่มีใครบอกว่าติดตรงไหน
+ *
+ * กันไว้ในโค้ด: ถ้าคำตอบถูกตัด ให้ลองใหม่ด้วยงบนี้ก่อน
+ * (งบจริงยังตั้งผ่าน env ได้ แต่ลืมตั้งไม่ควรทำให้สรุดว่างเงียบ ๆ)
+ */
+const RETRY_MAX_TOKENS = 32768;
 
 /** Structured place data extracted from the clip (Video Content Analyzer). */
 export interface PlaceData {
@@ -165,14 +179,32 @@ export function extractJson(raw: string): any | null {
 /**
  * Call the AI endpoint to generate a video summary.
  * The endpoint + token come from config (env), never from the client.
+ *
+ * `diag` เป็นบันทึกรายงาน (ไม่บังคับ) — เวลามีให้ใส่ จะได้รู้ว่าโมเดลตอบ
+ * ถูกตัดกลางทางไหม / ตอบมาเป็น JSON ที่อ่านได้ไหม / ใช้เวลาเท่าไหร่
  */
 export async function generateSummary(
-  input: VideoAnalysisInput
+  input: VideoAnalysisInput,
+  diag?: DiagLog
 ): Promise<AiSummaryResult> {
   const now = new Date().toISOString();
+  const t0 = Date.now();
 
   // No credentials configured → return a graceful stub so dev still works.
   if (!isAiConfigured()) {
+    if (diag) {
+      diag.add({
+        id: "analyze",
+        label: "สรุปโครงสร้าง (M3)",
+        status: "failed",
+        ms: Date.now() - t0,
+        detail: "ยังไม่ได้ตั้งค่า AI (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN)",
+        data: { configured: false },
+      });
+      diag.problem(
+        "ยังไม่ได้ตั้งค่า AI บนเซิร์ฟเวอร์ (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN)"
+      );
+    }
     return {
       status: "unavailable",
       generatedAt: now,
@@ -193,42 +225,130 @@ export async function generateSummary(
       ]
     : promptText;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.ai.timeoutMs);
+  /**
+   * เรียกโมเดลหนึ่งครั้ง — คืนข้อความดิบ พร้อมบอกว่า "จบ" หรือ "ถูกตัด"
+   */
+  const askModel = async (maxTokens: number) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), config.ai.timeoutMs);
+    try {
+      const res = await fetch(`${config.ai.baseUrl}/v1/messages`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": config.ai.authToken,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: config.ai.model,
+          max_tokens: maxTokens,
+          temperature: 0.0,
+          system: SYSTEM_PROMPT,
+          messages: [{ role: "user", content: messageContent }],
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw new AiUpstreamError(res.status, errText);
+      }
+
+      const data: any = await res.json();
+
+      // Why the answer stopped — "max_tokens" means the reply was CUT OFF
+      // mid-JSON, which is what silently empties the whole summary.
+      const stopReason: string | null =
+        typeof data?.stop_reason === "string" ? data.stop_reason : null;
+      const usage: any = data?.usage ?? null;
+
+      // Anthropic Messages API: content is an array of { type: "text", text }
+      const rawText: string = Array.isArray(data?.content)
+        ? data.content.map((c: any) => c?.text ?? "").join("\n").trim()
+        : typeof data?.content === "string"
+        ? data.content
+        : "";
+
+      return {
+        rawText,
+        stopReason,
+        maxTokens,
+        outputTokens:
+          typeof usage?.output_tokens === "number" ? usage.output_tokens : null,
+        parsed: extractJson(rawText),
+        truncated: stopReason === "max_tokens" || stopReason === "length",
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 
   try {
-    const res = await fetch(`${config.ai.baseUrl}/v1/messages`, {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": config.ai.authToken,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: config.ai.model,
-        max_tokens: config.ai.maxTokens,
-        temperature: 0.0,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: "user", content: messageContent }],
-      }),
-    });
+    let attempt = await askModel(config.ai.maxTokens);
 
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      throw new AiUpstreamError(res.status, errText);
+    // ถูกตัด = ข้อมูลตายเงียบ (place ว่าง → Google ค้นไม่ได้ → สรุดว่าง)
+    // แก้ให้เอง: ลองใหม่ด้วยงบที่มากกว่า แทนที่จะปล่อยให้ผู้ใช้เจอสรุปเปล่า
+    if (attempt.truncated) {
+      const firstTokens = attempt.maxTokens;
+      const retryTokens = Math.max(config.ai.maxTokens, RETRY_MAX_TOKENS);
+      const tRetry = Date.now();
+      const retry = await askModel(retryTokens);
+      if (diag) {
+        diag.add({
+          id: "analyze-retry",
+          label: "สรุปโครงสร้าง (M3) — ลองใหม่",
+          status: retry.truncated ? "failed" : "ok",
+          ms: Date.now() - tRetry,
+          detail: retry.truncated
+            ? `ถูกตัดอีกครั้งที่ ${retryTokens} tokens — งบ token ไม่พอสำหรับสรุปนี้`
+            : `คำตอบแรกถูกตัดที่ ${firstTokens} tokens → ลองใหม่ด้วยงบ ${retryTokens} แล้วได้ JSON ที่อ่านได้`,
+          data: {
+            stopReason: retry.stopReason,
+            firstTokens,
+            maxTokens: retryTokens,
+            parsedOk: retry.parsed !== null,
+          },
+        });
+      }
+      attempt = retry;
     }
 
-    const data: any = await res.json();
+    const { rawText, stopReason, outputTokens, parsed, truncated } = attempt;
+    const usedTokens = attempt.maxTokens;
 
-    // Anthropic Messages API: content is an array of { type: "text", text }
-    const rawText: string = Array.isArray(data?.content)
-      ? data.content.map((c: any) => c?.text ?? "").join("\n").trim()
-      : typeof data?.content === "string"
-      ? data.content
-      : "";
-
-    const parsed = extractJson(rawText);
+    if (diag) {
+      const parsedOk = parsed !== null;
+      const detail = truncated
+        ? `โมเดลตอบถูกตัดที่ ${usedTokens} tokens — คำตอบไม่จบ`
+        : parsedOk
+        ? `ได้ JSON ที่อ่านได้ (${rawText.length} ตัวอักษร)`
+        : `โมเดลไม่ได้ตอบเป็น JSON ที่อ่านได้ (${rawText.length} ตัวอักษร)`;
+      diag.add({
+        id: "analyze",
+        label: "สรุปโครงสร้าง (M3)",
+        // ถูกตัด = ข้อมูลตายจริง (ไม่ใช่แค่คำตอบไม่สวย) → นับเป็นล้มเหลว
+        status: truncated || rawText.length === 0 ? "failed" : "ok",
+        ms: Date.now() - t0,
+        detail,
+        data: {
+          stopReason,
+          outputTokens,
+          maxTokens: usedTokens,
+          parsedOk,
+          rawChars: rawText.length,
+          hasPlaceName: typeof parsed?.place_name === "string" && !!parsed.place_name,
+        },
+      });
+      if (truncated) {
+        diag.problem(
+          `โมเดลตอบถูกตัดที่ ${usedTokens} tokens (AI_MAX_TOKENS) — ข้อมูลในคำตอบถูกตัดทิ้ง เพิ่ม AI_MAX_TOKENS ที่ Vercel`
+        );
+      } else if (!parsedOk) {
+        diag.problem(
+          "โมเดลตอบมาไม่ใช่ JSON ที่อ่านได้ — ใช้ข้อความดิบแทนข้อมูลสรุป"
+        );
+      }
+    }
 
     if (parsed) {
       // Diagnostic logging of reasoning and extracted fields
@@ -281,8 +401,23 @@ export async function generateSummary(
       text: (parsed && typeof parsed.text === "string" ? parsed.text : rawText) || "AI ไม่ได้ส่งเนื้อหาสรุปกลับมา",
       onScreenText: input.onScreenText ?? [],
     };
-  } finally {
-    clearTimeout(timer);
+  } catch (err: any) {
+    if (diag) {
+      const msg = errorDetail(err);
+      diag.add({
+        id: "analyze",
+        label: "สรุปโครงสร้าง (M3)",
+        status: "failed",
+        ms: Date.now() - t0,
+        detail: msg,
+        data: {
+          upstreamStatus:
+            typeof err?.upstreamStatus === "number" ? err.upstreamStatus : null,
+        },
+      });
+      diag.problem(`สรุปโครงสร้าง (M3) ล้มเหลว: ${msg}`);
+    }
+    throw err;
   }
 }
 
@@ -375,7 +510,11 @@ export async function generateCaptions(input: CaptionInput): Promise<CaptionSugg
  * Paragraph 1 = what the clip shows. Paragraph 2 = the conditions a
  * traveller needs before going (price, rules, capacity, zones, facilities).
  */
-export async function generateNarration(analysisJson: any): Promise<string> {
+export async function generateNarration(
+  analysisJson: any,
+  diag?: DiagLog
+): Promise<string> {
+  const t0 = Date.now();
   const place = analysisJson?.place ?? analysisJson;
   const placeName = place?.place_name ?? null;
   const province = place?.location?.province ?? null;
@@ -443,8 +582,24 @@ export async function generateNarration(analysisJson: any): Promise<string> {
 
   const fallbackText = [fallbackVisual, fallbackConditions].filter(Boolean).join("\n\n");
 
-  if (!isAiConfigured()) {
+  /** บันทึกว่าใช้ข้อความสำรองแทนคำบรรยายจาก AI — และทำไม */
+  const noteFallback = (reason: string): string => {
+    if (diag) {
+      diag.add({
+        id: "narration",
+        label: "เขียนคำบรรยาย",
+        status: "failed",
+        ms: Date.now() - t0,
+        detail: `ใช้ข้อความสำรอง — ${reason}`,
+        data: { source: "fallback", chars: fallbackText.length },
+      });
+      diag.problem(`เขียนคำบรรยายไม่สำเร็จ (${reason}) — ใช้ข้อความสำรองแทน`);
+    }
     return fallbackText;
+  };
+
+  if (!isAiConfigured()) {
+    return noteFallback("ยังไม่ได้ตั้งค่า AI");
   }
 
   const controller = new AbortController();
@@ -472,7 +627,7 @@ export async function generateNarration(analysisJson: any): Promise<string> {
 
     if (!res.ok) {
       console.warn("[generateNarration] AI returned status", res.status, "→ fallback");
-      return fallbackText;
+      return noteFallback(`AI ตอบกลับสถานะ ${res.status}`);
     }
 
     const data: any = await res.json();
@@ -487,7 +642,7 @@ export async function generateNarration(analysisJson: any): Promise<string> {
     const trimmed = rawText.trimStart();
     if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
       console.warn("[generateNarration] AI returned JSON → using fallback");
-      return fallbackText;
+      return noteFallback("โมเดลตอบมาเป็น JSON");
     }
 
     // 2. If AI replied with "ไม่มีข้อมูล" or similar
@@ -497,13 +652,25 @@ export async function generateNarration(analysisJson: any): Promise<string> {
       rawText.includes("ขอรอคลิป")
     ) {
       console.warn("[generateNarration] AI returned no-data phrase → using fallback");
-      return fallbackText;
+      return noteFallback("โมเดลตอบว่าไม่มีข้อมูล");
     }
 
-    return rawText || fallbackText;
+    if (diag) {
+      const paragraphs = rawText.split(/\n\s*\n/).filter((p) => p.trim()).length;
+      diag.add({
+        id: "narration",
+        label: "เขียนคำบรรยาย",
+        status: "ok",
+        ms: Date.now() - t0,
+        detail: `ได้คำบรรยายจาก AI (${rawText.length} ตัวอักษร, ${paragraphs} ย่อหน้า)`,
+        data: { source: "ai", chars: rawText.length, paragraphs },
+      });
+    }
+
+    return rawText || noteFallback("โมเดลตอบมาว่าง");
   } catch (err) {
     console.warn("[generateNarration] error:", err);
-    return fallbackText;
+    return noteFallback(errorDetail(err));
   } finally {
     clearTimeout(timer);
   }

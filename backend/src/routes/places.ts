@@ -4,6 +4,7 @@ import type { AiSummaryResult } from "../aiClient";
 import type { PlaceCandidate } from "../placeTypes";
 import { getSupabaseAdmin } from "../supabaseAdmin";
 import { sendError } from "../middleware/errors";
+import { DiagLog, errorDetail } from "../summaryDiag";
 
 export type { PlaceCandidate };
 
@@ -378,12 +379,41 @@ export async function getPlaceDetails(placeId: string): Promise<PlaceCandidate |
  * then does the app spend one Place Details call to fill the form.
  */
 export async function enrichWithGooglePlaces(
-  summary: AiSummaryResult
+  summary: AiSummaryResult,
+  diag?: DiagLog
 ): Promise<AiSummaryResult> {
-  if (!isPlacesConfigured()) return summary;
+  const t0 = Date.now();
+
+  if (!isPlacesConfigured()) {
+    if (diag) {
+      diag.add({
+        id: "places",
+        label: "ค้นสถานที่ (Google Places)",
+        status: "skipped",
+        ms: 0,
+        detail: "ไม่ได้ตั้งค่า GOOGLE_PLACES_API_KEY บนเซิร์ฟเวอร์",
+      });
+      diag.problem("ไม่ได้ตั้งค่า GOOGLE_PLACES_API_KEY — ค้นสถานที่ไม่ได้");
+    }
+    return summary;
+  }
 
   const place = summary.place;
-  if (!place) return summary;
+  if (!place) {
+    if (diag) {
+      diag.add({
+        id: "places",
+        label: "ค้นสถานที่ (Google Places)",
+        status: "failed",
+        ms: Date.now() - t0,
+        detail: "AI ไม่ได้ส่งข้อมูลสถานที่มาเลย (place ว่าง) — ไม่มีอะไรให้ค้น",
+      });
+      diag.problem(
+        "AI ไม่ได้ส่งข้อมูลสถานที่มาเลย — ค้น Google Places ไม่ได้ (มักเป็นเพราะคำตอบของโมเดลถูกตัด)"
+      );
+    }
+    return summary;
+  }
 
   const rawTranscript = (summary as any)._transcript as string | undefined;
   const rawOnScreen = Array.isArray((summary as any)._onScreenText)
@@ -416,18 +446,53 @@ export async function enrichWithGooglePlaces(
     query = `${[knownSubdistrict, knownDistrict, knownProvince].filter(Boolean).join(" ")} ประเทศไทย`.trim();
   }
 
-  if (!query) return summary;
+  if (!query) {
+    if (diag) {
+      diag.add({
+        id: "places",
+        label: "ค้นสถานที่ (Google Places)",
+        status: "failed",
+        ms: Date.now() - t0,
+        detail: "สร้างคำค้นไม่ได้ (ไม่มีชื่อสถานที่/ชุมชน/จังหวัด)",
+      });
+      diag.problem("สร้างคำค้น Google ไม่ได้ — ไม่มีชื่อสถานที่หรือจังหวัดเลย");
+    }
+    return summary;
+  }
 
   console.log("[places] searching candidates with query:", query);
 
   let candidates: PlaceCandidate[] = [];
   try {
     candidates = await searchPlaceCandidates(query);
-  } catch {
+  } catch (err: any) {
+    if (diag) {
+      const msg = errorDetail(err);
+      diag.add({
+        id: "places",
+        label: "ค้นสถานที่ (Google Places)",
+        status: "failed",
+        ms: Date.now() - t0,
+        detail: `เรียก Google Places ไม่สำเร็จ: ${msg}`,
+      });
+      diag.problem(`เรียก Google Places ไม่สำเร็จ: ${msg}`);
+    }
     return summary; // non-fatal
   }
 
-  if (candidates.length === 0) return summary;
+  if (candidates.length === 0) {
+    if (diag) {
+      diag.add({
+        id: "places",
+        label: "ค้นสถานที่ (Google Places)",
+        status: "failed",
+        ms: Date.now() - t0,
+        detail: `ค้นแล้วไม่เจอสถานที่ (คำค้น: ${query})`,
+      });
+      diag.problem(`ค้น Google Places แล้วไม่เจอสถานที่ — คำค้น "${query}"`);
+    }
+    return summary;
+  }
 
   // Filter to Thailand-only results.
   const thCandidates = candidates.filter(
@@ -449,6 +514,17 @@ export async function enrichWithGooglePlaces(
   });
 
   console.log("[places] candidate list:", ranked.length, "— awaiting user pick");
+
+  if (diag) {
+    diag.add({
+      id: "places",
+      label: "ค้นสถานที่ (Google Places)",
+      status: "ok",
+      ms: Date.now() - t0,
+      detail: `เจอ ${ranked.length} จุด — รอผู้ใช้ติ๊ก`,
+      data: { candidates: ranked.length },
+    });
+  }
 
   // Clean up internal fields before returning.
   const { _transcript, _onScreenText, ...cleanSummary } = summary as any;

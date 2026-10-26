@@ -1,4 +1,5 @@
 import { config, isGeminiConfigured } from "./config";
+import { DiagLog } from "./summaryDiag";
 
 /**
  * Gemini transcription — Pillar 1 of the AI Summary flow.
@@ -68,12 +69,30 @@ export interface GeminiModelCheck {
  * disabled, network failure…). It never throws, so a transcription outage
  * can never take the whole summary down with it.
  */
-export async function transcribeVideo(videoUrl: string): Promise<TranscriptResult | null> {
-  if (!videoUrl) return null;
+export async function transcribeVideo(
+  videoUrl: string,
+  diag?: DiagLog
+): Promise<TranscriptResult | null> {
+  const t0 = Date.now();
+  if (!videoUrl) {
+    if (diag) diag.skip("transcribe", "ถอดเสียง (Gemini)", "ไม่มี URL คลิป");
+    return null;
+  }
 
   const check = await checkGeminiModel();
   if (!check.ok) {
     console.warn("[gemini] transcription skipped:", check.reason);
+    if (diag) {
+      const reason = check.reason ?? "โมเดล Gemini ใช้ไม่ได้";
+      diag.add({
+        id: "transcribe",
+        label: "ถอดเสียง (Gemini)",
+        status: "failed",
+        ms: Date.now() - t0,
+        detail: reason,
+      });
+      diag.problem(`ถอดเสียงไม่สำเร็จ: ${reason}`);
+    }
     return null;
   }
 
@@ -95,6 +114,19 @@ export async function transcribeVideo(videoUrl: string): Promise<TranscriptResul
     for (const transport of order) {
       const result = await transcribeVia(transport, videoUrl, controller.signal);
       if (result) {
+        if (diag) {
+          const chars = result.transcript.length;
+          diag.add({
+            id: "transcribe",
+            label: "ถอดเสียง (Gemini)",
+            status: "ok",
+            ms: Date.now() - t0,
+            detail: chars
+              ? `ได้ข้อความ ${chars} ตัวอักษร (${result.audioType})`
+              : `ถอดได้แต่ไม่มีเสียงพูดในคลิป (${result.audioType})`,
+            data: { chars, audioType: result.audioType, transport },
+          });
+        }
         return {
           ...result,
           model: config.gemini.model,
@@ -108,6 +140,17 @@ export async function transcribeVideo(videoUrl: string): Promise<TranscriptResul
         );
       }
     }
+    if (diag) {
+      diag.add({
+        id: "transcribe",
+        label: "ถอดเสียง (Gemini)",
+        status: "failed",
+        ms: Date.now() - t0,
+        detail: "ลองทุกวิธีแล้วไม่สำเร็จ",
+        data: { transports: order.join("+") },
+      });
+      diag.problem("ถอดเสียงไม่สำเร็จ — ลองทุกวิธีแล้ว (สรุปจากภาพอย่างเดียว)");
+    }
     return null;
   } catch (err: any) {
     const reason =
@@ -115,6 +158,16 @@ export async function transcribeVideo(videoUrl: string): Promise<TranscriptResul
         ? `หมดเวลา ${config.gemini.timeoutMs}ms`
         : err?.message ?? "ไม่ทราบสาเหตุ";
     console.warn("[gemini] transcription failed:", reason);
+    if (diag) {
+      diag.add({
+        id: "transcribe",
+        label: "ถอดเสียง (Gemini)",
+        status: "failed",
+        ms: Date.now() - t0,
+        detail: reason,
+      });
+      diag.problem(`ถอดเสียงไม่สำเร็จ: ${reason}`);
+    }
     return null;
   } finally {
     clearTimeout(timer);

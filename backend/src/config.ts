@@ -33,7 +33,19 @@ export const config = {
     authToken: required("ANTHROPIC_AUTH_TOKEN"),
     model: process.env.ANTHROPIC_MODEL?.trim() || "minimax-m3",
     timeoutMs: num("AI_TIMEOUT_MS", 120000),
-    maxTokens: num("AI_MAX_TOKENS", 1024),
+    /**
+     * งบ token ต่อคำตอบของโมเดล
+     * -------------------------------------------------------------
+     * prompt สรุปขอ JSON ~70 คีย์ (กิน 1,400–3,000 tokens)
+     *
+     * ค่านี้เคยเป็น 1024 (default ในโค้ด ไม่ใช่ env) → โมเดลตอบกลาง JSON
+     * → `place` ว่าง → Google Places ไม่มีอะไรให้ค้น → สรุดว่างเงียบ ๆ
+     * โดยไม่มีใครบอกได้ว่าหายตรงไหน
+     *
+     * ค่าเริ่มต้นจึงต้องพอสำหรับสรุปเต็ม และ "ไม่ได้ตั้ง env" ต้องไม่กลายเป็น
+     * เหตุผลที่สรุดเสีย (ค่าเริ่มต้นคือค่าที่ปลอดภัย ไม่ใช่ค่าที่พังเงียบ)
+     */
+    maxTokens: num("AI_MAX_TOKENS", 32768),
     /**
      * Proofread pass — a copy-edit round that fixes misspelled Thai in the
      * summary + narration. Costs one extra model call per stage, so it can
@@ -72,6 +84,25 @@ export const config = {
     token: required("OTOP_API_TOKEN"),
   },
 };
+
+/**
+ * เตือนตอนเริ่มเซิร์ฟเวอร์: งบ token น้อยเกินไป = สรุดว่างแบบเงียบ
+ * -------------------------------------------------------------
+ * prompt สรุปกิน 1,400–3,000 tokens ถ้างบน้อยกว่านั้น โมเดลจะตอบกลาง JSON
+ * → `place` ว่าง → Google Places ไม่มีอะไรให้ค้น → สรุดว่าง โดยไม่มี error
+ *
+ * เคยเกิดจริงบน Vercel เพราะ "ไม่ได้ตั้ง env" → ไปใช้ default 1024 ในโค้ด
+ * เลยเตือนไว้ ไม่ให้เป็นเงื่อนไขที่ต้องเดา
+ */
+const MIN_SUMMARY_MAX_TOKENS = 4096;
+if (config.ai.maxTokens < MIN_SUMMARY_MAX_TOKENS) {
+  console.warn(
+    `[config] ⚠️ AI_MAX_TOKENS = ${config.ai.maxTokens} น้อยเกินไป — ` +
+      `prompt สรุปต้องการ ${MIN_SUMMARY_MAX_TOKENS}+ tokens ` +
+      `(โมเดลจะตอบกลาง JSON แล้วสรุดจะว่างแบบไม่มี error) — ` +
+      `ตั้งค่าใน Vercel หรือแก้ค่าเริ่มต้นที่ backend/src/config.ts`
+  );
+}
 
 /** True only when both base URL and token are configured. */
 export function isAiConfigured(): boolean {

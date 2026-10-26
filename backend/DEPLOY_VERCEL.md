@@ -24,18 +24,29 @@ You'll get a URL like `https://local-ai-backend.vercel.app`.
 ## 4. Set environment variables on Vercel (NOT in code)
 Dashboard → your project → **Settings → Environment Variables**, add:
 
-| Name | Value |
-|---|---|
-| `ANTHROPIC_BASE_URL` | `https://nrrai2-model.sit.kmutt.ac.th/api` |
-| `ANTHROPIC_AUTH_TOKEN` | your real token |
-| `ANTHROPIC_MODEL` | `minimax-m3` |
-| `AI_TIMEOUT_MS` | `120000` |
-| `AI_MAX_TOKENS` | `1024` |
+| Name | Value | จำเป็น? |
+|---|---|---|
+| `ANTHROPIC_BASE_URL` | `https://nrrai2-model.sit.kmutt.ac.th/api` | จำเป็น |
+| `ANTHROPIC_AUTH_TOKEN` | your real token | จำเป็น |
+| `ANTHROPIC_MODEL` | `minimax-m3` | ไม่ (default เหมือนกัน) |
+| `AI_TIMEOUT_MS` | `120000` | ไม่ (default เหมือนกัน) |
+| `AI_MAX_TOKENS` | `32768` | **ไม่** — ค่าเริ่มต้นใน `src/config.ts` คือ 32768 อยู่แล้ว |
 
 Then redeploy so they take effect:
 ```bash
 vercel --prod
 ```
+
+> ⚠️ **ระวังเรื่อง "env ที่ไม่ได้ตั้ง"**
+>
+> ค่าที่ไม่ได้ตั้งบน Vercel จะไปใช้ **default ใน `src/config.ts`** เงียบ ๆ
+> เคยเกิดกรณีนี้กับ `AI_MAX_TOKENS`: ไม่มีใน dashboard → ไปใช้ default **1024**
+> → โมเดลตอบกลาง JSON → `place` ว่าง → Google Places ไม่มีอะไรให้ค้น
+> → ผู้ใช้เห็นสรุปเปล่า โดยไม่มี error ให้ตัวไหน
+>
+> ตอนนี้ default เป็น 32768 (พอสำหรับ prompt ~70 คีย์) และเซิร์ฟเวอร์จะเตือนตอน
+> เริ่มถ้างบน้อยกว่า 4096 + ถ้าคำตอบถูกตัด ระบบจะลองใหม่ด้วยงบ 32768 อัตโนมัติ
+> ดูรายงาน `รายงานการวิเคราะห์` ในแอปได้ว่าติดตรงไหน
 
 > `PORT` is NOT needed on Vercel (serverless handles it).
 

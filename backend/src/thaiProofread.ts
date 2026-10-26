@@ -19,6 +19,7 @@
 import { config, isAiConfigured } from "./config";
 import { AiUpstreamError } from "./aiErrors";
 import { extractJson, type AiSummaryResult, type PlaceData } from "./aiClient";
+import { DiagLog, errorDetail } from "./summaryDiag";
 import {
   PROOFREAD_SYSTEM_PROMPT,
   buildProofreadSummaryPrompt,
@@ -200,9 +201,20 @@ export interface ProofreadCorrections {
  */
 export async function proofreadSummary(
   summary: AiSummaryResult,
-  transcript?: string | null
+  transcript?: string | null,
+  diag?: DiagLog
 ): Promise<ProofreadCorrections | null> {
-  if (!summary.place) return null;
+  const t0 = Date.now();
+  if (!summary.place) {
+    if (diag) {
+      diag.skip(
+        "proofread_summary",
+        "ตรวจสะกดสรุป",
+        "ไม่มีข้อมูลสถานที่ให้ตรวจ"
+      );
+    }
+    return null;
+  }
   try {
     const raw = await callModel(
       buildProofreadSummaryPrompt({
@@ -213,12 +225,54 @@ export async function proofreadSummary(
       }),
       4096
     );
-    if (!raw) return null;
+    if (!raw) {
+      if (diag) {
+        diag.skip(
+          "proofread_summary",
+          "ตรวจสะกดสรุป",
+          "โมเดลไม่ตอบ (แต่ละรอบไม่เป็นอันตราย — ใช้ข้อความเดิม)"
+        );
+      }
+      return null;
+    }
     const parsed = extractJson(raw);
-    if (!parsed || typeof parsed !== "object") return null;
+    if (!parsed || typeof parsed !== "object") {
+      if (diag) {
+        diag.add({
+          id: "proofread_summary",
+          label: "ตรวจสะกดสรุป",
+          status: "failed",
+          ms: Date.now() - t0,
+          detail: "โมเดลตอบมาไม่ใช่ JSON — ใช้ข้อความเดิม",
+        });
+        diag.problem("ตรวจสะกดสรุปไม่สำเร็จ — โมเดลตอบมาไม่ใช่ JSON");
+      }
+      return null;
+    }
+    if (diag) {
+      diag.add({
+        id: "proofread_summary",
+        label: "ตรวจสะกดสรุป",
+        status: "ok",
+        ms: Date.now() - t0,
+        detail: "ตรวจสะกดผ่าน",
+        data: { chars: raw.length },
+      });
+    }
     return parsed as ProofreadCorrections;
   } catch (err) {
-    console.warn("[proofread] summary ไม่สำเร็จ — ใช้ข้อมูลเดิม:", (err as any)?.message);
+    const msg = errorDetail(err);
+    console.warn("[proofread] summary ไม่สำเร็จ — ใช้ข้อมูลเดิม:", msg);
+    if (diag) {
+      diag.add({
+        id: "proofread_summary",
+        label: "ตรวจสะกดสรุป",
+        status: "failed",
+        ms: Date.now() - t0,
+        detail: msg,
+      });
+      diag.problem(`ตรวจสะกดสรุปไม่สำเร็จ: ${msg}`);
+    }
     return null;
   }
 }
@@ -229,9 +283,14 @@ export async function proofreadSummary(
 export async function proofreadNarration(
   narration: string,
   facts: Record<string, unknown>,
-  transcript?: string | null
+  transcript?: string | null,
+  diag?: DiagLog
 ): Promise<string | null> {
-  if (!narration.trim()) return null;
+  const t0 = Date.now();
+  if (!narration.trim()) {
+    if (diag) diag.skip("proofread_narration", "ตรวจสะกดคำบรรยาย", "ไม่มีคำบรรยายให้ตรวจ");
+    return null;
+  }
   try {
     const raw = await callModel(
       buildProofreadNarrationPrompt({ narration, facts, transcript }),
@@ -239,22 +298,100 @@ export async function proofreadNarration(
       // past 4k tokens) — the copy-edit has to fit the whole thing back out.
       8192
     );
-    if (!raw) return null;
+    if (!raw) {
+      if (diag) {
+        diag.skip(
+          "proofread_narration",
+          "ตรวจสะกดคำบรรยาย",
+          "โมเดลไม่ตอบ (ใช้คำบรรยายเดิม)"
+        );
+      }
+      return null;
+    }
     const parsed = extractJson(raw);
     const corrected =
       typeof parsed?.narration === "string" ? String(parsed.narration).trim() : "";
-    if (!corrected) return null;
+    if (!corrected) {
+      if (diag) {
+        diag.add({
+          id: "proofread_narration",
+          label: "ตรวจสะกดคำบรรยาย",
+          status: "failed",
+          ms: Date.now() - t0,
+          detail: "โมเดลตอบมาไม่ใช่ JSON — ใช้คำบรรยายเดิม",
+        });
+        diag.problem("ตรวจสะกดคำบรรยายไม่สำเร็จ — โมเดลตอบมาไม่ใช่ JSON");
+      }
+      return null;
+    }
 
     // กันพลาด: เลขขยับ / ย่อหน้าเพี้ยน / ถูกเขียนใหม่ทั้งย่อหน้า
-    if (!sameDigits(narration, corrected)) return null;
+    if (!sameDigits(narration, corrected)) {
+      if (diag) {
+        diag.add({
+          id: "proofread_narration",
+          label: "ตรวจสะกดคำบรรยาย",
+          status: "failed",
+          ms: Date.now() - t0,
+          detail: "ตัวเลขเปลี่ยนไป — ใช้คำบรรยายเดิม",
+        });
+        diag.problem("ตรวจสะกดคำบรรยายไม่ผ่าน — ตัวเลขเปลี่ยนไป ใช้คำบรรยายเดิม");
+      }
+      return null;
+    }
     const before = narration.split(/\n\s*\n/).filter((p) => p.trim()).length;
     const after = corrected.split(/\n\s*\n/).filter((p) => p.trim()).length;
-    if (before !== after) return null;
+    if (before !== after) {
+      if (diag) {
+        diag.add({
+          id: "proofread_narration",
+          label: "ตรวจสะกดคำบรรยาย",
+          status: "failed",
+          ms: Date.now() - t0,
+          detail: "จำนวนย่อหน้าเปลี่ยนไป — ใช้คำบรรยายเดิม",
+        });
+        diag.problem("ตรวจสะกดคำบรรยายไม่ผ่าน — จำนวนย่อหน้าเปลี่ยนไป");
+      }
+      return null;
+    }
     const ratio = corrected.length / Math.max(1, narration.trim().length);
-    if (ratio < 0.85 || ratio > 1.15) return null;
+    if (ratio < 0.85 || ratio > 1.15) {
+      if (diag) {
+        diag.add({
+          id: "proofread_narration",
+          label: "ตรวจสะกดคำบรรยาย",
+          status: "failed",
+          ms: Date.now() - t0,
+          detail: "ความยาวห่างเกิน 15% — ใช้คำบรรยายเดิม",
+        });
+        diag.problem("ตรวจสะกดคำบรรยายไม่ผ่าน — ความยาวห่างเกิน 15%");
+      }
+      return null;
+    }
+    if (diag) {
+      diag.add({
+        id: "proofread_narration",
+        label: "ตรวจสะกดคำบรรยาย",
+        status: "ok",
+        ms: Date.now() - t0,
+        detail: "ตรวจสะกดผ่าน",
+        data: { chars: corrected.length },
+      });
+    }
     return corrected;
   } catch (err) {
-    console.warn("[proofread] narration ไม่สำเร็จ — ใช้ข้อความเดิม:", (err as any)?.message);
+    const msg = errorDetail(err);
+    console.warn("[proofread] narration ไม่สำเร็จ — ใช้ข้อความเดิม:", msg);
+    if (diag) {
+      diag.add({
+        id: "proofread_narration",
+        label: "ตรวจสะกดคำบรรยาย",
+        status: "failed",
+        ms: Date.now() - t0,
+        detail: msg,
+      });
+      diag.problem(`ตรวจสะกดคำบรรยายไม่สำเร็จ: ${msg}`);
+    }
     return null;
   }
 }

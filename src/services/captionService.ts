@@ -1,5 +1,5 @@
 import { API_BASE_URL, API_TIMEOUT_MS } from "./apiConfig";
-import { aiFetch, AiError, toastAiError } from "./aiHttp";
+import { aiFetch, AiError, asAiError, toastAiError } from "./aiHttp";
 
 /**
  * Caption helper + pre-upload AI summary.
@@ -90,6 +90,34 @@ export interface SummaryPlace {
   google_candidates?: GooglePlaceCandidate[];
 }
 
+/** ผลของหนึ่งขั้นตอนในการสรุป */
+export type DiagStatus = "ok" | "failed" | "skipped";
+
+export interface DiagStep {
+  id: string;
+  label: string;
+  status: DiagStatus;
+  /** ใช้เวลากี่มิลลิวินาที */
+  ms: number;
+  /** อธิบายสั้น ๆ ว่าเกิดอะไรขึ้น */
+  detail: string;
+  data?: Record<string, number | string | boolean | null>;
+}
+
+/**
+ * รายงานการวิเคราะห์ — backend ส่งกลับมาพร้อม summary
+ * บอกว่าแต่ละขั้นตอน (ถอดเสียง → สรุป → ตรวจสะกด → ค้นสถานที่ → เขียนคำบรรยาย)
+ * เกิดอะไรขึ้น เพื่อให้รู้ว่า "ทำไมข้อมูลไม่ครบ"
+ */
+export interface SummaryDiag {
+  startedAt: string;
+  totalMs: number;
+  verdict: "ok" | "partial" | "failed";
+  /** ปัญหาที่ทำให้ข้อมูลไม่ครบ */
+  problems: string[];
+  steps: DiagStep[];
+}
+
 /** Full summary object returned by the backend (what we persist + display). */
 export interface AiSummaryResult {
   status: "ready" | "processing" | "unavailable" | "error";
@@ -104,6 +132,8 @@ export interface AiSummaryResult {
   visualTags?: string[];
   onScreenText?: string[];
   transcriptHighlights?: string[];
+  /** รายงานการวิเคราะห์ (มีตอน backend ทำงานสำเร็จบางส่วนหรือล้มเหลว) */
+  _diag?: SummaryDiag;
 }
 
 export interface SummaryInput {
@@ -181,6 +211,30 @@ export async function generatePreviewSummary(
     });
   }
   return data;
+}
+
+/**
+ * ดึงรายงานการวิเคราะห์ออกจากคำตอบที่ backend ตอบกลับ — ทั้งกรณีสำเร็จ
+ * (อยู่ใน `summary._diag`) และกรณีล้มเหลว (อยู่ใน body ของ error)
+ *
+ * ใช้ตอนสรุปไม่สำเร็จ เพื่อบอกผู้ใช้ว่า "ติดที่ขั้นไหน" แทนคำว่า "เรียก AI ไม่สำเร็จ"
+ */
+export function extractDiag(err: unknown): SummaryDiag | null {
+  const aiErr = asAiError(err);
+  // `responseBody` = ข้อความที่ backend ส่งมาทั้งก้อน (มี `_diag`)
+  // `body` = อาจเป็น body ของปลายทาง AI ที่ backend ส่งต่อมาแทน
+  const raw = aiErr?.responseBody ?? aiErr?.body;
+  if (!raw) return null;
+  try {
+    const data = JSON.parse(raw);
+    const diag = data?._diag;
+    if (diag && typeof diag === "object" && Array.isArray(diag.steps)) {
+      return diag as SummaryDiag;
+    }
+  } catch {
+    // body ไม่ใช่ JSON — ไม่มีรายงานให้ดึง
+  }
+  return null;
 }
 
 /** Caption suggestions + hashtag suggestions returned by the backend. */

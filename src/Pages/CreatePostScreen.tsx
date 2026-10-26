@@ -31,8 +31,10 @@ import { uploadVideo, uploadDraftVideo, deleteDraftVideo } from "../services/upl
 import {
   suggestCaptions,
   generatePreviewSummary,
+  extractDiag,
   type AiSummaryResult,
   type SummaryPlace,
+  type SummaryDiag,
 } from "../services/captionService";
 import PlaceDetailsCard, {
   type PlaceDetailsValues,
@@ -223,6 +225,9 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
   const [summaryEditing, setSummaryEditing] = useState(false);
   const [summaryDraft, setSummaryDraft] = useState("");
   const [accuracy, setAccuracy] = useState<number>(0); // 1–5, 0 = not rated
+  // รายงานการวิเคราะห์จาก backend — บอกว่าแต่ละขั้นตอนเกิดอะไรขึ้น
+  const [summaryDiag, setSummaryDiag] = useState<SummaryDiag | null>(null);
+  const [showDiag, setShowDiag] = useState(false);
 
   /**
    * Push the place's details into the summary.
@@ -345,9 +350,16 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
       console.warn("[summary] FAIL", aiErr?.status ?? "-", aiErr?.message ?? err);
       setSummary(null);
       setSummaryDraft("");
+      // รายงานจาก backend บอกได้ว่าติดที่ขั้นไหน — ไม่ต้องเดา
+      const diag = extractDiag(err);
+      setSummaryDiag(diag);
+      if (diag) setShowDiag(true);
+      const why = diag?.problems?.length
+        ? `\n\nสาเหตุ:\n${diag.problems.map((p) => `• ${p}`).join("\n")}`
+        : "";
       Alert.alert(
         "สรุปไม่สำเร็จ",
-        `${aiErr?.message ?? "เรียก AI ไม่สำเร็จ"}\n\nข้อมูลสถานที่ที่กรอกไว้ไม่ถูกแตะต้อง — กด "สรุปใหม่" เพื่อลองอีกครั้ง`
+        `${aiErr?.message ?? "เรียก AI ไม่สำเร็จ"}${why}\n\nข้อมูลสถานที่ที่กรอกไว้ไม่ถูกแตะต้อง — กด "สรุปใหม่" เพื่อลองอีกครั้ง`
       );
       return;
     } finally {
@@ -356,6 +368,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
 
     setSummary(result);
     setSummaryDraft(result?.text ?? "");
+    setSummaryDiag(result?._diag ?? null);
     setAccuracy(0);
     // The place's details are the place's, not the summary's — put them back
     // after a regeneration, so a fresh summary never drops them.
@@ -1098,6 +1111,68 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
                   <SparklesIcon size={14} color="#FFFFFF" />
                   <Text className="text-white text-[12px] font-bold ml-1">ให้ AI สรุป</Text>
                 </TouchableOpacity>
+              </View>
+            )}
+
+            {/* รายงานการวิเคราะห์ — บอกว่าแต่ละขั้นตอนเกิดอะไรขึ้น
+                (โดยเฉพาะตอนข้อมูลไม่ครบ จะได้รู้ว่าติดที่ขั้นไหน) */}
+            {summaryDiag && (
+              <View className="mt-3 bg-white border border-amber-200 rounded-xl p-3">
+                {summaryDiag.problems.length > 0 && (
+                  <View className="bg-red-50 border border-red-200 rounded-lg p-2.5 mb-2">
+                    <Text className="text-red-700 font-bold text-[12px] mb-1">
+                      ทำไมข้อมูลไม่ครบ
+                    </Text>
+                    {summaryDiag.problems.map((p, i) => (
+                      <Text key={i} className="text-red-600 text-[12px] leading-5">
+                        • {p}
+                      </Text>
+                    ))}
+                  </View>
+                )}
+
+                <TouchableOpacity
+                  onPress={() => setShowDiag(!showDiag)}
+                  activeOpacity={0.7}
+                  className="flex-row items-center"
+                >
+                  <Text className="text-amber-700 font-bold text-[12px]">
+                    {showDiag ? "ซ่อนรายงานการวิเคราะห์" : "ดูรายงานการวิเคราะห์"}
+                  </Text>
+                  <Text className="text-amber-500 text-[12px] ml-1">
+                    {showDiag ? "▲" : "▼"}
+                  </Text>
+                </TouchableOpacity>
+
+                {showDiag && (
+                  <View className="mt-2">
+                    {summaryDiag.steps.map((s) => (
+                      <View key={s.id} className="flex-row mb-2">
+                        <Text className="text-gray-400 w-5 text-[12px]">
+                          {s.status === "ok" ? "✓" : s.status === "failed" ? "✗" : "–"}
+                        </Text>
+                        <View className="flex-1">
+                          <Text className="text-gray-700 text-[12px] font-semibold">
+                            {s.label}
+                            <Text className="text-gray-400 font-normal">
+                              {" "}
+                              ({s.ms >= 1000 ? `${(s.ms / 1000).toFixed(1)} วิ` : `${s.ms} มิลลิวินาที`})
+                            </Text>
+                          </Text>
+                          {!!s.detail && (
+                            <Text className="text-gray-500 text-[12px] leading-4">
+                              {s.detail}
+                            </Text>
+                          )}
+                        </View>
+                      </View>
+                    ))}
+                    <Text className="text-gray-400 text-[12px] mt-1">
+                      รวม {(summaryDiag.totalMs / 1000).toFixed(1)} วินาที ·{" "}
+                      {summaryDiag.steps.length} ขั้นตอน
+                    </Text>
+                  </View>
+                )}
               </View>
             )}
           </View>

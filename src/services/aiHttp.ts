@@ -25,6 +25,15 @@ export class AiError extends Error {
   readonly kind: AiErrorKind;
   readonly status: number | null;
   readonly body: string;
+  /**
+   * The RAW response text, when there was one.
+   *
+   * `body` is the upstream provider's body when the backend forwards one
+   * (it usually carries the real reason), so it is NOT always the JSON the
+   * backend sent us. This keeps the original around for callers that need
+   * our own fields — the AI summary's diagnostic report, for example.
+   */
+  readonly responseBody?: string;
   readonly requestId: string | null;
   readonly label: string;
   readonly url: string;
@@ -34,6 +43,7 @@ export class AiError extends Error {
     kind: AiErrorKind;
     status: number | null;
     body: string;
+    responseBody?: string;
     requestId: string | null;
     label: string;
     url: string;
@@ -48,6 +58,7 @@ export class AiError extends Error {
     this.kind = params.kind;
     this.status = params.status;
     this.body = params.body;
+    this.responseBody = params.responseBody;
     this.requestId = params.requestId;
     this.label = params.label;
     this.url = params.url;
@@ -210,6 +221,7 @@ export async function aiFetch<T>(opts: AiFetchOptions): Promise<T> {
         kind,
         status: res.status,
         body: meta.upstreamBody ?? text,
+        responseBody: text,
         requestId: requestId ?? meta.requestId,
         label,
         url,
