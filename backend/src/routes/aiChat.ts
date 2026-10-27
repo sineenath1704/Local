@@ -7,6 +7,11 @@ import {
   loadNearbyCommunities,
   resolveCommunityByName,
 } from "../communityContext";
+import {
+  loadFolderContext,
+  formatFolderContextBlock,
+  FolderAccessError,
+} from "../folderContext";
 
 import { getSupabaseAdmin } from "../supabaseAdmin";
 import { requestId } from "../middleware/requestContext";
@@ -20,11 +25,17 @@ import { sendError } from "../middleware/errors";
  *
  * Body: {
  *   messages: { role: "user" | "assistant", content: string }[],
- *   folder?: { folderName: string, places: string[] },   // optional folder context
+ *   folder?: { folderName: string, places: string[] },   // optional folder context (legacy)
+ *   folderId?: string,                                  // optional — ให้ backend โหลดโฟลเดอร์เอง
  *   place?: PlaceContext,                                // optional specific place context
  *   mode?:  "tourist" | "host-self",                     // host-self = JWT-gated advisor
  *   communityId?: string,                                // optional community context (D22)
  * }
+ *
+ * `folderId` คือ path ใหม่: ฝั่งแอปส่งแค่รหัสโฟลเดอร์ → backend ไปอ่านคลิปจริง
+ * จับคู่กับทะเบียนสถานที่ แล้วเรียบเรียงเป็นบล็อกข้อมูลให้เอง
+ * (ถ้าไม่มี token หรือโหลดไม่ได้ → ถอยไปใช้ `folder` แบบเดิมที่ client ส่งมา
+ *  ถ้ามี → รักษาการทำงานของแชทแบบไม่ล็อกอินไว้)
  *
  * `mode: "host-self"` flips the handler into private advisor mode: the
  * caller's JWT identifies them, the backend pulls their own users row +
@@ -86,6 +97,10 @@ router.post("/", async (req: Request, res: Response) => {
   const body = req.body ?? {};
   const messages: AiMessage[] = Array.isArray(body.messages) ? body.messages : [];
   const folder: FolderContext | undefined = body.folder;
+  const folderId: string | null =
+    typeof body.folderId === "string" && body.folderId.trim()
+      ? body.folderId.trim()
+      : null;
   const place: PlaceContext | undefined = body.place;
   const mode: "tourist" | "host-self" = body.mode === "host-self" ? "host-self" : "tourist";
 
@@ -322,6 +337,71 @@ router.post("/", async (req: Request, res: Response) => {
     }
   }
 
+  // ── โฟลเดอร์ที่เลือกจากแอป (path ใหม่) ─────────────────────────────
+  // ฝั่งแอปส่งรหัสโฟลเดอร์ → backend ไปอ่านคลิปจริงจาก DB + จับคู่ทะเบียนสถานที่
+  // แล้วเรียบเรียงเป็นบล็อกข้อมูลเต็มเอง (หน้าโฟลเดอร์ / แชท / แพลนทริป ใช้ที่เดียวกัน)
+  //
+  // ถ้าโหลดไม่ได้ (ไม่มี token / ไม่มีสิทธิ์) → ถอยไปใช้ `folder` แบบเดิมที่ client ส่งมา
+  // เพื่อไม่ให้แชทที่ใช้ได้อยู่แล้วพัง (แชทแบบไม่ล็อกอินยังทำงานได้)
+  let resolvedFolder: FolderContext | undefined = folder;
+  if (folderId) {
+    const admin = getSupabaseAdmin();
+    if (!admin) {
+      return res.status(503).json({
+        error: "เซิร์ฟเวอร์ยังไม่ได้ตั้งค่า Supabase",
+        code: "NOT_CONFIGURED",
+        requestId: requestId(req),
+      });
+    }
+
+    const token = /^Bearer\s+(.+)$/i
+      .exec(req.header("authorization") ?? "")?.[1]
+      ?.trim();
+
+    let folderUid: string | null = null;
+    if (token) {
+      try {
+        const { data: verified } = await admin.auth.getUser(token);
+        folderUid = verified?.user?.id ?? null;
+      } catch {
+        folderUid = null;
+      }
+    }
+
+    if (!folderUid) {
+      if (!folder) {
+        return res.status(401).json({
+          error: "ต้องล็อกอินเพื่อใช้ข้อมูลโฟลเดอร์",
+          code: "UNAUTHORIZED",
+          requestId: requestId(req),
+        });
+      }
+      console.warn("[ai-chat] ไม่มีโทเค็น — ใช้บริบทโฟลเดอร์จาก client แทน");
+    } else {
+      try {
+        const ctx = await loadFolderContext(admin, folderId, folderUid);
+        resolvedFolder = {
+          folderName: ctx.folderName,
+          places: ctx.places.map((p) => p.name),
+          detail: formatFolderContextBlock(ctx),
+        };
+      } catch (e: any) {
+        const status = e instanceof FolderAccessError ? e.status : 500;
+        const code = e instanceof FolderAccessError ? e.code : "READ_FAILED";
+        const message =
+          e instanceof FolderAccessError ? e.message : "โหลดข้อมูลโฟลเดอร์ไม่สำเร็จ";
+        console.warn(`[ai-chat] โหลดโฟลเดอร์ ${folderId} ไม่ได้ (${code}) — ใช้บริบทจาก client แทน`);
+        if (!folder) {
+          return res.status(status).json({
+            error: message,
+            code,
+            requestId: requestId(req),
+          });
+        }
+      }
+    }
+  }
+
   // ── บริบทชุมชน (D22 + D23) ────────────────────────────────────────
   // ไฟล์นี้อ่าน "ทุกที่ในหมู่บ้าน" ของชุมชนนั้น + ชุมชนอื่นในจังหวัดเดียวกัน
   // มาแนบท้าย system prompt (ไม่แตะ tripPrompt.ts — PLAN §8)
@@ -352,7 +432,7 @@ router.post("/", async (req: Request, res: Response) => {
     // บริบทชุมชนเป็นส่วนเสริม — ล้มเหลวไม่ได้ทำให้แชทใช้ไม่ได้
   }
 
-  const system = buildChatSystemPrompt(folder, resolvedPlace, resolvedHostSelf) + communityBlock;
+  const system = buildChatSystemPrompt(resolvedFolder, resolvedPlace, resolvedHostSelf) + communityBlock;
 
   if (!isAiConfigured()) {
     // Graceful stub so the app works before the token is set.
@@ -360,14 +440,15 @@ router.post("/", async (req: Request, res: Response) => {
     return res.json({
       reply:
         "ยังไม่ได้ตั้งค่า AI บนเซิร์ฟเวอร์ (ANTHROPIC_AUTH_TOKEN) — นี่คือข้อความตัวอย่าง\n\n" +
-        (folder
-          ? `ถ้าตั้งค่าแล้ว ผมจะช่วยวางแผนทริปจากคลิปในโฟลเดอร์ "${folder.folderName}" ให้ครับ`
+        (resolvedFolder
+          ? `ถ้าตั้งค่าแล้ว ผมจะช่วยวางแผนทริปจากคลิปในโฟลเดอร์ "${resolvedFolder.folderName}" ให้ครับ`
           : `คุณถามว่า: "${lastUser?.content ?? ""}"`),
     });
   }
 
   try {
-    const reply = await callAi({ system, messages, maxTokens: 2048 });
+    // งบ 4096: บล็อกข้อมูลโฟลเดอร์ยาวกว่าเดิม (รายชื่อ + ราคา + ที่อยู่ + คลิปย่อ)
+    const reply = await callAi({ system, messages, maxTokens: 4096 });
     return res.json({ reply });
   } catch (err: any) {
     return sendError(res, err, req);

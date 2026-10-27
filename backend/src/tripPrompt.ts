@@ -183,8 +183,14 @@ export const CHAT_SYSTEM_PROMPT = `คุณคือ "น้องโลคอ�
 /** บริบทของโฟลเดอร์ (ถ้าคุยในโหมดโฟลเดอร์) — ทำหน้าที่เหมือน nearby_communities / retrieved_context */
 export interface FolderContext {
   folderName: string;
-  /** รายชื่อสถานที่/ชุมชนจากคลิปที่เซฟไว้ */
+  /** รายชื่อสถานที่/ชุมชนจากคลิปที่เซฟไว้ (path เดิม — แชทแบบไม่ล็อกอินใช้ path นี้) */
   places: string[];
+  /**
+   * บล็อกข้อมูลโฟลเดอร์แบบเต็มที่ backend เรียบเรียงให้ (path ใหม่)
+   * รวมรายชื่อสถานที่ + ที่มา (ยืนยันในทะเบียน/ยังไม่ยืนยัน) + ราคา/เวลาเปิด/ที่อยู่ + คลิปย่อ
+   * ถ้ามีค่านี้ ระบบจะใช้บล็อกนี้แทนบล็อกชื่อสถานที่แบบเดิม
+   */
+  detail?: string | null;
 }
 
 /** ความจุของที่พัก — ดู `community_places.capacity` */
@@ -495,7 +501,14 @@ ${lines.join("\n")}
 * ห้ามแนะนำราคา/เบอร์โทร/ที่อยู่ที่ไม่ได้ระบุไว้ข้างต้น`;
   }
 
-  if (folder && folder.places.length > 0) {
+  // บริบทโฟลเดอร์ — มี 2 path
+  //   ใหม่: backend เรียบเรียงบล็อกเต็มมาให้ (รายชื่อสถานที่ + ที่มา + ราคา/ที่อยู่ + คลิปย่อ)
+  //   เดิม: แชทแบบไม่ล็อกอินส่งมาแค่ชื่อสถานที่ → ใช้บล็อกชื่ออย่างเดียว
+  if (folder?.detail?.trim()) {
+    prompt += `
+
+${folder.detail.trim()}`;
+  } else if (folder && folder.places.length > 0) {
     prompt += `
 
 [Context จากระบบ — ใช้เป็นแหล่งข้อมูลหลัก]
@@ -549,6 +562,15 @@ export interface TripRequest {
   };
   /** ที่พักใกล้เส้นทางที่ระบบหาให้ (เช่นจาก Places API) ใช้เมื่อค้างคืนแต่โฟลเดอร์ไม่มีที่พัก */
   lodgingCandidates?: Record<string, unknown>[];
+  /**
+   * สถานที่ที่ backend resolve ได้จากโฟลเดอร์ (พร้อมแหล่งที่มา: ยืนยันในทะเบียน / ยังไม่ยืนยัน)
+   * ใช้แทน `destinations` ที่เป็นชื่ออิสระจาก client → จุดหมายตรงกับโฟลเดอร์จริง
+   */
+  folderPlaces?: Record<string, unknown>[];
+  /** รหัสโฟลเดอร์ที่แพลนนี้มาจาก (ใช้ผูกกับแถวใน trip_plans) */
+  sourceFolderId?: string;
+  /** ชื่อโฟลเดอร์ที่แพลนนี้มาจาก (บอกโมเดลว่าเป็นแผนของโฟลเดอร์ไหน) */
+  sourceFolderName?: string;
 }
 
 const TRANSPORT_LABELS: Record<TransportMode, string> = {
@@ -763,12 +785,17 @@ export function buildTripPrompt(req: TripRequest): string {
 
   const dataBlocks = [
     jsonBlock("ข้อมูลสถานที่จากโฟลเดอร์ (place_details)", req.placeDetails),
+    jsonBlock("สถานที่ในโฟลเดอร์ที่ผู้ใช้บันทึกไว้ (folder_places)", req.folderPlaces),
     jsonBlock("ผลคำนวณเส้นทางจากระบบแผนที่ (route_matrix)", req.routeMatrix),
     jsonBlock("ราคาน้ำมันและอัตราสิ้นเปลือง (fuel)", req.fuel),
     jsonBlock("ที่พักใกล้เส้นทางที่ระบบหาให้ (lodging_candidates)", req.lodgingCandidates),
   ]
     .filter(Boolean)
     .join("\n\n");
+
+  const folderLine = req.sourceFolderName
+    ? `\nโฟลเดอร์ต้นทาง: "${req.sourceFolderName}" — สถานที่ในบล็อก folder_places คือจุดหมายที่ผู้ใช้เลือกเอง ให้ยึดเป็นหลัก\nห้ามแต่งราคา/เบอร์โทร/เวลาเปิด/ที่อยู่ที่ไม่มีในบล็อกนี้`
+    : "";
 
   return `
 โปรดสร้างแผนท่องเที่ยวตามข้อมูลต่อไปนี้
@@ -780,7 +807,7 @@ export function buildTripPrompt(req: TripRequest): string {
 จำนวนวัน: ${req.days}
 จำนวนคืน: ${req.nights}
 งบประมาณต่อคน: ${req.budgetPerPerson} บาท
-สไตล์การเที่ยว: ${req.style}${extraRequest ? `\n${extraRequest}` : ""}
+สไตล์การเที่ยว: ${req.style}${extraRequest ? `\n${extraRequest}` : ""}${folderLine}
 ${dataBlocks ? `\n${dataBlocks}\n` : ""}
 ให้สร้างแผนเที่ยวแบบ Timeline
 แบ่งตามวันและเรียงสถานที่ตามเวลา

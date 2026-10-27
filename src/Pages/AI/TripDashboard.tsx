@@ -5,6 +5,7 @@ import {
   MapIcon,
   BanknotesIcon,
   CalendarDaysIcon,
+  FolderIcon,
 } from "react-native-heroicons/outline";
 import { useAiPlanner } from "../../state/AiPlannerContext";
 import { Trip, TripStatus } from "../../data/tripsData";
@@ -57,6 +58,14 @@ export default function TripDashboard({ onNewTrip, onOpenTrip }: TripDashboardPr
           </Text>
         </View>
       </View>
+      {item.sourceFolderId ? (
+        <View className="flex-row items-center mt-2 self-start bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">
+          <FolderIcon size={11} color="#B45309" />
+          <Text className="text-amber-800 text-[10.5px] font-semibold ml-1">
+            มาจากโฟลเดอร์ที่บันทึกไว้
+          </Text>
+        </View>
+      ) : null}
     </TouchableOpacity>
   );
 

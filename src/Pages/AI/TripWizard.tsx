@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   View,
   Text,
@@ -16,13 +16,20 @@ import {
   CheckCircleIcon,
   MapPinIcon,
   SparklesIcon,
+  CheckBadgeIcon,
+  QuestionMarkCircleIcon,
 } from "react-native-heroicons/outline";
 import { CheckCircleIcon as CheckSolid } from "react-native-heroicons/solid";
 import { useInteractions } from "../../state/InteractionContext";
 import { useAiPlanner } from "../../state/AiPlannerContext";
+import { useAuth } from "../../state/AuthContext";
 import { generateTrip } from "../../services/tripService";
 import {
-  resolveSavedVideo,
+  getFolderContext,
+  toTripFolderPlaces,
+  type FolderContextInfo,
+} from "../../services/folderContextService";
+import {
   TRAVEL_STYLES,
   TravelStyle,
   Trip,
@@ -42,20 +49,43 @@ export default function TripWizard({ initialFolderId, onBack, onCreated }: TripW
   const insets = useSafeAreaInsets();
   const { folders } = useInteractions();
   const { addTrip } = useAiPlanner();
+  const { session } = useAuth();
 
   const folder = initialFolderId ? folders.find((f) => f.id === initialFolderId) : undefined;
-  const folderVideos = (folder?.videoIds ?? []).map(resolveSavedVideo);
+  // บริบทโฟลเดอร์จริง — ชื่อสถานที่ที่ backend จับคู่กับทะเบียนได้
+  const [folderCtx, setFolderCtx] = useState<FolderContextInfo | null>(null);
+  const [loadingCtx, setLoadingCtx] = useState(false);
 
   const [step, setStep] = useState(1);
   const [startPoint, setStartPoint] = useState(START_POINTS[0]);
-  const [selectedPlaces, setSelectedPlaces] = useState<string[]>(
-    folderVideos.map((v) => v.placeLabel)
-  );
+  const [selectedPlaces, setSelectedPlaces] = useState<string[]>([]);
   const [customDest, setCustomDest] = useState("");
   const [days, setDays] = useState(3);
   const [budget, setBudget] = useState(3000);
   const [style, setStyle] = useState<TravelStyle>("nature");
   const [generating, setGenerating] = useState(false);
+
+  // โหลดสถานที่จริงของโฟลเดอร์ แล้วเลือกไว้ให้ทั้งหมดเป็นค่าเริ่มต้น
+  useEffect(() => {
+    if (!initialFolderId) return;
+    let cancelled = false;
+    (async () => {
+      setLoadingCtx(true);
+      const ctx = await getFolderContext(initialFolderId, session?.access_token ?? null).catch(
+        () => null
+      );
+      if (cancelled) return;
+      setFolderCtx(ctx);
+      const names = (ctx?.places ?? []).map((p) => p.name).filter(Boolean);
+      if (names.length) {
+        setSelectedPlaces((prev) => (prev.length ? prev : names));
+      }
+      setLoadingCtx(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [initialFolderId, session?.access_token]);
 
   const togglePlace = (label: string) =>
     setSelectedPlaces((prev) =>
@@ -71,16 +101,23 @@ export default function TripWizard({ initialFolderId, onBack, onCreated }: TripW
   const handleGenerate = async () => {
     setGenerating(true);
     try {
-      const result = await generateTrip({
-        startPoint,
-        destinations: selectedPlaces,
-        days,
-        nights: Math.max(0, days - 1),
-        budgetPerPerson: budget,
-        style,
-      });
+      const result = await generateTrip(
+        {
+          startPoint,
+          destinations: selectedPlaces,
+          days,
+          nights: Math.max(0, days - 1),
+          budgetPerPerson: budget,
+          style,
+        },
+        {
+          folderId: initialFolderId ?? null,
+          token: session?.access_token ?? null,
+        }
+      );
       const trip: Trip = {
         id: `trip-${Date.now()}`,
+        planId: result.planId ?? undefined,
         title: result.title,
         summary: result.summary,
         status: "draft",
@@ -93,6 +130,8 @@ export default function TripWizard({ initialFolderId, onBack, onCreated }: TripW
         itinerary: result.days,
         budget: result.budget,
         sourceFolderId: initialFolderId,
+        // รายการสถานที่ของโฟลเดอร์พร้อมที่มา → ให้หน้าแพลนทริปแสดงด้วย
+        folderPlaces: toTripFolderPlaces(folderCtx?.places),
         createdAt: Date.now(),
       };
       addTrip(trip);
@@ -103,6 +142,8 @@ export default function TripWizard({ initialFolderId, onBack, onCreated }: TripW
           "ใช้แผนสำรองแทน",
           `${result.fallbackReason ?? "AI ไม่สำเร็จ"}\n\nแผนทริปนี้มาจากเทมเพลตในแอป ไม่ใช่ AI — ดูรายละเอียดที่ Settings → AI Diagnostics`
         );
+      } else if (result.folderWarning) {
+        Alert.alert("แผนทริปพร้อมแล้ว", result.folderWarning);
       }
       onCreated(trip.id);
     } finally {
@@ -176,28 +217,53 @@ export default function TripWizard({ initialFolderId, onBack, onCreated }: TripW
           <View>
             <Text className="text-xl font-black text-gray-900 mb-1">2. เลือกปลายทาง</Text>
             <Text className="text-gray-500 text-[13px] mb-5">
-              {folder ? `จากคลิปในโฟลเดอร์ "${folder.name}" หรือเพิ่มเอง` : "เพิ่มปลายทางที่อยากไป"}
+              {folder ? `จากสถานที่ในโฟลเดอร์ "${folder.name}" หรือเพิ่มเอง` : "เพิ่มปลายทางที่อยากไป"}
             </Text>
 
-            {folderVideos.map((v) => {
-              const picked = selectedPlaces.includes(v.placeLabel);
+            {loadingCtx ? (
+              <View className="flex-row items-center py-4">
+                <ActivityIndicator size="small" color="#7C3AED" />
+                <Text className="text-gray-500 text-[12.5px] ml-2">
+                  กำลังโหลดสถานที่ในโฟลเดอร์...
+                </Text>
+              </View>
+            ) : null}
+
+            {(folderCtx?.places ?? []).map((p) => {
+              const picked = selectedPlaces.includes(p.name);
+              const confirmed = p.source === "registry";
               return (
                 <TouchableOpacity
-                  key={v.id}
-                  onPress={() => togglePlace(v.placeLabel)}
+                  key={p.key}
+                  onPress={() => togglePlace(p.name)}
                   activeOpacity={0.7}
                   className={`flex-row items-center p-3.5 rounded-2xl border mb-2.5 ${
                     picked ? "bg-violet-50 border-violet-400" : "bg-gray-50 border-gray-200"
                   }`}
                 >
                   <View className="flex-1">
-                    <Text className="text-[14px] font-semibold text-gray-800">{v.title}</Text>
-                    <Text className="text-[12px] text-gray-500">{v.placeLabel}</Text>
+                    <Text className="text-[14px] font-semibold text-gray-800">{p.name}</Text>
+                    <View className="flex-row items-center mt-1">
+                      {confirmed ? (
+                        <CheckBadgeIcon size={12} color="#059669" />
+                      ) : (
+                        <QuestionMarkCircleIcon size={12} color="#D97706" />
+                      )}
+                      <Text className="text-[11px] text-gray-500 ml-1">
+                        {confirmed ? "ลงทะเบียนแล้ว" : "ยังไม่ยืนยัน"} · {p.clipCount} คลิป
+                      </Text>
+                    </View>
                   </View>
                   {picked ? <CheckSolid size={22} color="#7C3AED" /> : <CheckCircleIcon size={22} color="#D1D5DB" />}
                 </TouchableOpacity>
               );
             })}
+
+            {folder && !loadingCtx && (folderCtx?.places ?? []).length === 0 ? (
+              <Text className="text-[12.5px] text-gray-500 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 mb-2.5">
+                ยังไม่พบชื่อสถานที่ในคลิปของโฟลเดอร์นี้ — เพิ่มปลายทางเองด้านล่างได้เลย
+              </Text>
+            ) : null}
 
             {/* Custom destination */}
             <View className="flex-row items-center mt-2">
@@ -220,7 +286,7 @@ export default function TripWizard({ initialFolderId, onBack, onCreated }: TripW
             {/* Chips of custom-added that aren't in folder */}
             <View className="flex-row flex-wrap mt-3">
               {selectedPlaces
-                .filter((p) => !folderVideos.some((v) => v.placeLabel === p))
+                .filter((p) => !(folderCtx?.places ?? []).some((v) => v.name === p))
                 .map((p) => (
                   <TouchableOpacity
                     key={p}

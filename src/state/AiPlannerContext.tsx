@@ -1,10 +1,11 @@
-import React, { createContext, useContext, useMemo, useState, useCallback } from "react";
+import React, { createContext, useContext, useMemo, useState, useCallback, useEffect } from "react";
 import {
   AiChatThread,
   AiChatMessage,
   Trip,
   TripStatus,
 } from "../data/tripsData";
+import { fetchMyTripPlans } from "../services/tripPlanService";
 
 /**
  * AiPlannerContext — chat threads + trips produced by the AI planner.
@@ -53,6 +54,30 @@ export function AiPlannerProvider({ children }: { children: React.ReactNode }) {
   >(null);
 
   const getThread = useCallback((id: string) => threads.find((t) => t.id === id), [threads]);
+
+  /**
+   * โหลดแผนทริปที่บันทึกไว้ในระบบ (`trip_plans`) ตอนเปิดแอป
+   * → แผนไม่หายเมื่อปิดแอป และรู้ว่ามาจากโฟลเดอร์ไหน
+   * (ถ้าโหลดไม่ได้ เช่น ยังไม่มี migration → แอปยังทำงานต่อได้ปกติ)
+   */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const stored = await fetchMyTripPlans();
+      if (cancelled || stored.length === 0) return;
+      setTrips((prev) => {
+        // กุญแจจับคู่ = planId (ถ้ามี) ไม่งั้น id
+        // → แผนที่เพิ่งสร้างในเครื่อง (ยังไม่ sync) ต้องไม่ถูกแถวใน DB ทับ
+        const byKey = new Map<string, Trip>();
+        for (const t of stored) byKey.set(t.planId || t.id, t);
+        for (const t of prev) byKey.set(t.planId || t.id, t);
+        return [...byKey.values()].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const startGeneralThread = useCallback(() => {
     const id = uid("thread");
@@ -175,6 +200,8 @@ export function AiPlannerProvider({ children }: { children: React.ReactNode }) {
           withinBudget: true,
         },
         sourceFolderId: data.sourceFolderId,
+        // สถานที่ของโฟลเดอร์พร้อมที่มา (ยืนยันแล้ว / ยังไม่ยืนยัน)
+        folderPlaces: data.folderPlaces,
         createdAt: Date.now(),
       };
 

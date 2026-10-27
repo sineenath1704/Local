@@ -14,6 +14,8 @@
     "check:proofread": "ts-node --transpile-only scripts/proofread_check.ts",
     "check:hashtag": "ts-node --transpile-only scripts/hashtag_check.ts",
     "check:place-scope": "ts-node --transpile-only scripts/place_scope_check.ts",
+    "check:folder": "ts-node --transpile-only scripts/folder_context_check.ts",
+    "test:folder": "ts-node --transpile-only scripts/folder_context_test.ts",
     "fix:hashtags": "ts-node --transpile-only scripts/fix_hashtags.ts",
     "lint": "expo lint"
   },

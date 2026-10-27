@@ -26,6 +26,8 @@ import {
   SparklesIcon,
   ArrowRightCircleIcon,
   FlagIcon,
+  CheckBadgeIcon,
+  QuestionMarkCircleIcon,
 } from "react-native-heroicons/outline";
 import { useAiPlanner } from "../../state/AiPlannerContext";
 import { ItineraryStop, StopType } from "../../data/tripsData";
@@ -161,6 +163,61 @@ export default function ItineraryViewer({ tripId, onBack, onPostCheckin }: Itine
             </Text>
           </View>
         </View>
+
+        {/* สถานที่ที่แพลนนี้ไป — รายการเดียวกับหน้าโฟลเดอร์และในแชท
+            (มาจาก backend ชุดเดียวกัน → ป้ายที่มาตรงกันทั้ง 3 ที่) */}
+        {trip.folderPlaces && trip.folderPlaces.length > 0 ? (
+          <View className="mx-5 my-3 rounded-2xl p-4 bg-violet-50 border border-violet-200">
+            <View className="flex-row items-center mb-2.5">
+              <MapPinIcon size={18} color="#6D28D9" />
+              <Text className="font-bold text-[13px] ml-2 text-violet-900">
+                สถานที่ที่แพลนนี้ไป
+              </Text>
+              <Text className="text-[11px] text-violet-700 ml-auto font-medium">
+                {trip.folderPlaces.length} แห่ง
+              </Text>
+            </View>
+            {trip.folderPlaces.map((p) => {
+              const confirmed = p.source === "registry";
+              return (
+                <View key={p.name} className="flex-row items-center py-1.5">
+                  <View className="flex-1 pr-2">
+                    <Text className="text-[12.5px] font-semibold text-gray-900">
+                      {p.name}
+                    </Text>
+                    <Text className="text-[11px] text-gray-500 mt-0.5" numberOfLines={1}>
+                      {[p.communityName, p.address].filter(Boolean).join(" · ") ||
+                        (confirmed ? "ยืนยันในทะเบียนสถานที่แล้ว" : "มาจากข้อความในคลิป")}
+                    </Text>
+                  </View>
+                  {p.clipCount ? (
+                    <Text className="text-[11px] text-gray-500 mr-2">
+                      {p.clipCount} คลิป
+                    </Text>
+                  ) : null}
+                  <View
+                    className={`flex-row items-center rounded-full px-2 py-1 ${
+                      confirmed ? "bg-emerald-50" : "bg-amber-50"
+                    }`}
+                  >
+                    {confirmed ? (
+                      <CheckBadgeIcon size={12} color="#059669" />
+                    ) : (
+                      <QuestionMarkCircleIcon size={12} color="#D97706" />
+                    )}
+                    <Text
+                      className={`text-[10px] font-bold ml-1 ${
+                        confirmed ? "text-emerald-700" : "text-amber-700"
+                      }`}
+                    >
+                      {confirmed ? "ลงทะเบียนแล้ว" : "ยังไม่ยืนยัน"}
+                    </Text>
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        ) : null}
 
         {/* Budget summary */}
         <View className={`mx-5 my-3 rounded-2xl p-4 border ${overBudget ? "bg-red-50 border-red-200" : "bg-emerald-50 border-emerald-200"}`}>

@@ -35,9 +35,15 @@ function withToast<T>(opts: AiFetchOptions): Promise<T> {
  */
 export interface SendChatOptions {
   folder?: FolderContext;
+  /**
+   * รหัสโฟลเดอร์ (path ใหม่) — backend จะไปอ่านคลิปจริง จับคู่ทะเบียนสถานที่
+   * แล้วเรียบเรียงข้อมูลเอง (ต้องมี Bearer token)
+   * ถ้าไม่ส่ง `folder` จะใช้ชื่อสถานที่ดิบที่ client ส่งมาแทน (แชทแบบไม่ล็อกอิน)
+   */
+  folderId?: string | null;
   /** "tourist" (default) is unauthenticated; "host-self" requires a Bearer token. */
   mode?: "tourist" | "host-self";
-  /** Supabase access token. Required when mode === "host-self", unused otherwise. */
+  /** Supabase access token. Required when mode === "host-self". */
   token?: string;
   /**
    * ชุมชนที่กำลังคุยอยู่ (D22) — ให้ backend ดึงเฉพาะสถานที่ในชุมชนนั้น
@@ -61,21 +67,23 @@ export async function sendChat(
         : { folder: folderOrOpts as FolderContext };
 
   const headers: Record<string, string> = {};
-  if (opts.mode === "host-self") {
-    if (!opts.token) {
-      // Surface the missing-credential case as an honest error instead of a
-      // confusing 401 from the backend — saves a round-trip.
-      throw new AiError({
-        kind: "bad-request",
-        status: 0,
-        body: "ต้องล็อกอินเพื่อใช้โหมดผู้ประกอบการ (token หายไป)",
-        requestId: null,
-        label: "ai-chat",
-        url: "",
-        durationMs: 0,
-        timeoutMs: API_TIMEOUT_MS * 3,
-      });
-    }
+  if (opts.mode === "host-self" && !opts.token) {
+    // Surface the missing-credential case as an honest error instead of a
+    // confusing 401 from the backend — saves a round-trip.
+    throw new AiError({
+      kind: "bad-request",
+      status: 0,
+      body: "ต้องล็อกอินเพื่อใช้โหมดผู้ประกอบการ (token หายไป)",
+      requestId: null,
+      label: "ai-chat",
+      url: "",
+      durationMs: 0,
+      timeoutMs: API_TIMEOUT_MS * 3,
+    });
+  }
+  // ส่ง token ทุกครั้งที่มี session — ไม่ใช่เฉพาะโหมด host-self
+  // เพราะ backend ต้องใช้มันตรวจสิทธิ์เจ้าของโฟลเดอร์ก่อนอ่านข้อมูลโฟลเดอร์
+  if (opts.token) {
     headers.Authorization = `Bearer ${opts.token}`;
   }
 
@@ -87,6 +95,7 @@ export async function sendChat(
     body: {
       messages,
       folder: opts.folder,
+      folderId: opts.folderId ?? undefined,
       mode: opts.mode ?? "tourist",
       communityId: opts.communityId ?? undefined,
     },

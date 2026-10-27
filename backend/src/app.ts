@@ -5,6 +5,7 @@ import aiSummaryRouter from "./routes/aiSummary";
 import aiCaptionRouter from "./routes/aiCaption";
 import aiChatRouter from "./routes/aiChat";
 import tripsRouter from "./routes/trips";
+import foldersRouter from "./routes/folders";
 import placesRouter from "./routes/places";
 import hostPlaceRouter from "./routes/hostPlace";
 import otopRouter from "./routes/otop";
@@ -70,6 +71,7 @@ export function createApp() {
   app.use("/ai-caption", aiCaptionRouter);
   app.use("/ai-chat", aiChatRouter);
   app.use("/trips", tripsRouter);
+  app.use("/folders", foldersRouter);
   app.use("/places", placesRouter);
   // Mounted after placesRouter on purpose: /places/verify is a real GET route
   // there, and Express only falls through to the next handler when nothing

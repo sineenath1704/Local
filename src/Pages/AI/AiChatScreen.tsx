@@ -10,6 +10,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
+  Alert,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
@@ -24,6 +25,8 @@ import {
   ArrowTopRightOnSquareIcon,
   ExclamationTriangleIcon,
   ArrowPathIcon,
+  CheckBadgeIcon,
+  QuestionMarkCircleIcon,
 } from "react-native-heroicons/outline";
 import { useAiPlanner } from "../../state/AiPlannerContext";
 import { useInteractions } from "../../state/InteractionContext";
@@ -31,6 +34,12 @@ import { useAuth } from "../../state/AuthContext";
 import { sendChat } from "../../services/aiChatService";
 import { asAiError } from "../../services/aiHttp";
 import { getFolderContextForAi } from "../../services/folderService";
+import {
+  getFolderContext,
+  toTripFolderPlaces,
+  type FolderContextInfo,
+} from "../../services/folderContextService";
+import { generateTrip } from "../../services/tripService";
 import { AiChatMessage, Trip } from "../../data/tripsData";
 import OriginSelectorModal from "../../components/OriginSelectorModal";
 import { parseGoogleMapsUrl } from "../../services/savedPlacesService";
@@ -79,6 +88,13 @@ export default function AiChatScreen({
   const [originModalOpen, setOriginModalOpen] = useState(false);
   const [currentOrigin, setCurrentOrigin] = useState<{ label: string; address: string; url?: string; coords?: { lat: number; lng: number } } | null>(null);
   const [currentPlanId, setCurrentPlanId] = useState<string | undefined>(linkedPlanId);
+  // บริบทโฟลเดอร์จริง (รายชื่อสถานที่ + ที่มา) — โหลดครั้งเดียวต่อโฟลเดอร์
+  const [folderCtxState, setFolderCtxState] = useState<{
+    folderId: string;
+    ctx: FolderContextInfo | null;
+  } | null>(null);
+  // กำลังสร้างแพลนทริปจริงจากตัวสร้างของ backend
+  const [planning, setPlanning] = useState(false);
   // Visible only for hosts (see toggle render below). "tourist" is the default
   // and matches the historical behaviour — every chat before this toggle went
   // through the public /ai-chat endpoint without an Authorization header.
@@ -93,6 +109,26 @@ export default function AiChatScreen({
   const attachedFolder = attachedFolderId ? folders.find((f) => f.id === attachedFolderId) : undefined;
   const folder = attachedFolder ?? threadFolder;
 
+  // โหลดบริบทโฟลเดอร์จริง (ชื่อสถานที่ + ป้ายที่มา) — ใช้ทั้งในแชทและตอนกดสร้างแพลน
+  const folderId = folder?.id;
+  useEffect(() => {
+    if (!folderId) return;
+    let cancelled = false;
+    (async () => {
+      const ctx = await getFolderContext(folderId, session?.access_token ?? null).catch(
+        () => null
+      );
+      if (!cancelled) setFolderCtxState({ folderId, ctx });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [folderId, session?.access_token]);
+
+  // ใช้เฉพาะเมื่อเป็นบริบทของโฟลเดอร์ที่กำลังแสดงอยู่จริง
+  const folderCtx =
+    folderCtxState && folderCtxState.folderId === folderId ? folderCtxState.ctx : null;
+
   const handleSelectOrigin = (origin: { label: string; address: string; url?: string; coords?: { lat: number; lng: number } }) => {
     setCurrentOrigin(origin);
     const msg = `🚗 จุดเริ่มต้นเดินทางของฉัน: ${origin.label} (${origin.address})${origin.url ? `\nลิงก์: ${origin.url}` : ""}`;
@@ -100,39 +136,95 @@ export default function AiChatScreen({
   };
 
   const handleCreateTripFromChat = async (lastMessageContent: string) => {
-    const threadTitle = thread?.title && thread.title !== "แชทใหม่" ? thread.title : "ทริปจากน้องโลคอล";
-    // Build destinations from Supabase folder data (real location names).
-    let destinations: string[] = ["ชุมชนท่องเที่ยว OTOP"];
-    if (folder) {
-      const dbCtx = await getFolderContextForAi(folder.id).catch(() => null);
-      if (dbCtx) {
-        destinations = Array.from(new Set(
-          dbCtx.clips
-            .map((c) => c.location_name || c.province)
-            .filter(Boolean) as string[]
-        ));
+    const threadTitle =
+      thread?.title && thread.title !== "แชทใหม่" ? thread.title : "ทริปจากน้องโลคอล";
+    setPlanning(true);
+    try {
+      // จุดหมาย = สถานที่จริงในโฟลเดอร์ (ชื่อที่ backend resolve ได้)
+      let destinations: string[] = folderCtx?.places.map((p) => p.name) ?? [];
+      if (destinations.length === 0 && folder) {
+        // ทางสำรอง: ชื่อสถานที่ดิบจากคลิป (ไม่มีทะเบียนให้ยืนยัน)
+        const dbCtx = await getFolderContextForAi(folder.id).catch(() => null);
+        destinations = Array.from(
+          new Set(
+            (dbCtx?.clips ?? [])
+              .map((c) => c.location_name || c.province)
+              .filter(Boolean) as string[]
+          )
+        );
       }
-    }
-    if (destinations.length === 0) destinations = ["ชุมชน OTOP ท่องเที่ยว"];
-    const planId = currentPlanId || `plan-${Date.now()}`;
-    setCurrentPlanId(planId);
+      if (destinations.length === 0) destinations = ["ชุมชน OTOP ท่องเที่ยว"];
 
-    const trip = createOrUpdateTripFromPlan({
-      planId,
-      title: threadTitle,
-      summary: lastMessageContent.slice(0, 150) + "...",
-      status: "draft",
-      startPoint: currentOrigin?.label || "บ้าน",
-      startPointUrl: currentOrigin?.url,
-      startPointCoords: currentOrigin?.coords,
-      destinations: destinations.length > 0 ? destinations : ["ชุมชน OTOP ท่องเที่ยว"],
-      days: 2,
-      nights: 1,
-      style: "nature",
-    });
+      // เรียกตัวสร้างแพลนจริงของ backend (ไม่แต่งไทม์ไลน์ปลอมในแอป)
+      const result = await generateTrip(
+        {
+          startPoint: currentOrigin?.label || "บ้าน",
+          destinations,
+          days: 2,
+          nights: 1,
+          budgetPerPerson: 3000,
+          style: "nature",
+        },
+        { folderId: folder?.id ?? null, token: session?.access_token ?? null }
+      );
 
-    if (onOpenTrip) {
-      onOpenTrip(trip.id);
+      const planId = result.planId || currentPlanId || `plan-${Date.now()}`;
+      setCurrentPlanId(planId);
+
+      const stops = (result.days ?? []).flatMap((d) => d.stops ?? []);
+      const tripDestinations =
+        destinations.length > 0
+          ? destinations
+          : Array.from(new Set(stops.map((s) => s.name).filter(Boolean)));
+
+      const trip = createOrUpdateTripFromPlan({
+        planId,
+        title: result.title || threadTitle,
+        summary:
+          result.summary ||
+          lastMessageContent.slice(0, 150) + "...",
+        status: "draft",
+        startPoint: currentOrigin?.label || "บ้าน",
+        startPointUrl: currentOrigin?.url,
+        startPointCoords: currentOrigin?.coords,
+        destinations: tripDestinations,
+        days: result.days?.length || 2,
+        nights: Math.max(0, (result.days?.length || 2) - 1),
+        budgetPerPerson: 3000,
+        style: "nature",
+        itinerary: result.days,
+        budget: result.budget,
+        sourceFolderId: folder?.id,
+        // รายการสถานที่ของโฟลเดอร์พร้อมที่มา → ให้หน้าแพลนทริปแสดงด้วย
+        folderPlaces: toTripFolderPlaces(folderCtx?.places),
+      });
+
+      // บอกตรง ๆ เมื่อได้ "แผนสำรอง" หรือโฟลเดอร์ยังไม่มีข้อมูลสถานที่
+      if (result.source === "local-fallback") {
+        Alert.alert(
+          "ใช้แผนสำรองแทน",
+          `${result.fallbackReason ?? "AI ไม่สำเร็จ"}\n\nแผนนี้มาจากเทมเพลตในแอป ไม่ใช่ AI — ดูรายละเอียดที่ Settings → AI Diagnostics`
+        );
+      } else if (result.folderWarning) {
+        Alert.alert("แผนทริปพร้อมแล้ว", result.folderWarning);
+      } else if (result.persisted === false) {
+        Alert.alert(
+          "แผนทริปพร้อมแล้ว",
+          `บันทึกลงระบบไม่สำเร็จ (${result.persistReason ?? "ไม่ทราบสาเหตุ"}) — แผนยังอยู่ในเครื่องนี้`
+        );
+      }
+
+      if (onOpenTrip) {
+        onOpenTrip(trip.id);
+      }
+    } catch (err) {
+      const aiErr = asAiError(err);
+      Alert.alert(
+        "สร้างแพลนไม่สำเร็จ",
+        aiErr?.message ?? "เรียกตัวสร้างแพลนไม่สำเร็จ ลองใหม่อีกครั้ง"
+      );
+    } finally {
+      setPlanning(false);
     }
   };
 
@@ -168,26 +260,22 @@ export default function AiChatScreen({
       content: processedForAi,
     }];
 
-    // Build folder context from Supabase (real location_name/province per clip).
-    // Falls back to the folder name alone when unavailable.
-    let folderCtx: { folderName: string; places: string[] } | undefined;
+    // บริบทโฟลเดอร์ — ส่งรหัสโฟลเดอร์ไปให้ backend อ่านข้อมูลจริงเอง
+    // (ถ้าโหลดไม่ได้ ค่อยส่งชื่อสถานที่ดิบไปเป็นทางสำรอง)
+    let folderCtxPayload: { folderName: string; places: string[] } | undefined;
     if (folder) {
-      const dbCtx = await getFolderContextForAi(folder.id).catch(() => null);
-      const places = dbCtx
-        ? Array.from(new Set(
-            dbCtx.clips
-              .map((c) => [c.location_name, c.province].filter(Boolean).join(" "))
-              .filter(Boolean)
-          ))
-        : [];
-      folderCtx = { folderName: folder.name, places };
+      const places = folderCtx?.places.map((p) => p.name) ?? [];
+      folderCtxPayload = { folderName: folder.name, places };
     }
 
     try {
       const reply = await sendChat(history, {
-        folder: folderCtx,
+        folder: folderCtxPayload,
+        // ส่งรหัสโฟลเดอร์ → backend โหลดคลิปจริง + จับคู่ทะเบียนสถานที่เอง
+        folderId: folder?.id ?? null,
         mode: chatMode,
-        token: chatMode === "host-self" ? session?.access_token ?? undefined : undefined,
+        // ส่ง token ทุกครั้งที่มี session (backend ใช้ตรวจสิทธิ์เจ้าของโฟลเดอร์)
+        token: session?.access_token ?? undefined,
         // ชุมชนของผู้ใช้เอง → ให้ backend ดึงสถานที่ในชุมชนนั้นมาตอบ (D22)
         communityId: user?.community_id ?? null,
       });
@@ -246,7 +334,9 @@ export default function AiChatScreen({
             {thread?.title ?? "แชท AI"}
           </Text>
           <Text className="text-[11px] text-gray-400">
-            {folder ? `จากโฟลเดอร์ • ${folder.videoIds.length} คลิป` : "แชททั่วไป"}
+            {folder
+              ? `จากโฟลเดอร์ • ${folderCtx?.clipCount ?? folder.videoIds.length} คลิป`
+              : "แชททั่วไป"}
           </Text>
         </View>
         {folder && onPlanTrip && (
@@ -399,12 +489,23 @@ export default function AiChatScreen({
                   {!mine && !failed && (item.content.includes("วัน") || item.content.includes("ทริป") || item.content.includes("เดินทาง") || item.content.includes("แผน")) && (
                     <TouchableOpacity
                       onPress={() => handleCreateTripFromChat(item.content)}
+                      disabled={planning}
                       activeOpacity={0.8}
-                      className="mt-2 bg-violet-600 rounded-xl px-3.5 py-2.5 flex-row items-center self-start shadow-sm"
+                      className={`mt-2 rounded-xl px-3.5 py-2.5 flex-row items-center self-start shadow-sm ${
+                        planning ? "bg-violet-300" : "bg-violet-600"
+                      }`}
                     >
-                      <CalendarDaysIcon size={16} color="#FFFFFF" />
+                      {planning ? (
+                        <ActivityIndicator size="small" color="#FFFFFF" />
+                      ) : (
+                        <CalendarDaysIcon size={16} color="#FFFFFF" />
+                      )}
                       <Text className="text-white text-[12.5px] font-bold ml-1.5">
-                        {currentPlanId ? "อัปเดตทริปที่แพลนไว้ ➔" : "เลือกแพลนทริปนี้ (บันทึกร่าง) ➔"}
+                        {planning
+                          ? "กำลังสร้างแพลน..."
+                          : currentPlanId
+                          ? "อัปเดตทริปที่แพลนไว้ ➔"
+                          : "เลือกแพลนทริปนี้ (บันทึกร่าง) ➔"}
                       </Text>
                     </TouchableOpacity>
                   )}
@@ -448,6 +549,49 @@ export default function AiChatScreen({
             <TouchableOpacity onPress={() => setAttachedFolderId(null)} className="p-0.5">
               <XMarkIcon size={16} color="#B45309" />
             </TouchableOpacity>
+          </View>
+        )}
+
+        {/* การ์ดโฟลเดอร์: รายชื่อสถานที่จริงที่โฟลเดอร์นี้ไป (แหล่งข้อมูลเดียวกับหน้าโฟลเดอร์) */}
+        {folder && folderCtx && folderCtx.places.length > 0 && (
+          <View className="mx-3 mt-2 bg-violet-50 border border-violet-100 rounded-xl px-3 py-2.5">
+            <View className="flex-row items-center">
+              <FolderIcon size={14} color="#7C3AED" />
+              <Text className="text-violet-800 text-[11.5px] font-bold ml-1.5" numberOfLines={1}>
+                {folder.name} • {folderCtx.clipCount} คลิป • {folderCtx.places.length} สถานที่
+              </Text>
+            </View>
+            <View className="flex-row flex-wrap mt-1.5">
+              {folderCtx.places.slice(0, 6).map((p) => (
+                <View
+                  key={p.key}
+                  className={`flex-row items-center rounded-full px-2 py-0.5 mr-1.5 mb-1 ${
+                    p.source === "registry" ? "bg-emerald-100" : "bg-amber-100"
+                  }`}
+                >
+                  {p.source === "registry" ? (
+                    <CheckBadgeIcon size={10} color="#059669" />
+                  ) : (
+                    <QuestionMarkCircleIcon size={10} color="#D97706" />
+                  )}
+                  <Text
+                    className={`text-[10.5px] font-semibold ml-1 ${
+                      p.source === "registry" ? "text-emerald-800" : "text-amber-800"
+                    }`}
+                  >
+                    {p.name}
+                  </Text>
+                </View>
+              ))}
+              {folderCtx.places.length > 6 ? (
+                <Text className="text-[10.5px] text-gray-500 self-center">
+                  +{folderCtx.places.length - 6} แห่ง
+                </Text>
+              ) : null}
+            </View>
+            <Text className="text-[10.5px] text-gray-500">
+              ลงทะเบียนแล้ว {folderCtx.registryHits} · จากคลิป {folderCtx.aiFallbacks}
+            </Text>
           </View>
         )}
 

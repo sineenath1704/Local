@@ -32,27 +32,67 @@ type Nav =
   | { view: "wizard"; folderId?: string }
   | { view: "itinerary"; tripId: string };
 
+/**
+ * โฟลเดอร์ที่ผู้ใช้กดมาจากหน้าโฟลเดอร์ (หน้าโปรไฟล์)
+ * → เปิดแชทของโฟลเดอร์นั้น หรือเปิด wizard พร้อมรหัสโฟลเดอร์
+ */
+export interface PendingFolderIntent {
+  folderId: string;
+  folderName: string;
+  mode: "chat" | "trip";
+}
+
 interface AiHubScreenProps {
   onFullScreenChange?: (full: boolean) => void;
   onPostCheckin?: (loc: InitialPostLocation) => void;
+  pendingFolder?: PendingFolderIntent | null;
+  onPendingFolderHandled?: () => void;
 }
 
-export default function AiHubScreen({ onFullScreenChange, onPostCheckin }: AiHubScreenProps) {
+export default function AiHubScreen({
+  onFullScreenChange,
+  onPostCheckin,
+  pendingFolder,
+  onPendingFolderHandled,
+}: AiHubScreenProps) {
   const insets = useSafeAreaInsets();
   const {
     threads,
     startGeneralThread,
+    startFolderThread,
     pendingChatSeed,
     consumePendingChatSeed,
   } = useAiPlanner();
 
   const [tab, setTab] = useState<HubTab>("chat");
   const [nav, setNav] = useState<Nav>({ view: "hub" });
+  // กัน effect ทำงานซ้ำ (startFolderThread เปลี่ยนตัวอ้างทุกครั้งที่ threads เปลี่ยน)
+  const handledFolderRef = React.useRef<string | null>(null);
 
   // Hide the bottom menu bar whenever we're not on the hub list.
   React.useEffect(() => {
     onFullScreenChange?.(nav.view !== "hub");
   }, [nav.view, onFullScreenChange]);
+
+  // โฟลเดอร์ที่กดมาจากหน้าโฟลเดอร์ → เปิดแชท/wizard ที่ผูกกับโฟลเดอร์นั้น
+  React.useEffect(() => {
+    if (!pendingFolder) return;
+    const key = `${pendingFolder.mode}:${pendingFolder.folderId}`;
+    if (handledFolderRef.current === key) return;
+    handledFolderRef.current = key;
+    // ทำงานใน tick ถัดไป — ไม่อัปเดต state ระหว่างที่ React กำลัง render
+    const timer = setTimeout(() => {
+      if (pendingFolder.mode === "chat") {
+        const id = startFolderThread(pendingFolder.folderId, pendingFolder.folderName);
+        setTab("chat");
+        setNav({ view: "chat", threadId: id });
+      } else {
+        setNav({ view: "wizard", folderId: pendingFolder.folderId });
+      }
+      onPendingFolderHandled?.();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [pendingFolder, startFolderThread, onPendingFolderHandled]);
 
   // A seed was dropped (e.g. from the comment sheet's "คุยต่อกับ AI"):
   // open its thread, auto-send the message, then clear the seed.

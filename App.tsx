@@ -41,6 +41,12 @@ function AppContent() {
   const [profileFullScreen, setProfileFullScreen] = useState<boolean>(false);
   // A folder opened from the Profile "saved" tab
   const [profileFolderId, setProfileFolderId] = useState<string | null>(null);
+  // โฟลเดอร์ที่ผู้ใช้กด "คุยกับ AI"/"วางแผนทริป" → ส่งต่อให้แท็บ AI
+  const [pendingFolder, setPendingFolder] = useState<{
+    folderId: string;
+    folderName: string;
+    mode: "chat" | "trip";
+  } | null>(null);
   // Post location prefilled from a finished trip stop check-in
   const [pendingPostLocation, setPendingPostLocation] = useState<any | null>(null);
   // พื้นที่ของชุมชนที่ส่งมาจากหน้าโปรไฟล์ → flow "เป็นคนแรกที่เพิ่มสถานที่"
@@ -130,12 +136,14 @@ function AppContent() {
             <FolderDetailScreen
               folderId={profileFolderId}
               onBack={() => setProfileFolderId(null)}
-              onChatFromFolder={() => {
+              onChatFromFolder={(folderId, folderName) => {
                 setProfileFolderId(null);
+                setPendingFolder({ folderId, folderName, mode: "chat" });
                 handleTabChange("ai");
               }}
-              onPlanTrip={() => {
+              onPlanTrip={(folderId, folderName) => {
                 setProfileFolderId(null);
+                setPendingFolder({ folderId, folderName, mode: "trip" });
                 handleTabChange("ai");
               }}
             />
@@ -156,6 +164,8 @@ function AppContent() {
         ) : activeTab === "ai" ? (
           <AiHubScreen
             onFullScreenChange={setAiFullScreen}
+            pendingFolder={pendingFolder}
+            onPendingFolderHandled={() => setPendingFolder(null)}
             onPostCheckin={(loc) => {
               setPendingPostLocation(loc);
               handleTabChange("create");

@@ -129,6 +129,23 @@ export interface TripBudget {
   withinBudget: boolean;
 }
 
+/**
+ * สถานที่ที่แพลนนี้ใช้ พร้อมที่มาของข้อมูล
+ * -------------------------------------------------------------
+ * `registry` = ยืนยันในทะเบียนสถานที่แล้ว
+ * `clip`     = มาจากข้อความในคลิป (ยังไม่ยืนยัน)
+ *
+ * เป็นรูปแบบเดียวกันทั้ง 3 ที่ (หน้าโฟลเดอร์ / แชท / แพลนทริป) เพื่อให้
+ * ป้ายที่มาแสดงตรงกัน โดยไม่ต้องผูก tripsData กับ service ของโฟลเดอร์
+ */
+export interface TripFolderPlace {
+  name: string;
+  source: "registry" | "clip";
+  clipCount?: number;
+  communityName?: string | null;
+  address?: string | null;
+}
+
 export interface Trip {
   id: string;
   planId?: string; // Unique plan id for two-way chat iteration
@@ -147,6 +164,8 @@ export interface Trip {
   itinerary: ItineraryDay[];
   budget: TripBudget;
   sourceFolderId?: string;
+  /** สถานที่ที่แพลนนี้ไป พร้อมที่มา (ยืนยันแล้ว / ยังไม่ยืนยัน) */
+  folderPlaces?: TripFolderPlace[];
   createdAt: number;
   updatedAt?: number;
 }
