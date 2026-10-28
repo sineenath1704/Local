@@ -4,10 +4,12 @@ import { callAiText } from "./aiStream";
 import { pickHashtagSuggestions } from "./hashtagText";
 import { DiagLog, errorDetail } from "./summaryDiag";
 import type { PlaceCandidate } from "./placeTypes";
+// ชนิดการ์ดหน้าโพสต์ (V2) — import แบบ type เท่านั้น (ถูกลบตอน compile)
+// เพื่อไม่ให้เกิด circular import ตอน `videoPromptV2Compat.ts` เรียกกลับมา
+import type { PostCard } from "./videoPromptV2";
 import {
   SYSTEM_PROMPT,
   buildSummaryPrompt,
-  VIDEO_PROMPT,
   VideoAnalysisInput,
   CAPTION_SYSTEM_PROMPT,
   buildCaptionPrompt,
@@ -15,6 +17,9 @@ import {
   SUMMARY_NARRATION_PROMPT,
   buildNarrationPrompt,
 } from "./prompt";
+// สายสรุป V2 (Video Content Analyzer V2) — โหมดทดลอง เปิดด้วย VCA_V2_ENABLED
+// (import ตรง ๆ ได้ เพราะฝั่ง `videoPromptV2Compat` ไม่ import `aiClient` แบบ runtime)
+import { analyzeVideoCompat } from "./videoPromptV2Compat";
 
 /**
  * งบ token สำรอง ตอนคำตอบถูกตัดกลางคัน
@@ -144,6 +149,13 @@ export interface AiSummaryResult {
   visualTags?: string[];
   onScreenText?: string[];
   transcriptHighlights?: string[];
+  /**
+   * การ์ดหน้าโพสต์แบบมีโครงสร้าง (V2)
+   * -------------------------------------------------------------
+   * มีเฉพาะคลิปที่สรุปด้วย VCA V2 เท่านั้น · คลิปเก่าไม่มี field นี้
+   * → แอปต้อง fallback ไปใช้ `text` แบบเดิมเมื่อไม่มี `card`
+   */
+  card?: PostCard;
 }
 
 /**
@@ -200,6 +212,16 @@ export async function generateSummary(
 ): Promise<AiSummaryResult> {
   const now = new Date().toISOString();
   const t0 = Date.now();
+
+  // ─────────────────────────────────────────────────────────────────
+  // VCA V2 (จุดต่อข้อ 1 จากแผน) — เปิดด้วย flag เท่านั้น
+  // ─────────────────────────────────────────────────────────────────
+  // ปิด flag = โค้ดข้างล่างทั้งหมดคือสาย V1 แบบเดิมทุกประการ
+  // เปิด flag = สรุปด้วย SYSTEM_PROMPT_CARD (อยู่ใน prompt.ts) → ได้ `card` (การ์ดหน้าโพสต์)
+  //           + `text` เป็นข้อความการ์ด (ใช้กับ Caption helper + AI แชทได้)
+  if (config.ai.vcaV2Enabled) {
+    return analyzeVideoCompat(input, diag);
+  }
 
   // No credentials configured → return a graceful stub so dev still works.
   if (!isAiConfigured()) {
@@ -555,6 +577,32 @@ export async function generateNarration(
   diag?: DiagLog
 ): Promise<string> {
   const t0 = Date.now();
+
+  // ─────────────────────────────────────────────────────────────────
+  // VCA V2 (จุดต่อข้อ 2 จากแผน) — ไม่เขียนคำบรรยายรอบที่สอง
+  // ─────────────────────────────────────────────────────────────────
+  // ในโหมด V2 ข้อความการ์ด (summary.text) คือคำตอบที่ต้องการอยู่แล้ว
+  // → คืนข้อความเดิม ไม่ยิงโมเดลอีกรอบ (AI 1 รอบจริง)
+  if (config.ai.vcaV2Enabled) {
+    const cardText = typeof analysisJson?.text === "string" ? analysisJson.text : "";
+    if (cardText.trim()) {
+      if (diag) {
+        // ในโหมดการ์ด ข้อความการ์ดคือข้อความที่ผู้ใช้อ่าน → ถือว่า "เขียนเสร็จแล้ว"
+        // (ไม่ใช่ "ข้าม" เพราะไม่ได้ข้ามงาน แค่ไม่ต้องยิงโมเดลรอบที่สอง)
+        diag.add({
+          id: "narration",
+          label: "เขียนข้อความการ์ด",
+          status: "ok",
+          ms: Date.now() - t0,
+          detail:
+            "โหมดการ์ด — ข้อความการ์ดคือข้อความสำหรับโพสต์ (ไม่ยิงโมเดลรอบที่สอง)",
+          data: { source: "card", chars: cardText.length },
+        });
+      }
+      return cardText;
+    }
+  }
+
   const place = analysisJson?.place ?? analysisJson;
   const placeName = place?.place_name ?? null;
   const province = place?.location?.province ?? null;

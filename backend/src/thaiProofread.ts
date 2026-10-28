@@ -25,7 +25,9 @@ import {
   PROOFREAD_SYSTEM_PROMPT,
   buildProofreadSummaryPrompt,
   buildProofreadNarrationPrompt,
+  buildProofreadCardPrompt,
 } from "./prompt";
+import { isGoogleLine, type PostCard } from "./videoPromptV2";
 
 // ============================================================
 //  ตัวช่วยตรวจค่าที่โมเดลส่งกลับ
@@ -120,9 +122,36 @@ function acceptList(original: string[] | undefined, corrected: unknown): string[
 //  เรียกโมเดล
 // ============================================================
 
-/** ยิงไปหนึ่งรอบ — คืนข้อความดิบ หรือ null เมื่อเรียกไม่ได้/ไม่ได้ตั้งค่า */
-async function callModel(userPrompt: string, maxTokens: number): Promise<string | null> {
-  if (!isAiConfigured() || !config.ai.proofreadEnabled) return null;
+/**
+ * ผลของการยิงโมเดลหนึ่งรอบ
+ * -------------------------------------------------------------
+ * `disabled` แยกออกจาก `empty` เพราะสองอย่างนี้แก้คนละทาง:
+ *   · disabled = ตั้งค่าไม่ให้ทำ (PROOFREAD_ENABLED=off) → ต้องแก้ที่เซิร์ฟเวอร์
+ *   · empty    = โมเดลตอบแต่ไม่มีเนื้อหา → ลองใหม่ได้
+ */
+export type ProofreadCall =
+  | { kind: "ok"; text: string; stopReason: string | null }
+  | { kind: "disabled"; reason: string }
+  | { kind: "empty" };
+
+/** ยิงไปหนึ่งรอบ — บอกเหตุผลที่ไม่ได้คำตอบด้วย ไม่ใช่แค่ null */
+async function callModel(
+  userPrompt: string,
+  maxTokens: number
+): Promise<ProofreadCall> {
+  if (!isAiConfigured()) {
+    return {
+      kind: "disabled",
+      reason:
+        "ยังไม่ได้ตั้งค่า AI ที่เซิร์ฟเวอร์ (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN)",
+    };
+  }
+  if (!config.ai.proofreadEnabled) {
+    return {
+      kind: "disabled",
+      reason: "ปิดรอบตรวจสะกดไว้ที่เซิร์ฟเวอร์ (PROOFREAD_ENABLED=off)",
+    };
+  }
 
   // สตรีมก่อนเสมอ — คำตอบแก้สะกดคำบรยายยาวมาก (งบ 8192) ถ้าไม่มีข้อมูล
   // ไหลมาเกิน ~60 วินาที proxy ข้างหน้าปลายทางจะตัดสาย (504)
@@ -147,7 +176,8 @@ async function callModel(userPrompt: string, maxTokens: number): Promise<string 
   if (!res.ok) {
     throw new AiUpstreamError(res.status, res.body);
   }
-  return res.text || null;
+  if (!res.text) return { kind: "empty" };
+  return { kind: "ok", text: res.text, stopReason: res.stopReason ?? null };
 }
 
 // ============================================================
@@ -205,7 +235,7 @@ export async function proofreadSummary(
     return null;
   }
   try {
-    const raw = await callModel(
+    const call = await callModel(
       buildProofreadSummaryPrompt({
         summary: summary.text ?? null,
         visualDescription: summary.visualDescription ?? null,
@@ -214,16 +244,27 @@ export async function proofreadSummary(
       }),
       4096
     );
-    if (!raw) {
+    if (call.kind === "disabled") {
       if (diag) {
         diag.skip(
           "proofread_summary",
           "ตรวจสะกดสรุป",
-          "โมเดลไม่ตอบ (แต่ละรอบไม่เป็นอันตราย — ใช้ข้อความเดิม)"
+          `${call.reason} — ใช้ข้อความเดิม`
         );
       }
       return null;
     }
+    if (call.kind === "empty") {
+      if (diag) {
+        diag.skip(
+          "proofread_summary",
+          "ตรวจสะกดสรุป",
+          "โมเดลตอบมาไม่มีเนื้อหา — ใช้ข้อความเดิม"
+        );
+      }
+      return null;
+    }
+    const raw = call.text;
     const parsed = extractJson(raw);
     if (!parsed || typeof parsed !== "object") {
       if (diag) {
@@ -281,22 +322,33 @@ export async function proofreadNarration(
     return null;
   }
   try {
-    const raw = await callModel(
+    const call = await callModel(
       buildProofreadNarrationPrompt({ narration, facts, transcript }),
       // The narration is written at maximum detail (paragraph 1 alone can run
       // past 4k tokens) — the copy-edit has to fit the whole thing back out.
       8192
     );
-    if (!raw) {
+    if (call.kind === "disabled") {
       if (diag) {
         diag.skip(
           "proofread_narration",
           "ตรวจสะกดคำบรรยาย",
-          "โมเดลไม่ตอบ (ใช้คำบรรยายเดิม)"
+          `${call.reason} — ใช้คำบรรยายเดิม`
         );
       }
       return null;
     }
+    if (call.kind === "empty") {
+      if (diag) {
+        diag.skip(
+          "proofread_narration",
+          "ตรวจสะกดคำบรรยาย",
+          "โมเดลตอบมาไม่มีเนื้อหา — ใช้คำบรรยายเดิม"
+        );
+      }
+      return null;
+    }
+    const raw = call.text;
     const parsed = extractJson(raw);
     const corrected =
       typeof parsed?.narration === "string" ? String(parsed.narration).trim() : "";
@@ -383,6 +435,219 @@ export async function proofreadNarration(
     }
     return null;
   }
+}
+
+// ============================================================
+//  ตรวจสะกด "การ์ด" (สาย VCA V2) — สิ่งที่ผู้ใช้เห็นจริง
+// ============================================================
+
+/** ค่าที่โมเดลแก้กลับมา (การ์ด) */
+export interface ProofreadCardCorrections {
+  place_name?: string | null;
+  address?: string | null;
+  description?: string | null;
+  contact?: {
+    phone?: string | null;
+    facebook?: string | null;
+    line?: string | null;
+  } | null;
+  blocks?: { lines?: string[] }[] | null;
+}
+
+/**
+ * ตรวจสะกดการ์ดทั้งใบ
+ * -------------------------------------------------------------
+ * ทำไมต้องมีรอบนี้
+ *   ในสายการ์ด แอปเรนเดอร์ `summary.card` — แต่รอบตรวจสะกดเดิมแก้แค่
+ *   `summary.text` / `summary.place` (โครงสร้างสายเก่า) → ผลที่แก้ไว้
+ *   ไม่เคยไปถึงหน้าจอผู้ใช้ เลย "ตรวจสะกดไม่ทำงาน"
+ *
+ * คืน null เมื่อทำไม่ได้ — ผู้เรียกใช้การ์ดเดิมต่อ
+ */
+export async function proofreadCard(
+  card: PostCard,
+  transcript?: string | null,
+  diag?: DiagLog
+): Promise<ProofreadCardCorrections | null> {
+  const t0 = Date.now();
+  if (!card || !Array.isArray(card.blocks) || card.blocks.length === 0) {
+    if (diag) {
+      diag.skip("proofread_card", "ตรวจสะกดการ์ด", "ไม่มีการ์ดให้ตรวจ");
+    }
+    return null;
+  }
+  const prompt = buildProofreadCardPrompt({
+    place: card.place
+      ? {
+          name: card.place.name ?? null,
+          address: card.place.address ?? null,
+          description: card.place.description ?? null,
+        }
+      : null,
+    contact: card.contact
+      ? {
+          phone: card.contact.phone ?? null,
+          facebook: card.contact.facebook ?? null,
+          line: card.contact.line ?? null,
+        }
+      : null,
+    blocks: card.blocks.map((b) => ({
+      title: b.title ?? null,
+      lines: b.lines.map((l) => ({
+        text: l.text,
+        editable: !isGoogleLine(b, l),
+      })),
+    })),
+    transcript,
+  });
+
+  try {
+    // การ์ดมีหัวข้อ + บรรทัดครบทุกกลุ่ม (ราคา/ที่พัก/ภายในห้องพัก/…)
+    // → โมเดลต้องคัดการ์ดทั้งใบกลับมา งบ 4096 เคยตัดกลาง JSON
+    //   ใช้ 8192 และลองอีกครั้งถ้าตอบมาไม่ใช่ JSON
+    let call = await callModel(prompt, 8192);
+    if (call.kind === "disabled") {
+      if (diag) {
+        diag.skip(
+          "proofread_card",
+          "ตรวจสะกดการ์ด",
+          `${call.reason} — ใช้การ์ดเดิม`
+        );
+      }
+      return null;
+    }
+    if (call.kind === "empty") {
+      if (diag) {
+        diag.skip(
+          "proofread_card",
+          "ตรวจสะกดการ์ด",
+          "โมเดลตอบมาไม่มีเนื้อหา — ใช้การ์ดเดิม"
+        );
+      }
+      return null;
+    }
+
+    let raw = call.text;
+    let stopReason = call.stopReason;
+    let parsed = extractJson(raw);
+    // ตอบมาไม่ใช่ JSON (มักคือการคัดลอกการ์ดที่โดนตัดกลางทาง)
+    // → ขออีกรอบแบบบอกตรง ๆ ว่าต้องการ JSON อย่างเดียว
+    if (!parsed || typeof parsed !== "object") {
+      const truncated = stopReason === "max_tokens";
+      const retry = await callModel(
+        `${prompt}\n\nคำตอบรอบก่อนหน้านี้ใช้ไม่ได้ (${truncated ? "ถูกตัดกลางทาง" : "ไม่ใช่ JSON"}) — ตอบ JSON ที่ parse ได้ทันทีเท่านั้น ห้ามมีข้อความอื่นนอก JSON`,
+        8192
+      );
+      if (retry.kind === "ok") {
+        raw = retry.text;
+        stopReason = retry.stopReason;
+        parsed = extractJson(raw);
+      }
+    }
+
+    if (!parsed || typeof parsed !== "object") {
+      if (diag) {
+        diag.add({
+          id: "proofread_card",
+          label: "ตรวจสะกดการ์ด",
+          status: "failed",
+          ms: Date.now() - t0,
+          detail:
+            stopReason === "max_tokens"
+              ? "โมเดลตอบไม่ครบ (โค้ตัด) และลองใหม่ก็ยังไม่ได้ JSON — ใช้การ์ดเดิม"
+              : "โมเดลตอบมาไม่ใช่ JSON (ลองใหม่แล้ว) — ใช้การ์ดเดิม",
+        });
+        diag.problem(
+          "ตรวจสะกดการ์ดไม่สำเร็จ — โมเดลตอบมาไม่ใช่ JSON (ใช้การ์ดเดิม)"
+        );
+      }
+      return null;
+    }
+    if (diag) {
+      diag.add({
+        id: "proofread_card",
+        label: "ตรวจสะกดการ์ด",
+        status: "ok",
+        ms: Date.now() - t0,
+        detail: "ตรวจสะกดผ่าน",
+        data: { chars: raw.length },
+      });
+    }
+    return parsed as ProofreadCardCorrections;
+  } catch (err) {
+    const msg = errorDetail(err);
+    console.warn("[proofread] card ไม่สำเร็จ — ใช้การ์ดเดิม:", msg);
+    if (diag) {
+      diag.add({
+        id: "proofread_card",
+        label: "ตรวจสะกดการ์ด",
+        status: "failed",
+        ms: Date.now() - t0,
+        detail: msg,
+      });
+      diag.problem(`ตรวจสะกดการ์ดไม่สำเร็จ: ${msg}`);
+    }
+    return null;
+  }
+}
+
+/**
+ * เอาค่าที่แก้แล้วกลับเข้าการ์ด โดยผ่าน guard ทุกบรรทัด
+ * -------------------------------------------------------------
+ *   · ชื่อสถานที่ → แก้ได้แค่ระดับ "สะกดผิด" (edit distance)
+ *   · ข้อความทั่วไป → ได้ก็ต่อเมื่อตัวเลขไม่เปลี่ยน
+ *   · บรรทัดจาก Google → ไม่แตะเด็ดขาด
+ *   · จำนวนบล็อก/บรรทัดไม่ตรงเดิม → ใช้ของเดิมทั้งบล็อกนั้น
+ */
+export function applyProofreadToCard(
+  card: PostCard,
+  c: ProofreadCardCorrections
+): PostCard {
+  const next: PostCard = {
+    ...card,
+    blocks: card.blocks.map((b) => ({ ...b, lines: b.lines.map((l) => ({ ...l })) })),
+  };
+
+  if (card.place) {
+    const p = { ...card.place };
+    const name = acceptName(card.place.name, c.place_name);
+    if (name) p.name = name;
+    const address = acceptProse(card.place.address, c.address);
+    if (address) p.address = address;
+    const description = acceptProse(card.place.description, c.description);
+    if (description) p.description = description;
+    next.place = p;
+  }
+
+  if (card.contact) {
+    const contact = { ...card.contact };
+    const phone = acceptFact(card.contact.phone, c.contact?.phone);
+    if (phone) contact.phone = phone;
+    const facebook = acceptName(card.contact.facebook, c.contact?.facebook);
+    if (facebook) contact.facebook = facebook;
+    const line = acceptName(card.contact.line, c.contact?.line);
+    if (line) contact.line = line;
+    next.contact = contact;
+  }
+
+  const blocks = Array.isArray(c.blocks) ? c.blocks : null;
+  if (blocks && blocks.length === card.blocks.length) {
+    next.blocks = card.blocks.map((b, bi) => {
+      const lines = blocks[bi]?.lines;
+      // จำนวนบรรทัดไม่ตรง → ใช้บล็อกเดิมทั้งก้อน
+      if (!Array.isArray(lines) || lines.length !== b.lines.length) return b;
+      return {
+        ...b,
+        lines: b.lines.map((l, li) => {
+          if (isGoogleLine(b, l)) return l; // ข้อมูลจาก Google — ไม่แตะ
+          const fixed = acceptProse(l.text, lines[li]);
+          return fixed ? { ...l, text: fixed } : l;
+        }),
+      };
+    });
+  }
+
+  return next;
 }
 
 // ============================================================

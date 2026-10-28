@@ -1,13 +1,17 @@
 import { Router, Request, Response } from "express";
-import { generateSummary, generateNarration } from "../aiClient";
+import { generateSummary, generateNarration, type AiSummaryResult } from "../aiClient";
 import {
   proofreadSummary,
   proofreadNarration,
   applyProofreadToSummary,
   narrationFacts,
+  proofreadCard,
+  applyProofreadToCard,
 } from "../thaiProofread";
 import { getSummary, saveSummary, hasSummary } from "../summaryStore";
 import { VideoAnalysisInput } from "../prompt";
+import { renderPostText } from "../videoPromptV2";
+import { config } from "../config";
 import { enrichWithGooglePlaces, type LocationScope } from "./places";
 import { transcribeVideo, type TranscriptResult } from "../geminiTranscribe";
 import { DiagLog, errorDetail } from "../summaryDiag";
@@ -106,6 +110,66 @@ async function withTranscript(
 }
 
 /**
+ * ตรวจสะกดสรุป — แตกทางตามโหมด
+ * -------------------------------------------------------------
+ * · สายการ์ด (V2) → ตรวจ `summary.card` เพราะนั่นคือสิ่งที่แอปเรนเดอร์จริง
+ *   (รอบตรวจสะกดสายเก่าแก้แค่ `text`/`place` → ผลที่แก้ไว้ไม่มีที่โผล่บนจอ
+ *    แถมรอบนั้นคืน "คำบรรยาย" ที่เขียนใหม่ทั้งย่อหน้า ซึ่งการ์ดไม่ใช่)
+ * · สายเก่า (V1) → ตรวจ `text`/`place` ตามเดิม
+ *
+ * ต้องทำก่อนค้น Google Places เสมอ — ชื่อสถานที่ที่สะกดผิดจะหาที่ไม่เจอ
+ */
+async function proofreadSummaryFor(
+  summary: AiSummaryResult,
+  transcript: string | null | undefined,
+  diag: DiagLog
+): Promise<AiSummaryResult> {
+  const card = summary.card;
+  if (config.ai.vcaV2Enabled && card) {
+    const corrections = await proofreadCard(card, transcript, diag);
+    if (!corrections) return summary;
+    const fixed = applyProofreadToCard(card, corrections);
+    return {
+      ...summary,
+      card: fixed,
+      // ข้อความล้วนต้องตรงกับการ์ด (แอป + Caption helper อ่าน text)
+      text: renderPostText(fixed),
+      // ชื่อที่แก้แล้วต้องไปถึงจุดที่ใช้ค้น Google ด้วย
+      place: summary.place
+        ? {
+            ...summary.place,
+            place_name: fixed.place?.name ?? summary.place.place_name,
+          }
+        : summary.place,
+    };
+  }
+  const corrected = await proofreadSummary(summary, transcript, diag);
+  return corrected ? applyProofreadToSummary(summary, corrected) : summary;
+}
+
+/**
+ * ตรวจสะกดคำบรรยาย
+ * -------------------------------------------------------------
+ * สายการ์ด: ข้อความที่ผู้ใช้เห็นคือการ์ด ซึ่งตรวจสะกดไปแล้ว
+ * → ไม่ต้องยิงรอบตรวจคำบรรยายสายเก่าซ้ำ (เปลืองเวลาและโทเคนโดยเปล่า)
+ * → และไม่ต้องโชว์ขั้นตอนนี้ในรายงานด้วย เพราะมันไม่ได้ทำงานอยู่จริง
+ *   (ขั้นตอนที่ "ข้าม" ทำให้ผู้ใช้เข้าใจว่าระบบพัง)
+ */
+async function proofreadNarrationFor(
+  text: string,
+  facts: Record<string, unknown>,
+  transcript: string | null | undefined,
+  diag: DiagLog
+): Promise<string> {
+  if (config.ai.vcaV2Enabled) {
+    // โหมดการ์ด — ไม่มีขั้นตอนนี้ในสายงาน ไม่ต้องรายงาน
+    return text;
+  }
+  const fixed = await proofreadNarration(text, facts, transcript, diag);
+  return fixed || text;
+}
+
+/**
  * POST /ai-summary/preview
  * -------------------------------------------------------------
  * Generate a summary WITHOUT a saved video row — used at UPLOAD time,
@@ -130,10 +194,11 @@ router.post("/preview", async (req: Request, res: Response) => {
     // Step 2b: proofread pass — the model writes fresh Thai, so it slips on
     // spelling. Copy-edit it BEFORE Google, because the place name is part
     // of the search query: a misspelled name finds nothing.
-    const corrected = await proofreadSummary(rawSummary, withAudio.transcript, diag);
-    const cleanSummary = corrected
-      ? applyProofreadToSummary(rawSummary, corrected)
-      : rawSummary;
+    const cleanSummary = await proofreadSummaryFor(
+      rawSummary,
+      withAudio.transcript,
+      diag
+    );
 
     // Hand any transcript the caller supplied to the enricher so it can build a
     // better Google Places search query. See places.ts `_transcript`.
@@ -161,7 +226,7 @@ router.post("/preview", async (req: Request, res: Response) => {
     const narrationText = await generateNarration(enriched, diag).catch(() => enriched.text);
 
     // Step 4b: proofread the narration — this is the text the reader sees.
-    const cleanNarration = await proofreadNarration(
+    const cleanNarration = await proofreadNarrationFor(
       narrationText,
       narrationFacts(enriched),
       withAudio.transcript,
@@ -214,10 +279,11 @@ router.post("/:postId/generate", async (req: Request, res: Response) => {
 
     // Same proofread → Google → narration order as /preview: the corrected
     // place name is the one that goes into the Google search query.
-    const corrected = await proofreadSummary(rawSummary, input.transcript, diag);
-    const cleanSummary = corrected
-      ? applyProofreadToSummary(rawSummary, corrected)
-      : rawSummary;
+    const cleanSummary = await proofreadSummaryFor(
+      rawSummary,
+      input.transcript,
+      diag
+    );
     const summaryWithCtx = input.transcript
       ? { ...cleanSummary, _transcript: input.transcript }
       : cleanSummary;
@@ -230,7 +296,7 @@ router.post("/:postId/generate", async (req: Request, res: Response) => {
       return cleanSummary;
     });
     const narrationText = await generateNarration(enriched, diag).catch(() => enriched.text);
-    const cleanNarration = await proofreadNarration(
+    const cleanNarration = await proofreadNarrationFor(
       narrationText,
       narrationFacts(enriched),
       input.transcript,

@@ -16,6 +16,12 @@
     "check:place-scope": "ts-node --transpile-only scripts/place_scope_check.ts",
     "check:folder": "ts-node --transpile-only scripts/folder_context_check.ts",
     "test:folder": "ts-node --transpile-only scripts/folder_context_test.ts",
+    "test:vca2": "ts-node --transpile-only scripts/vca_v2_test.ts",
+    "check:vca2": "ts-node --transpile-only scripts/vca_v2_osm_check.ts",
+    "check:vca2:places": "ts-node --transpile-only scripts/vca_v2_places_check.ts",
+    "check:vca2:proofread": "ts-node --transpile-only scripts/vca_v2_card_proofread_check.ts",
+    "probe:vca2": "ts-node --transpile-only scripts/vca_v2_probe.ts",
+    "preview:vca2": "ts-node --transpile-only scripts/vca_v2_preview.ts",
     "fix:hashtags": "ts-node --transpile-only scripts/fix_hashtags.ts",
     "lint": "expo lint"
   },

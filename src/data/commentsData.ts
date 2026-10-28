@@ -100,6 +100,69 @@ export interface AiPlaceData {
   };
 }
 
+/**
+ * การ์ดหน้าโพสต์ (PostCard) — รูปแบบมีโครงสร้างของสรุป AI
+ * -------------------------------------------------------------
+ * ต้องตรงกับฝั่ง backend (`backend/src/videoPromptV2.ts`) ทุกคีย์
+ * คลิปที่สรุปด้วย VCA V2 เท่านั้นที่มี field นี้ · คลิปเก่าไม่มี → แอป
+ * ต้อง fallback ไปใช้ `text` แบบเดิม
+ *
+ * รูปแบบปัจจุบัน: การ์ด "ข้อความล้วน" แบ่งเป็นบล็อก (`blocks`)
+ *   · bullets = หัวข้อ + รายการ (ขึ้นต้นด้วย "• ")
+ *   · facts   = หัวข้อ (ถ้ามี) + บรรทัดข้อเท็จจริงต่อเนื่อง (ไม่มีไอคอน ไม่มี bullet)
+ * `sections` (รูปแบบเก่าที่มี ✔/⚠/ℹ) เก็บไว้เผื่อคลิปเก่าในฐานข้อมูล
+ */
+export interface PostCardLine {
+  /** ok = ยืนยันได้ · warn = ข้อจำกัด/กติกา · info = ข้อมูลจากแผนที่ */
+  kind: "ok" | "warn" | "info";
+  text: string;
+  /** ลิงก์เปิดแผนที่ (มีเฉพาะบรรทัดที่พาไปยังสถานที่จริง) — แอปทำให้กดได้ */
+  url?: string | null;
+}
+
+/** บล็อกหนึ่งบล็อกของการ์ด */
+export interface PostCardBlock {
+  /** หัวข้อของบล็อก (เช่น "ราคา" "ที่พัก" "ภายในห้องพัก") — ไม่มี = บรรทัดต่อเนื่อง */
+  title?: string | null;
+  style: "bullets" | "facts";
+  lines: PostCardLine[];
+}
+
+/** หัวข้อหนึ่งหัวข้อของการ์ด (รูปแบบเก่า) */
+export interface PostCardSection {
+  title: string;
+  /** ตัวเลขเด่นบนหัวข้อ เช่น "฿700/คน" — ไม่มีข้อมูล = ไม่แสดง */
+  highlight?: string | null;
+  lines: PostCardLine[];
+}
+
+export interface PostCard {
+  /** ชื่อสถานที่ + ที่อยู่ที่รวบรวมแล้ว + แท็กไลน์สั้น ๆ */
+  place?: {
+    name?: string | null;
+    address?: string | null;
+    /** ประโยคสั้นว่าที่นี่คืออะไร — แสดงใต้ชื่อสถานที่ */
+    tagline?: string | null;
+    /** คำบรรยายสถานที่ — แสดงใต้แท็กไลน์ */
+    description?: string | null;
+  } | null;
+  /** บล็อกเรียงตามลำดับที่จะแสดง (รูปแบบปัจจุบัน) */
+  blocks?: PostCardBlock[] | null;
+  /** รูปแบบเก่า — มีเฉพาะการ์ดที่สร้างก่อนเปลี่ยนไปใช้บล็อก */
+  sections?: PostCardSection[] | null;
+  /** บรรทัดกิจกรรม/สินค้า (รูปแบบเก่า) */
+  activity?: string | null;
+  /** ติดต่อ/จอง + เวลาเปิด */
+  contact?: {
+    phone?: string | null;
+    facebook?: string | null;
+    line?: string | null;
+    hours?: string | null;
+  } | null;
+  /** เครดิตแผนที่ — ต้องแสดงเมื่อมีข้อมูลจาก Google Maps Platform */
+  mapCredit?: string | null;
+}
+
 export interface AiSummary {
   status: AiSummaryStatus;
   generatedAt?: string;
@@ -107,6 +170,8 @@ export interface AiSummary {
   text: string;
   /** Structured extraction from the clip (place/price/contact/...), when available. */
   place?: AiPlaceData;
+  /** การ์ดสรุปแบบมีโครงสร้าง — มีเฉพาะคลิปที่สรุปด้วย VCA V2 */
+  card?: PostCard;
   tags?: string[];
   highlights?: string[];
   transcriptHighlights?: string[]; // legacy: from Speech-to-Text

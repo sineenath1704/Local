@@ -54,6 +54,16 @@ export const config = {
     proofreadEnabled: flag("PROOFREAD_ENABLED", true),
     /** Model for the proofread pass — empty = same model as the analyzer. */
     proofreadModel: process.env.AI_PROOFREAD_MODEL?.trim() || "",
+    /**
+     * Video Content Analyzer V2 — สายสรุปแบบการ์ด (โครงสร้าง + เตือนข้อมูล)
+     * -------------------------------------------------------------
+     * ปิด (ค่าเริ่มต้น) = ระบบทำงานเหมือนเดิมทุกอย่าง
+     * เปิด = สรุปด้วย prompt/schema V2 → ได้ `card` + ข้อความการ์ด และ
+     *       ไม่เขียนคำบรรยายรอบที่สอง (ดู `aiClient.ts`)
+     *
+     * คู่กับ `PROOFREAD_ENABLED=off` ถ้าต้องการ "AI รอบเดียว" จริง ๆ
+     */
+    vcaV2Enabled: flag("VCA_V2_ENABLED", false),
   },
 
   // Supabase (service_role — SERVER ONLY, bypasses RLS).

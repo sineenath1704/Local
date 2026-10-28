@@ -47,6 +47,7 @@ import {
 import { fetchAiSummary } from "../services/aiSummaryService";
 import { asAiError, type AiError } from "../services/aiHttp";
 import { useAiPlanner } from "../state/AiPlannerContext";
+import PostCardView from "./PostCard";
 
 type TabKey = "comments" | "reviews" | "ai";
 
@@ -348,8 +349,9 @@ function AiSummaryPanel({
 
       {/* Where — from the structured fields, not from the prose. The
           narration itself is two paragraphs about the clip and the
-          conditions, so the place line lives here. */}
-      {summary.place?.place_name && (
+          conditions, so the place line lives here.
+          ถ้ามีการ์ด V2 → ชื่อสถานที่อยู่ในการ์ดแล้ว ไม่ต้องแสดงซ้ำ */}
+      {summary.place?.place_name && !summary.card && (
         <View className="flex-row items-center mb-2.5 flex-wrap">
           <Text className="text-[13px]">📍</Text>
           <Text className="text-gray-800 font-bold text-[13.5px] ml-1.5">
@@ -363,12 +365,16 @@ function AiSummaryPanel({
         </View>
       )}
 
-      {/* Main summary — 2-paragraph friendly narrative */}
-      <View className="bg-amber-50/90 border border-amber-200/80 rounded-2xl p-4 shadow-sm">
-        <Text className="text-gray-800 text-[14px] leading-6 font-normal">
-          {summary.text}
-        </Text>
-      </View>
+      {/* Main summary — การ์ดมีโครงสร้าง (V2) ถ้ามี · ไม่มีการ์ด = ข้อความเดิม 2 ย่อหน้า */}
+      {summary.card ? (
+        <PostCardView card={summary.card} />
+      ) : (
+        <View className="bg-amber-50/90 border border-amber-200/80 rounded-2xl p-4 shadow-sm">
+          <Text className="text-gray-800 text-[14px] leading-6 font-normal">
+            {summary.text}
+          </Text>
+        </View>
+      )}
 
       {/* Google Maps button — opens map if GPS link exists */}
       {summary.place?.location?.gps && (

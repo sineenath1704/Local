@@ -1,5 +1,6 @@
 import { API_BASE_URL, API_TIMEOUT_MS } from "./apiConfig";
 import { aiFetch, AiError, asAiError, toastAiError } from "./aiHttp";
+import type { PostCard } from "../data/commentsData";
 
 /**
  * Caption helper + pre-upload AI summary.
@@ -126,6 +127,11 @@ export interface AiSummaryResult {
   text: string;
   /** Detailed description of everything visible in the clip (Pillar 1). */
   visualDescription?: string;
+  /**
+   * การ์ดสรุปแบบมีโครงสร้าง (VCA V2) — มีเฉพาะคลิปที่สรุปด้วย V2
+   * คลิปเก่าไม่มี field นี้ → ผู้เรียกต้อง fallback ไปใช้ `text` แบบเดิม
+   */
+  card?: PostCard;
   place?: SummaryPlace;
   tags?: string[];
   highlights?: string[];
