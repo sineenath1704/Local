@@ -149,6 +149,16 @@ export interface SummaryInput {
   uploaderType?: "tourist" | "community";
   /** Public URL of the clip — makes the backend analyze the VIDEO directly. */
   videoUrl?: string;
+  /**
+   * The area the post is about — narrows the backend's Google Places search
+   * (PLAN §5.3). Every field empty = no scope (the old country-wide search).
+   */
+  locationScope?: {
+    community?: string | null;
+    subdistrict?: string | null;
+    district?: string | null;
+    province?: string | null;
+  };
 }
 
 /**
@@ -197,6 +207,7 @@ export async function generatePreviewSummary(
       audioType: input.audioType ?? "none",
       uploaderType: input.uploaderType ?? "tourist",
       videoUrl: input.videoUrl,
+      locationScope: input.locationScope ?? undefined,
     },
     timeoutMs,
     onSettled: (ok, error) => {

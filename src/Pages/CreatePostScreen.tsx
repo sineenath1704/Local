@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   View,
   Text,
@@ -108,6 +108,96 @@ function priceLevelLabel(level?: number | null): string | null {
   }
 }
 
+/**
+ * The card's address line — "community subdistrict district province".
+ *
+ * The same shape the backend builds (see `buildPostCard` in
+ * `backend/src/videoPromptV2.ts`), so the card and the confirmed place
+ * describe the same place in the same words.
+ */
+function cardAddress(
+  community: string | null | undefined,
+  location: { subdistrict?: string | null; district?: string | null; province?: string | null }
+): string | null {
+  const area = [location.subdistrict, location.district, location.province]
+    .map((v) => (v ?? "").trim())
+    .filter(Boolean)
+    .join(" ");
+  const village = (community ?? "").trim();
+  const out = village ? `${village} ${area}`.trim() : area;
+  return out || null;
+}
+
+/**
+ * Swap the old place name for the confirmed one inside a text.
+ *
+ * The new name is hidden behind a placeholder first: it can contain the old
+ * one ("ห้วยหอม" inside "บ้านห้วยหอม"), and without the placeholder that
+ * would turn into "บ้านบ้านห้วยหอม".
+ */
+function swapNameInText(
+  text: string | null | undefined,
+  oldName: string | null | undefined,
+  newName: string
+): string | null | undefined {
+  const from = (oldName ?? "").trim();
+  const to = newName.trim();
+  if (typeof text !== "string" || !from || !to || from === to) return text;
+  if (!text.includes(from)) return text;
+  const SENTINEL = "\u0000";
+  return text
+    .split(to)
+    .join(SENTINEL)
+    .split(from)
+    .join(to)
+    .split(SENTINEL)
+    .join(to);
+}
+
+/**
+ * Put the confirmed name through the WHOLE card.
+ *
+ * · the card header = the confirmed name
+ * · the address = the confirmed community + area
+ * · the old name the AI wrote inside the prose → the confirmed name
+ *   (the name can be wrong in the headline AND in the sentences below it)
+ */
+function applyConfirmedNameToCard(
+  card: NonNullable<AiSummaryResult["card"]>,
+  oldName: string | null | undefined,
+  newName: string,
+  community: string | null,
+  location: { subdistrict?: string | null; district?: string | null; province?: string | null }
+): NonNullable<AiSummaryResult["card"]> {
+  const from = oldName;
+  const to = newName.trim();
+  const swap = (text: string | null | undefined) => swapNameInText(text, from, to);
+  return {
+    ...card,
+    place: {
+      ...(card.place ?? {}),
+      name: to,
+      address: cardAddress(community, location) ?? card.place?.address ?? null,
+      tagline: swap(card.place?.tagline) ?? null,
+      description: swap(card.place?.description) ?? null,
+    },
+    activity: swap(card.activity) ?? null,
+    blocks:
+      card.blocks?.map((b) => ({
+        ...b,
+        title: swap(b.title) ?? null,
+        lines: b.lines.map((l) => ({ ...l, text: swap(l.text) ?? "" })),
+      })) ?? null,
+    sections:
+      card.sections?.map((sec) => ({
+        ...sec,
+        title: swap(sec.title) ?? sec.title,
+        highlight: swap(sec.highlight) ?? null,
+        lines: sec.lines.map((l) => ({ ...l, text: swap(l.text) ?? "" })),
+      })) ?? null,
+  };
+}
+
 export default function CreatePostScreen({ onPosted, onCancel, initialLocation }: CreatePostScreenProps) {
   const insets = useSafeAreaInsets();
   const { session, user } = useAuth();
@@ -121,6 +211,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
   const [videoUri, setVideoUri] = useState<string | null>(null);
   const [caption, setCaption] = useState("");
   const [hashtags, setHashtags] = useState("");
+  const [hashtagInput, setHashtagInput] = useState("");
   const [province, setProvince] = useState(initialLocation?.province || "");
   const [district, setDistrict] = useState(initialLocation?.district || "");
   const [subdistrict, setSubdistrict] = useState(initialLocation?.subdistrict || "");
@@ -299,18 +390,42 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
       if (!prev) return prev;
       const p = prev.place;
       if (!p) return prev;
+      const community = communityName ?? p.community ?? null;
+      const location = {
+        ...p.location,
+        province: place.province ?? p.location.province ?? null,
+        district: place.district ?? p.location.district ?? null,
+        subdistrict: place.subdistrict ?? p.location.subdistrict ?? null,
+      };
+      // The name the user confirmed on Google is the final word. The AI
+      // misreads names (a blurry sign, or a guess from a generic shot), and
+      // it used to win because its value was never replaced.
       const base: SummaryPlace = {
         ...p,
-        place_name: p.place_name ?? place.name,
-        community: communityName ?? p.community ?? null,
-        location: {
-          ...p.location,
-          province: place.province ?? p.location.province ?? null,
-          district: place.district ?? p.location.district ?? null,
-          subdistrict: place.subdistrict ?? p.location.subdistrict ?? null,
-        },
+        place_name: place.name,
+        community,
+        location,
       };
-      return { ...prev, place: base };
+      // The card is what the user actually sees — its header, its address
+      // and the name inside its text must agree with the confirmed place.
+      const card = prev.card
+        ? applyConfirmedNameToCard(
+            prev.card,
+            prev.card.place?.name ?? p.place_name,
+            place.name,
+            community,
+            location
+          )
+        : prev.card;
+      // The summary text is rendered FROM the card, so it carries the same
+      // name — it goes to the AI chat as the clip's context, and a wrong
+      // name there makes the chat answer about the wrong place.
+      const text = swapNameInText(
+        prev.text,
+        prev.card?.place?.name ?? p.place_name,
+        place.name
+      );
+      return { ...prev, place: base, card, text: text ?? prev.text };
     });
   };
 
@@ -406,10 +521,23 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     writePlaceDetailsToSummary(next);
   };
 
-  const player = useVideoPlayer(videoUri ?? "", (p) => {
+  const player = useVideoPlayer(null, (p) => {
     p.loop = true;
     p.muted = true;
   });
+
+  // Keep the preview playing while the draft uploads and AI analyzes it.
+  useEffect(() => {
+    if (videoUri) {
+      player.replace(videoUri);
+      player.play();
+    } else {
+      player.pause();
+    }
+  }, [player, videoUri]);
+
+  // Invalidates results from a clip that was removed or replaced.
+  const videoGeneration = useRef(0);
 
   // ผลค้นจากทะเบียนชุมชนในเครื่อง — เหมือนกันทั้งนักท่องเที่ยวและชุมชน
   const placeResults = locationQuery.trim().length >= 1 ? searchPlaces(locationQuery) : [];
@@ -420,6 +548,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     // so it can feed the caption helper as an independent source.
     const url = overrides?.videoUrl ?? draftVideoUrl;
     if (!url) return;
+    const generation = videoGeneration.current;
     setSummaryLoading(true);
     setSummaryEditing(false);
 
@@ -430,8 +559,17 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
         audioType: "speech",
         uploaderType: "tourist",
         location: undefined,
+        // The area we already know — lets the backend narrow its Google
+        // Places search instead of looking through the whole country.
+        locationScope: {
+          community: community.trim() || null,
+          subdistrict: subdistrict.trim() || null,
+          district: district.trim() || null,
+          province: province.trim() || null,
+        },
       });
     } catch (err) {
+      if (generation !== videoGeneration.current) return;
       // The call FAILED — leave every location field exactly as the user left
       // it. Previously a failure produced `null`, which fell into the
       // "AI found no place" branch below and silently wiped whatever they had
@@ -453,9 +591,10 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
       );
       return;
     } finally {
-      setSummaryLoading(false);
+      if (generation === videoGeneration.current) setSummaryLoading(false);
     }
 
+    if (generation !== videoGeneration.current) return;
     setSummary(result);
     setSummaryDraft(result?.text ?? "");
     setSummaryDiag(result?._diag ?? null);
@@ -467,7 +606,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     if (result?.place) {
       // นักท่องเที่ยว + ชุมชน → ขั้นตอนเดียวกัน
       setLocationSource("ai");
-      await runLocationVerify(result.place);
+      await runLocationVerify(result.place, generation);
     } else {
       // The call SUCCEEDED and AI genuinely found no place → clear location.
       // (Only reachable now that transport errors return early above.)
@@ -506,7 +645,8 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     } | null;
     google_candidates?: PlaceCandidate[];
   };
-  const runLocationVerify = async (place: PlaceToVerify) => {
+  const runLocationVerify = async (place: PlaceToVerify, generation = videoGeneration.current) => {
+    if (generation !== videoGeneration.current) return;
     const aiPlaceName = place.place_name ?? null;
     const aiCommunity = place.community ?? null;
     const loc = place.location ?? {};
@@ -549,33 +689,31 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     }
 
     // รู้จัก "ที่ลงทะเบียน" ของขอบเขตนี้ก่อน — เทียบด้วย Google id (D2)
-    await resolveRegisteredPlace();
+    const registry = await resolveRegisteredPlace();
+    if (generation !== videoGeneration.current) return;
 
     // ── ① Google Places results the backend already fetched ──
     // Nothing is written into the form here. The user TICK-CONFIRMS first;
     // only then do we spend one Place Details call and fill the fields.
     if (backendCandidates.length > 0) {
       console.log("[verify] using", backendCandidates.length, "backend Google candidates");
-      showCandidates(sortByMatchLevel(backendCandidates));
+      setLocalPlaceCandidates([]);
+      showCandidates(sortByMatchLevel(backendCandidates), registry);
       return;
     }
 
-    // ── ② check our local confirmed places store ──
-    if (aiPlaceName) {
-      const local = await findLocalPlaces({
-        name: aiPlaceName,
-        province: loc.province,
-        district: loc.district,
+    // AI ให้ชื่อ/พื้นที่เป็นคำค้นเท่านั้น — ต้องตรวจสอบกับ Google Places
+    // ก่อนแสดงปุ่มยืนยัน ไม่ใช้ผล Local หรือ AI เป็นตัวเลือกยืนยันอีกชุด
+    setLocalPlaceCandidates([]);
+    if (aiPlaceName || aiCommunity) {
+      // The AI's own area travels with the call — the form was only just
+      // filled from it, so reading the form here would still be empty.
+      await lookupOnGoogle(aiPlaceName || aiCommunity || "", registry, generation, {
+        community: aiCommunity,
+        subdistrict: loc.subdistrict ?? null,
+        district: loc.district ?? null,
+        province: loc.province ?? null,
       });
-      setLocalPlaceCandidates(local);
-      // ไม่ auto-pick แล้ว (D7) — การเทียบด้วยชื่อทำให้เลือกผิดได้
-      // ("บ้านปาย" ไปตรงกับ "บ้านปายใหม่") และเลิกค้น Google ทิ้ง
-      // ── ③ call Google ourselves if backend didn't enrich ──
-      if (local.length === 0) {
-        void lookupOnGoogle(aiPlaceName);
-      }
-    } else {
-      setLocalPlaceCandidates([]);
     }
   };
 
@@ -600,6 +738,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
       ? { kind: "none" as const, candidate: null }
       : matchAgainstRegistered(list, reg?.placeId ?? null);
     setRegisteredMatch(hit.candidate);
+    setPendingConfirm(null);
     if (hit.candidate) {
       setPendingName(hit.candidate.name);
       setPendingAddress(hit.candidate.address);
@@ -653,21 +792,36 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
 
   const lookupOnGoogle = async (
     name: string,
-    registry?: RegisteredPlace | null
+    registry?: RegisteredPlace | null,
+    generation = videoGeneration.current,
+    /**
+     * The area to search in. Pass it when the area was read a moment ago:
+     * a `setX()` from this same tick has not reached the state yet, so
+     * reading the form here would search the whole country.
+     */
+    scope?: {
+      community?: string | null;
+      subdistrict?: string | null;
+      district?: string | null;
+      province?: string | null;
+    }
   ) => {
     console.log("[google] lookupOnGoogle name =", name);
     setGoogleLoading(true);
     setPendingConfirm(null);
     setRegisteredMatch(null);
     setGoogleCandidates([]);
+    setLocalPlaceCandidates([]);
     // ขอบเขตการค้นหา = ค่าในฟอร์ม (เหมือนนักท่องเที่ยวทุกประการ)
+    const pick = (v: string | null | undefined) => (v ?? "").trim() || undefined;
     const r = await verifyPlaceOnGoogle({
       placeName: name,
-      community: community.trim() || undefined,
-      subdistrict: subdistrict.trim() || undefined,
-      district: district.trim() || undefined,
-      province: province.trim() || undefined,
+      community: pick(scope?.community ?? community),
+      subdistrict: pick(scope?.subdistrict ?? subdistrict),
+      district: pick(scope?.district ?? district),
+      province: pick(scope?.province ?? province),
     });
+    if (generation !== videoGeneration.current) return;
     console.log("[google] result configured =", r.configured, "candidates =", r.candidates.length);
     setGoogleLoading(false);
     if (r.candidates.length === 0) {
@@ -839,16 +993,22 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     });
     if (!result.canceled && result.assets[0]?.uri) {
       const uri = result.assets[0].uri;
+      const generation = ++videoGeneration.current;
       setVideoUri(uri);
       // Upload a draft copy to Storage → get a public URL → let the backend
       // AI analyze the VIDEO directly, right after the clip is picked.
       setSummaryLoading(true);
       try {
         const { path, url } = await uploadDraftVideo(uri);
+        if (generation !== videoGeneration.current) {
+          void deleteDraftVideo(path);
+          return;
+        }
         setDraftVideoPath(path);
         setDraftVideoUrl(url);
         await runSummary({ videoUrl: url });
       } catch (e: any) {
+        if (generation !== videoGeneration.current) return;
         setSummaryLoading(false);
         Alert.alert("เตรียมวิดีโอไม่สำเร็จ", e?.message ?? "ลองเลือกวิดีโอใหม่อีกครั้ง");
       }
@@ -856,6 +1016,8 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
   };
 
   const removeVideo = () => {
+    videoGeneration.current += 1;
+    player.pause();
     // The draft copy is dead weight now — drop it so the clip isn't stored twice.
     if (draftVideoPath) void deleteDraftVideo(draftVideoPath);
     setVideoUri(null);
@@ -865,6 +1027,15 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setSummaryDraft("");
     setSummaryEditing(false);
     setAccuracy(0);
+    setSummaryLoading(false);
+    setSummaryDiag(null);
+    setShowDiag(false);
+    setCaption("");
+    setCaptionIdeas([]);
+    setCaptionLoading(false);
+    setHashtags("");
+    setHashtagInput("");
+    setHashtagIdeas([]);
     // ล้างสถานที่ให้เหมือนกันทั้งสองฝั่ง
     setLocationName("");
     setPlaceName("");
@@ -879,6 +1050,19 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setGoogleCandidates([]);
     setPendingConfirm(null);
     setCoords(null);
+    setConfirmedPlace(null);
+    setPlaceDetails({ priceLevel: null, website: null, phone: null, openingHours: null });
+    setPlaceDetailsEdited({});
+    setPlaceDetailsReady(false);
+    setConfirmingPlace(false);
+    setPendingName("");
+    setPendingAddress("");
+    setRegisteredPlace(null);
+    setRegisteredMatch(null);
+    setConfirmedCommunityId(null);
+    setCommunityMatchLevel(null);
+    setCommunitySearch(null);
+    setCommunityChoices([]);
   };
 
   const parseHashtags = (raw: string): string[] =>
@@ -899,6 +1083,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
 
   // "ให้ AI ช่วยคิดแคปชัน" — use the already-generated summary as context.
   const handleAiCaption = async () => {
+    const generation = videoGeneration.current;
     setCaptionLoading(true);
     setCaptionIdeas([]);
     setHashtagIdeas([]);
@@ -908,23 +1093,25 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
         locationName,
         province,
         district,
-        hashtags: parseHashtags(hashtags),
+        hashtags: parseHashtags([hashtags, hashtagInput].filter(Boolean).join(" ")),
         summaryText: summary?.text,
         highlights: summary?.highlights ?? summary?.place?.highlights,
       });
+      if (generation !== videoGeneration.current) return;
       setCaptionIdeas(ideas);
       setHashtagIdeas(tagIdeas);
       if (ideas.length === 0) {
         Alert.alert("ขออภัย", "AI ตอบกลับมาแต่ไม่มีแคปชันให้ใช้ ลองใหม่อีกครั้งนะคะ");
       }
     } catch (err) {
+      if (generation !== videoGeneration.current) return;
       // Show the actual reason (401 / timeout / unreachable), not a fixed
       // apology that hid all four from the user.
       const aiErr = asAiError(err);
       console.warn("[caption] FAIL", aiErr?.status ?? "-", aiErr?.message ?? err);
       Alert.alert("ขอแคปชันไม่สำเร็จ", aiErr?.message ?? "เรียก AI ไม่สำเร็จ");
     } finally {
-      setCaptionLoading(false);
+      if (generation === videoGeneration.current) setCaptionLoading(false);
     }
   };
 
@@ -974,7 +1161,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
       await uploadVideo({
         localUri: videoUri,
         caption: caption.trim(),
-        hashtags: parseHashtags(hashtags),
+        hashtags: parseHashtags([hashtags, hashtagInput].filter(Boolean).join(" ")),
         locationName: locationName.trim() || undefined,
         placeName: placeName.trim() || undefined,
         community: community.trim() || undefined,
@@ -1109,7 +1296,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
         {/* Video picker / preview */}
         {videoUri ? (
           <View className="rounded-2xl overflow-hidden bg-black mb-4" style={{ height: 300 }}>
-            <VideoView player={player} style={{ flex: 1 }} contentFit="contain" nativeControls={false} />
+            <VideoView player={player} style={{ flex: 1 }} contentFit="contain" nativeControls={true} fullscreenOptions={{ enable: true }} />
             <TouchableOpacity
               onPress={removeVideo}
               className="absolute top-2 right-2 w-9 h-9 rounded-full bg-black/60 items-center justify-center"
@@ -1376,46 +1563,6 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
               <Text key={i} className="text-amber-700 text-[11px] mb-1">⚠️ {w}</Text>
             ))}
 
-            {/* Previously-confirmed places in Local (choose, don't auto-pick) */}
-            {localPlaceCandidates.length > 0 && (
-              <>
-                <Text className="text-gray-500 text-[11px] font-bold mt-1 mb-1">สถานที่ที่ยืนยันแล้วใน Local:</Text>
-                {localPlaceCandidates.map((p) => (
-                  <TouchableOpacity
-                    key={p.id}
-                    onPress={() => applyLocalPlace(p)}
-                    activeOpacity={0.8}
-                    className="bg-white border border-emerald-200 rounded-xl px-3 py-2 mb-1.5"
-                  >
-                    <Text className="text-gray-900 text-[13px] font-semibold">{p.name}</Text>
-                    <Text className="text-gray-400 text-[11px]">
-                      {[p.district && `อ.${p.district}`, p.province && `จ.${p.province}`].filter(Boolean).join(" • ")}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </>
-            )}
-
-            {/* OTOP community candidates (choose) */}
-            {verify.communityCandidates.length > 0 && (
-              <>
-                <Text className="text-gray-500 text-[11px] font-bold mt-1 mb-1">
-                  {verify.communityCandidates.length > 1 ? "พบหลายชุมชน เลือกที่ถูกต้อง:" : "ชุมชนที่ตรวจพบ:"}
-                </Text>
-                {verify.communityCandidates.map((p) => (
-                  <TouchableOpacity
-                    key={p.id}
-                    onPress={() => selectPlace(p)}
-                    activeOpacity={0.8}
-                    className="bg-white border border-gray-200 rounded-xl px-3 py-2 mb-1.5"
-                  >
-                    <Text className="text-gray-900 text-[13px] font-semibold">{p.name}</Text>
-                    <Text className="text-gray-400 text-[11px]">อ.{p.districtName} • จ.{p.provinceName}</Text>
-                  </TouchableOpacity>
-                ))}
-              </>
-            )}
-
             {/* Google Maps lookup — find WHERE a specific place is */}
             {googleLoading && (
               <View className="flex-row items-center py-2">
@@ -1608,29 +1755,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
               </TouchableOpacity>
             )}
 
-            {/* Confirm the AI's reconciled location as-is, or search below */}
-            <View className="flex-row mt-2">
-              <TouchableOpacity
-                onPress={() => {
-                  setLocationConfirmed(true);
-                  setVerify(null);
-                }}
-                disabled={!locationName}
-                activeOpacity={0.85}
-                className={`flex-1 items-center justify-center rounded-xl py-2.5 mr-2 ${locationName ? "bg-[#2D6A4F]" : "bg-gray-200"}`}
-              >
-                <Text className={`font-bold text-[13px] ${locationName ? "text-white" : "text-gray-400"}`}>
-                  ยืนยันสถานที่นี้
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={clearLocation}
-                activeOpacity={0.85}
-                className="flex-1 items-center justify-center rounded-xl py-2.5 bg-gray-100"
-              >
-                <Text className="text-gray-600 font-bold text-[13px]">ค้นหา/แก้เอง</Text>
-              </TouchableOpacity>
-            </View>
+
           </View>
         )}
 
@@ -1742,37 +1867,6 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
           </View>
         )}
 
-        {/* ข้อมูลสถานที่ — the host checks what Google said and corrects it.
-            Saved on post, into the place's own row: that is what the AI chat
-            reads when a traveller asks about the price or the website.
-
-            §6.8: นักท่องเที่ยวก็เห็นการ์ดนี้ แต่แก้เฉพาะช่องที่เป็นของเจ้าของไม่ได้ (D6/D26) */}
-        {confirmedPlace?.placeId && placeDetailsReady && (
-          <PlaceDetailsCard
-            values={placeDetails}
-            onChange={applyPlaceDetails}
-            canEditOwnerFields={isCommunityHost}
-            matchLevel={communityMatchLevel}
-            sources={{
-              priceLevel: placeDetailsEdited.priceLevel ? "owner" : "google",
-              website: placeDetailsEdited.website ? "owner" : "google",
-              phone: placeDetailsEdited.phone ? "owner" : "google",
-              openingHours: placeDetailsEdited.openingHours ? "owner" : "google",
-            }}
-            subtitle={
-              isCommunityHost
-                ? "ยืนยันข้อมูลของสถานที่นี้ — แอไอแชทจะตอบคำถามเรื่องราคา เว็บไซต์ เบอร์โทร และเวลาเปิดปิดจากข้อมูลชุดนี้"
-                : "ข้อมูลสถานที่นี้มาจาก Google — เจ้าของสถานที่เป็นผู้ยืนยันค่าที่ถูกต้อง"
-            }
-            clipFacts={{
-              capacity: summary?.place?.capacity ?? null,
-              rules: summary?.place?.rules ?? null,
-              areas: summary?.place?.areas ?? null,
-              facilities: summary?.place?.facilities ?? null,
-            }}
-          />
-        )}
-
         {/* 2) Caption (optional) + AI helper */}
         <View className="flex-row items-center justify-between mb-1.5">
           <Text className="text-gray-700 font-bold text-[13px]">
@@ -1826,13 +1920,48 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
             แฮชแท็ก <Text className="text-gray-400 font-normal">(ไม่บังคับ)</Text>
           </Text>
         </View>
-        <TextInput
-          value={hashtags}
-          onChangeText={setHashtags}
-          placeholder="เช่น เชียงใหม่ OTOP ชุมชน (เว้นวรรคคั่น)"
-          placeholderTextColor="#9CA3AF"
-          className="bg-gray-100 rounded-xl px-3.5 py-3 text-[14px] text-gray-900 mb-2"
-        />
+        <View className="bg-gray-100 rounded-xl px-3.5 py-3 mb-2">
+          <View className="flex-row flex-wrap items-center">
+            {parseHashtags(hashtags).map((tag) => (
+              <View
+                key={tag}
+                className="flex-row items-center bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5 mr-2 mb-2"
+              >
+                <Text className="text-[#2D6A4F] text-[13px] font-semibold">{tag}</Text>
+                <TouchableOpacity
+                  onPress={() => {
+                    setHashtags((prev) =>
+                      parseHashtags(prev).filter((item) => item !== tag).join(" ")
+                    );
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`ลบแฮชแท็ก ${tag}`}
+                  className="ml-1.5"
+                >
+                  <XMarkIcon size={15} color="#2D6A4F" />
+                </TouchableOpacity>
+              </View>
+            ))}
+          </View>
+          <TextInput
+            value={hashtagInput}
+            onChangeText={(text) => {
+              if (/[\s,]/.test(text)) {
+                text.split(/[\s,]+/).forEach((tag) => addHashtag(tag));
+                setHashtagInput("");
+              } else {
+                setHashtagInput(text);
+              }
+            }}
+            onSubmitEditing={() => {
+              addHashtag(hashtagInput);
+              setHashtagInput("");
+            }}
+            placeholder="เช่น เชียงใหม่ OTOP ชุมชน (เว้นวรรคคั่น)"
+            placeholderTextColor="#9CA3AF"
+            className="text-[14px] text-gray-900 p-0"
+          />
+        </View>
 
         {/* AI hashtag suggestions — tap to add */}
         {hashtagIdeas.length > 0 && (
