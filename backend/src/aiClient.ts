@@ -3,7 +3,13 @@ import { AiUpstreamError } from "./aiErrors";
 import { callAiText } from "./aiStream";
 import { pickHashtagSuggestions } from "./hashtagText";
 import { DiagLog, errorDetail } from "./summaryDiag";
-import type { PlaceCandidate } from "./placeTypes";
+import type {
+  PlaceCandidate,
+  PlaceEvidence,
+  PlaceEvidenceSource,
+  PlaceReading,
+  PlaceResolution,
+} from "./placeTypes";
 // ชนิดการ์ดหน้าโพสต์ (V2) — import แบบ type เท่านั้น (ถูกลบตอน compile)
 // เพื่อไม่ให้เกิด circular import ตอน `videoPromptV2Compat.ts` เรียกกลับมา
 import type { PostCard } from "./videoPromptV2";
@@ -16,6 +22,10 @@ import {
   CaptionInput,
   SUMMARY_NARRATION_PROMPT,
   buildNarrationPrompt,
+  PLACE_RESOLVE_PROMPT,
+  buildPlaceResolvePrompt,
+  PLACE_RANK_PROMPT,
+  buildPlaceRankPrompt,
 } from "./prompt";
 // สายสรุป V2 (Video Content Analyzer V2) — โหมดทดลอง เปิดด้วย VCA_V2_ENABLED
 // (import ตรง ๆ ได้ เพราะฝั่ง `videoPromptV2Compat` ไม่ import `aiClient` แบบ runtime)
@@ -156,6 +166,14 @@ export interface AiSummaryResult {
    * → แอปต้อง fallback ไปใช้ `text` แบบเดิมเมื่อไม่มี `card`
    */
   card?: PostCard;
+  /**
+   * ผลการ "หาสถานที่" จากรอบ AI ที่ทำงานหน้าที่เดียว (ถ้ามี)
+   * -------------------------------------------------------------
+   * มีเมื่อระบบรันรอบหาสถานที่แยก → ชื่อใน `place.place_name` ควรตรงกับ
+   * ที่อยู่ใน `resolution.placeName` และผู้ใช้ติ๊กยืนยันจากรายการที่ Google
+   * ค้นมาด้วยคำค้นใน `resolution.queries`
+   */
+  placeResolution?: PlaceResolution;
 }
 
 /**
@@ -483,10 +501,626 @@ export async function generateSummary(
   }
 }
 
+// ============================================================
+//  รอบ AI ที่งานหน้าที่เดียว: "หาสถานที่" (แยกจากรอบสรุป)
+// ============================================================
+// รอบสรุปมีงานราว 30 อย่างใน prompt เดียว และ "ชื่อสถานที่" เป็นแค่อีกฟิลด์
+// หนึ่ง → โมเดลมักตั้งชื่อจากบรรยากาศ ไม่ใช่จากหลักฐานในคลิป (ที่มาของชื่อ
+// ที่ค้น Google แล้วไม่ตรง)
+//
+// รอบนี้ทำงานแบบ "หลักฐานนำ" — โมเดลต้องให้ quote ที่คัดมาจากคลิป แล้วฝั่ง
+// โค้ดตรวจว่า quote นั้นอยู่ในข้อความจริงหรือไม่ → ไม่ผ่าน = ทิ้ง
+// กันการเดาชื่อได้ในระดับโค้ด ไม่ใช่แค่ขอให้โมเดลตั้งใจ
+
+/** งบ token ของรอบหาสถานที่ — JSON เล็ก (ชื่อ + หลักฐาน + คำค้น) */
+const PLACE_RESOLVE_MAX_TOKENS = 4096;
+
+/** งบ token ของรอบจัดอันดับ — 1 บรรทัดต่อผู้สมัคร */
+const PLACE_RANK_MAX_TOKENS = 4096;
+
+/** ที่มาของหลักฐานที่ระบบรู้จัก */
+const PLACE_EVIDENCE_SOURCES: PlaceEvidenceSource[] = [
+  "transcript",
+  "on_screen_text",
+  "visual",
+  "caption",
+  "user_location",
+];
+
+/**
+ * แปลงคำที่โมเดลเขียนมาให้เป็นที่มาที่ระบบรู้จัก
+ * -------------------------------------------------------------
+ * โมเดลมักเขียนคำพวกนี้แทนชื่อที่เรากำหนด ("audio_transcript" ตามที่
+ * prompt เดิมใช้, "sign" สำหรับป้ายในภาพ ฯลฯ) → แปลงให้เข้าใจก่อน
+ *
+ * ถ้าเป็นคำที่ไม่รู้จักเลย → null = ไม่ใช่หลักฐานที่ตรวจสอบได้ (ทิ้ง)
+ * (ต้องไม่เดาเป็น "visual" เพราะ visual ไม่ต้องผ่านการตรวจสตริง)
+ */
+function normalizeEvidenceSource(value: unknown): PlaceEvidenceSource | null {
+  const raw = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  if (!raw) return null;
+  if (PLACE_EVIDENCE_SOURCES.includes(raw as PlaceEvidenceSource)) {
+    return raw as PlaceEvidenceSource;
+  }
+  const map: Record<string, PlaceEvidenceSource> = {
+    audio_transcript: "transcript",
+    speech: "transcript",
+    audio: "transcript",
+    voice: "transcript",
+    เสียงพูด: "transcript",
+    onscreen: "on_screen_text",
+    on_screen: "on_screen_text",
+    text: "on_screen_text",
+    sign: "on_screen_text",
+    signage: "on_screen_text",
+    subtitle: "on_screen_text",
+    ป้าย: "on_screen_text",
+    ซับ: "on_screen_text",
+    image: "visual",
+    frame: "visual",
+    video: "visual",
+    ภาพ: "visual",
+    user: "user_location",
+    location: "user_location",
+    ที่อยู่: "user_location",
+  };
+  return map[raw] ?? null;
+}
+
+/**
+ * ย่อข้อความให้เทียบกันได้ — ตัดช่องว่าง/เครื่องหมายวรรคตอนออก
+ * (ชื่อ "บ้าน สวน ริมน้ำ" กับ "บ้านสวนริมน้ำ" ต้องถือว่าตรงกัน)
+ */
+function foldText(value: string): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+/** ข้อความ A มีข้อความ B อยู่ข้างในหรือไม่ (แบบย่อ) */
+function containsText(haystack: string, needle: string): boolean {
+  const n = foldText(needle);
+  if (!n) return false;
+  return foldText(haystack).includes(n);
+}
+
+/** จำกัดคะแนนให้อยู่ในช่วง 0–1 · ค่าที่แปลงไม่ได้ = null */
+function clamp01(value: unknown): number | null {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(0, Math.min(1, n));
+}
+
+/** ข้อความสั้น ๆ ที่ไม่ว่าง · เกิน 160 ตัวอักษรตัดทิ้ง */
+function cleanNote(value: unknown): string | null {
+  const s = typeof value === "string" ? value.trim() : "";
+  if (!s) return null;
+  return s.length > 160 ? `${s.slice(0, 157)}...` : s;
+}
+
+/**
+ * เก็บเฉพาะหลักฐานที่ "มีอยู่จริง" ในคลิป
+ * -------------------------------------------------------------
+ * transcript / แคปชัน / ตัวหนังสือบนจอ / ที่อยู่ที่ผู้ใช้กรอก → ต้องค้น
+ * สตริงย่อยแล้วเจอจริง ถึงจะรับ
+ *
+ * visual → ป้ายในภาพที่ Vision ถอดเป็นข้อความไม่ได้ ตรวจไม่ได้ → รับไว้
+ * แต่ถือเป็นหลักฐานระดับอ่อน (ดู `normalizePlaceResolution`)
+ */
+function collectVerifiedEvidence(
+  raw: unknown,
+  input: VideoAnalysisInput,
+): PlaceEvidence[] {
+  const rows = Array.isArray(raw) ? (raw as any[]) : [];
+  const strictSources: { source: PlaceEvidenceSource; text: string }[] = [
+    { source: "transcript", text: input.transcript ?? "" },
+    { source: "on_screen_text", text: (input.onScreenText ?? []).join(" \n ") },
+    { source: "caption", text: input.caption ?? "" },
+    { source: "user_location", text: input.location ?? "" },
+  ];
+
+  const out: PlaceEvidence[] = [];
+  for (const row of rows) {
+    if (out.length >= 5) break;
+    const quote = typeof row?.quote === "string" ? row.quote.trim() : "";
+    if (!quote) continue;
+    const source = normalizeEvidenceSource(row?.source);
+    if (!source) continue;
+
+    if (source === "visual") {
+      out.push({ source, quote, note: cleanNote(row?.note) });
+      continue;
+    }
+
+    // หลักฐานชนิดอื่นต้องมีอยู่จริงในข้อความที่ส่งเข้าไป — ไม่เจอ = ทิ้ง
+    const hit = strictSources.find((s) => containsText(s.text, quote));
+    if (!hit) continue;
+    out.push({ source: hit.source, quote, note: cleanNote(row?.note) });
+  }
+  return out;
+}
+
+/**
+ * โมเดลตั้งชื่อได้ดีแต่ลืมใส่ quote — ถ้าชื่อนั้นปรากฏในข้อความจริง
+ * ให้เก็บหลักฐานให้เอง แทนที่จะทิ้งชื่อที่ถูกทิ้ง
+ */
+function rescueEvidence(
+  placeName: string,
+  input: VideoAnalysisInput,
+): PlaceEvidence[] {
+  if (!placeName) return [];
+  const sources: { source: PlaceEvidenceSource; text: string }[] = [
+    { source: "transcript", text: input.transcript ?? "" },
+    { source: "on_screen_text", text: (input.onScreenText ?? []).join(" \n ") },
+    { source: "caption", text: input.caption ?? "" },
+    { source: "user_location", text: input.location ?? "" },
+  ];
+  const hit = sources.find((s) => containsText(s.text, placeName));
+  if (!hit) return [];
+  return [
+    { source: hit.source, quote: placeName, note: "ชื่อสถานที่ปรากฏในข้อความนี้" },
+  ];
+}
+
+/**
+ * "การอ่านชื่อ" จากแต่ละแหล่ง — เสียงพูด กับ ตัวหนังสือบนจอ
+ * -------------------------------------------------------------
+ * ชื่อที่อ่านได้ต้องผ่าน 2 เงื่อนไข (ตรวจได้ด้วยโค้ด ไม่ใช่เชื่อโมเดล):
+ *   1. quote ต้องคัดมาจากแหล่งนั้นจริง (ต้องมีอยู่ใน transcript / ป้ายบนจอ)
+ *   2. ชื่อต้องอยู่ใน quote นั้น (ไม่งั้นโมเดลแต่งชื่อขึ้นเอง)
+ *
+ * เก็บได้ทีละแหล่ง (เสียง 1 · ป้ายบนจอ 1) — เพราะคำค้น Google ยิงตามจำนวนชื่อ
+ * และผู้ใช้ต้องเลือกจากรายการได้ 2 ทางพอดี
+ */
+function collectVerifiedReadings(
+  raw: unknown,
+  input: VideoAnalysisInput
+): PlaceReading[] {
+  const rows = Array.isArray(raw) ? (raw as any[]) : [];
+  const sources: { source: PlaceReading["source"]; text: string }[] = [
+    { source: "transcript", text: input.transcript ?? "" },
+    { source: "on_screen_text", text: (input.onScreenText ?? []).join(" \n ") },
+  ];
+
+  const out: PlaceReading[] = [];
+  for (const row of rows) {
+    const source: PlaceReading["source"] | null =
+      row?.source === "on_screen_text"
+        ? "on_screen_text"
+        : row?.source === "transcript"
+          ? "transcript"
+          : null;
+    if (!source) continue;
+
+    const placeName =
+      typeof row?.place_name === "string" ? row.place_name.trim() : "";
+    const quote = typeof row?.quote === "string" ? row.quote.trim() : "";
+    if (!placeName || !quote) continue;
+
+    // ทีละแหล่งเดียว — เก็บตัวแรกที่ผ่าน (โมเดลเรียงตามความมั่นใจ)
+    if (out.some((r) => r.source === source)) continue;
+
+    const src = sources.find((s) => s.source === source)!;
+    if (!containsText(src.text, quote)) continue; // คัดมาไม่ตรงกับแหล่งจริง
+    if (!containsText(quote, placeName)) continue; // ชื่อไม่ได้อยู่ใน quote
+
+    out.push({ source, placeName, quote, note: cleanNote(row?.note) });
+  }
+
+  // ชื่อเดียวกันจากสองทาง → เก็บไว้ทางเดียว (เสียงพูดมาก่อน) แล้วค้นคำเดียว
+  const byName = new Map<string, PlaceReading>();
+  for (const r of out) {
+    const key = foldText(r.placeName);
+    if (!key) continue;
+    const prev = byName.get(key);
+    if (!prev || (prev.source !== "transcript" && r.source === "transcript")) {
+      byName.set(key, r);
+    }
+  }
+
+  // เรียงให้เสียงพูดมาก่อน (เสียงคือสิ่งที่คนพูดว่าที่นี่คืออะไร)
+  return [...byName.values()].sort((a, b) =>
+    a.source === b.source ? 0 : a.source === "transcript" ? -1 : 1
+  );
+}
+
+/**
+ * คำค้นสำหรับ Google — เก็บเฉพาะคำที่มีชื่อสถานที่อยู่จริง
+ * -------------------------------------------------------------
+ * **หนึ่งคำค้นต่อหนึ่งชื่อ** — ถ้าเสียงกับป้ายบนจออ่านได้คนละชื่อ
+ * ต้องค้นทั้งสองชื่อ (ผู้ใช้ต้องเลือกเองว่าอันไหนถูก) ถ้าชื่อเดียวกัน
+ * ก็ค้นคำเดียว ไม่ต้องยิงซ้ำ
+ */
+function buildQueries(
+  raw: unknown,
+  names: string[],
+  admin: Record<string, unknown>
+): string[] {
+  const rows = Array.isArray(raw) ? (raw as any[]) : [];
+  const rawQueries: string[] = [];
+  for (const row of rows) {
+    const q = typeof row === "string" ? row.trim() : "";
+    if (!q || q.length > 120) continue;
+    if (rawQueries.some((x) => x === q)) continue;
+    rawQueries.push(q);
+  }
+
+  const where = ["subdistrict", "district", "province"]
+    .map((key) => (typeof admin?.[key] === "string" ? (admin[key] as string).trim() : ""))
+    .filter(Boolean);
+
+  const out: string[] = [];
+  const usedRaw = new Set<number>();
+  for (const name of names) {
+    if (!name) continue;
+    // คำค้นจากโมเดลที่พูดถึงชื่อนี้ (ยังไม่ถูกใช้ไป) — ไม่มีก็สร้างเองจากชื่อ + พื้นที่
+    let hit = -1;
+    for (let i = 0; i < rawQueries.length; i++) {
+      if (usedRaw.has(i)) continue;
+      if (containsText(rawQueries[i], name)) {
+        hit = i;
+        break;
+      }
+    }
+    const q =
+      hit >= 0
+        ? rawQueries[hit]
+        : [name, ...where].join(" ").slice(0, 120);
+    if (hit >= 0) usedRaw.add(hit);
+    if (q && !out.some((x) => x === q)) out.push(q);
+  }
+  return out;
+}
+
+/**
+ * แปลงคำตอบของรอบหาสถานที่ → รูปแบบที่ระบบใช้ พร้อมตัดสิ่งที่ไม่มีหลักฐานทิ้ง
+ * -------------------------------------------------------------
+ * กฎที่บังคับด้วยโค้ด (ไม่ใช่แค่ขอให้โมเดล):
+ *   - ไม่มีหลักฐานที่ตรวจผ่าน = ไม่มีชื่อ (found = false)
+ *   - มีหลักฐานแบบตรวจได้ (transcript/ป้าย/แคปชัน) = ชื่อต้องโผล่ในหลักฐานนั้น
+ */
+/**
+ * พื้นที่บริหารที่ "มีที่มา" — ต้องโผล่ในข้อความในคลิปจริง
+ * -------------------------------------------------------------
+ * ชื่อสถานที่ถูกบังคับด้วยหลักฐานอยู่แล้ว แต่พื้นที่ (จังหวัด/อำเภอ/ตำบล)
+ * โมเดลเดาได้โดยไม่ต้องมีที่มา → ถ้าเดาแล้วผิด คำค้น Google จะแคบไป
+ * ผิดที่ → ไม่เจอสถานที่ที่ถูกเลย (แย่กว่าค้นกว้าง)
+ *
+ * กฎ: ต้องมีคำนี้อยู่ในข้อความที่ส่งเข้าไป (ถอดเสียง/ป้ายบนจอ/แคปชัน/
+ * ที่อยู่ที่ผู้ใช้กรอก) หรือในหลักฐานที่ผ่านการตรวจแล้ว
+ * ไม่มี → ตัดทิ้ง (ค้นกว้างขึ้น ดีกว่าค้นผิดที่)
+ */
+function verifyAdminValues(
+  admin: Record<string, unknown>,
+  input: VideoAnalysisInput,
+  evidence: PlaceEvidence[]
+): {
+  province: string | null;
+  district: string | null;
+  subdistrict: string | null;
+  village: string | null;
+} {
+  const haystack = [
+    input.transcript ?? "",
+    (input.onScreenText ?? []).join(" \n "),
+    input.caption ?? "",
+    input.location ?? "",
+    ...evidence.map((e) => e.quote),
+  ].join(" \n ");
+
+  const pick = (value: unknown): string | null => {
+    const s = typeof value === "string" ? value.trim() : "";
+    if (!s) return null;
+    // "จังหวัดเชียงใหม่" → "เชียงใหม่" (โมเดลบางทีใส่คำนำหน้า)
+    const bare = s.replace(/^(จังหวัด|อำเภอ|ตำบล|แขวง|เขต)\s*/u, "").trim();
+    return containsText(haystack, s) || (!!bare && containsText(haystack, bare))
+      ? s
+      : null;
+  };
+
+  return {
+    province: pick(admin.province),
+    district: pick(admin.district),
+    subdistrict: pick(admin.subdistrict),
+    village: pick(admin.village),
+  };
+}
+
+export function normalizePlaceResolution(
+  raw: any,
+  input: VideoAnalysisInput,
+): PlaceResolution {
+  const admin = raw?.admin ?? {};
+  const str = (value: unknown): string | null => {
+    const s = typeof value === "string" ? value.trim() : "";
+    return s ? s : null;
+  };
+
+  // ── อ่านชื่อจากสองทาง: เสียงพูด และ ตัวหนังสือบนจอ ──────────────────
+  // ทุก reading ที่รอดตรวจ = มี quote จริงในแหล่งนั้น + ชื่ออยู่ใน quote
+  const readings = collectVerifiedReadings(raw?.readings, input);
+  const fromSpeech = readings.find((r) => r.source === "transcript");
+  const fromScreen = readings.find((r) => r.source === "on_screen_text");
+
+  // ชื่อหลัก: เสียงพูดมาก่อน (คนพูดว่าที่นี่คืออะไร) → ถ้าไม่มีเสียงใช้ป้ายบนจอ
+  const placeName = fromSpeech?.placeName ?? fromScreen?.placeName ?? str(raw?.place_name);
+  const community = str(raw?.community);
+
+  let evidence = collectVerifiedEvidence(raw?.evidence, input);
+  // quote ของแต่ละ reading คือหลักฐานด้วย → เติมเข้าไป (ถ้ายังไม่มี)
+  for (const r of readings) {
+    if (evidence.some((e) => e.source === r.source && e.quote === r.quote)) continue;
+    evidence.push({ source: r.source, quote: r.quote, note: r.note });
+  }
+  if (!evidence.length && placeName) {
+    evidence = rescueEvidence(placeName, input);
+  }
+
+  const strictEvidence = evidence.filter((e) => e.source !== "visual");
+  const nameInEvidence = evidence.some(
+    (e) =>
+      containsText(e.quote, placeName ?? "") ||
+      containsText(placeName ?? "", e.quote),
+  );
+  const nameOk = placeName
+    ? strictEvidence.length === 0
+      ? true
+      : nameInEvidence
+    : false;
+
+  // มี reading ที่ผ่านการตรวจ = มีหลักฐานรองรับชื่อนั้นจริง (แม้โมเดลจะตอบ found=false)
+  const found =
+    (raw?.found === true || readings.length > 0) &&
+    !!placeName &&
+    evidence.length > 0 &&
+    nameOk;
+
+  // หลักฐานที่มาจากภาพอย่างเดียว (ป้ายที่ Vision ถอดเป็นข้อความไม่ได้)
+  // = เชื่อได้น้อยกว่าหลักฐานจากเสียง/ตัวหนังสือ → จำกัดคะแนนไว้ที่ 0.5
+  const weakOnly =
+    evidence.length > 0 && evidence.every((e) => e.source === "visual");
+
+  // พื้นที่ที่ไม่มีที่มาในคลิป → ตัดทิ้ง (ค้นกว้างขึ้น ดีกว่าค้นผิดที่)
+  const adminVerified = verifyAdminValues(admin, input, evidence);
+
+  // ชื่อที่ต้องค้น: ชื่อที่ต่างกัน → ค้นทีละชื่อ (ผู้ใช้ต้องเลือกเอง)
+  const names: string[] = [];
+  for (const r of readings) {
+    if (!names.some((n) => foldText(n) === foldText(r.placeName))) {
+      names.push(r.placeName);
+    }
+  }
+  if (!names.length && placeName) names.push(placeName);
+
+  return {
+    found,
+    placeName: found ? placeName : null,
+    community: found ? community : null,
+    admin: adminVerified,
+    category: str(raw?.category),
+    confidence: found
+      ? Math.min(clamp01(raw?.confidence) ?? 0, weakOnly ? 0.5 : 1)
+      : 0,
+    reason: str(raw?.reason),
+    evidence,
+    readings,
+    queries: buildQueries(raw?.queries, found ? names : [], adminVerified),
+  };
+}
+
+/**
+ * รอบ AI ที่หน้าที่เดียว: หาสถานที่จากคลิป พร้อมหลักฐานที่ตรวจสอบได้
+ * -------------------------------------------------------------
+ * คืน `found = false` เมื่อ "ไม่มีหลักฐานพอ" (ไม่ใช่เมื่อเรียกไม่สำเร็จ)
+ * ถ้าเรียกปลายทางไม่สำเร็จจะโยน error → ผู้เรียกต้องถอยไปใช้วิธีเดิม
+ */
+export async function resolvePlace(
+  input: VideoAnalysisInput,
+  diag?: DiagLog,
+  onRaw?: (raw: any) => void
+): Promise<PlaceResolution> {
+  const t0 = Date.now();
+  if (!isAiConfigured()) {
+    throw new Error(
+      "ยังไม่ได้ตั้งค่า AI (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN) — หาสถานที่ไม่ได้"
+    );
+  }
+
+  const promptText = buildPlaceResolvePrompt(input);
+  const messageContent: any = input.videoUrl
+    ? [
+        { type: "text", text: promptText },
+        { type: "video", source: { type: "url", url: input.videoUrl, fps: 1 } },
+      ]
+    : promptText;
+
+  try {
+    const res = await callAiText({
+      url: `${config.ai.baseUrl}/v1/messages`,
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": config.ai.authToken,
+        "anthropic-version": "2023-06-01",
+      },
+      body: {
+        model: config.ai.model,
+        max_tokens: PLACE_RESOLVE_MAX_TOKENS,
+        temperature: 0.0,
+        system: PLACE_RESOLVE_PROMPT,
+        messages: [{ role: "user", content: messageContent }],
+      },
+      timeoutMs: config.ai.timeoutMs,
+    });
+
+    if (!res.ok) {
+      throw new AiUpstreamError(res.status, res.body);
+    }
+
+    const parsed = extractJson(res.text);
+    if (!parsed) {
+      throw new Error("โมเดลตอบหาสถานที่มาไม่ใช่ JSON ที่อ่านได้");
+    }
+
+    const resolution = normalizePlaceResolution(parsed, input);
+    onRaw?.(parsed);
+
+    if (diag) {
+      diag.add({
+        id: "place-resolve",
+        label: "หาสถานที่ (AI)",
+        status: resolution.found ? "ok" : "skipped",
+        ms: Date.now() - t0,
+        detail: resolution.found
+          ? `ได้ชื่อ "${resolution.placeName}" — หลักฐาน ${resolution.evidence.length} ชิ้น`
+          : "ไม่มีหลักฐานที่ตรวจสอบได้ — ใช้วิธีเดิมแทน",
+        data: {
+          found: resolution.found,
+          placeName: resolution.placeName,
+          confidence: resolution.confidence,
+          evidenceCount: resolution.evidence.length,
+          queries: resolution.queries.join(" | "),
+        },
+      });
+    }
+    return resolution;
+  } catch (err: any) {
+    if (diag) {
+      const msg = errorDetail(err);
+      diag.add({
+        id: "place-resolve",
+        label: "หาสถานที่ (AI)",
+        status: "failed",
+        ms: Date.now() - t0,
+        detail: msg,
+        data: {
+          upstreamStatus:
+            typeof err?.upstreamStatus === "number" ? err.upstreamStatus : null,
+        },
+      });
+      diag.problem(`หาสถานที่ล้มเหลว: ${msg}`);
+    }
+    throw err;
+  }
+}
+
+/**
+ * ให้ AI จัดอันดับผู้สมัครที่ Google ค้นมา ตามหลักฐานในคลิป
+ * -------------------------------------------------------------
+ * "จัดอันดับ" ไม่ใช่ "เลือก" — ผู้ใช้ยังต้องติ๊กเองเสมอ
+ * ถ้าเรียกไม่สำเร็จ → คืนผู้สมัครเดิม (ลำดับจากโค้ด) ไม่ให้ขัด
+ */
+export async function rankPlaceCandidates(
+  resolution: PlaceResolution,
+  candidates: PlaceCandidate[],
+  diag?: DiagLog
+): Promise<PlaceCandidate[]> {
+  if (!candidates.length) return [];
+  const t0 = Date.now();
+  if (!isAiConfigured()) return candidates;
+
+  try {
+    const res = await callAiText({
+      url: `${config.ai.baseUrl}/v1/messages`,
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": config.ai.authToken,
+        "anthropic-version": "2023-06-01",
+      },
+      body: {
+        model: config.ai.model,
+        max_tokens: PLACE_RANK_MAX_TOKENS,
+        temperature: 0.0,
+        system: PLACE_RANK_PROMPT,
+        messages: [
+          { role: "user", content: buildPlaceRankPrompt(resolution, candidates) },
+        ],
+      },
+      timeoutMs: config.ai.timeoutMs,
+    });
+
+    if (!res.ok) {
+      throw new AiUpstreamError(res.status, res.body);
+    }
+
+    const parsed = extractJson(res.text);
+    const rows = parsed?.ranked;
+    if (!Array.isArray(rows)) {
+      throw new Error("โมเดลจัดอันดับสถานที่มาไม่ใช่ JSON ที่อ่านได้");
+    }
+
+    const byId = new Map<string, any>();
+    for (const row of rows) {
+      const id = row?.place_id;
+      if (typeof id === "string" && id) byId.set(id, row);
+    }
+
+    const scored = candidates.map((c) => {
+      const row = byId.get(c.placeId);
+      if (!row) {
+        return {
+          ...c,
+          aiScore: null,
+          aiReason: null,
+          evidenceMatch: null,
+          aiRank: null,
+        };
+      }
+      return {
+        ...c,
+        aiScore: clamp01(row?.score),
+        aiReason: cleanNote(row?.reason),
+        evidenceMatch: cleanNote(row?.evidence_match),
+        aiRank: null,
+      };
+    });
+
+    // เรียง: คะแนนสูงสุดก่อน · ตัวที่ยังไม่ได้คะแนนอยู่ท้ายสุด (คงลำดับเดิม)
+    const order = scored
+      .map((c, i) => ({ c, i, s: c.aiScore ?? -1 }))
+      .sort((a, b) => b.s - a.s || a.i - b.i);
+    const ranked = order.map((o, idx) => ({
+      ...o.c,
+      aiRank: o.c.aiScore == null ? null : idx + 1,
+    }));
+
+    if (diag) {
+      diag.add({
+        id: "place-rank",
+        label: "จัดอันดับสถานที่ (AI)",
+        status: "ok",
+        ms: Date.now() - t0,
+        detail: `จัดอันดับ ${ranked.length} รายการ (ตรงที่สุด: ${
+          ranked.find((r) => r.aiRank === 1)?.name ?? "-"
+        })`,
+        data: {
+          candidates: ranked.length,
+          top: ranked.find((r) => r.aiRank === 1)?.placeId ?? null,
+        },
+      });
+    }
+    return ranked;
+  } catch (err: any) {
+    if (diag) {
+      const msg = errorDetail(err);
+      diag.add({
+        id: "place-rank",
+        label: "จัดอันดับสถานที่ (AI)",
+        status: "failed",
+        ms: Date.now() - t0,
+        detail: `${msg} — ใช้ลำดับจากโค้ดแทน`,
+        data: { candidates: candidates.length },
+      });
+      diag.problem(`จัดอันดับสถานที่ล้มเหลว: ${msg}`);
+    }
+    return candidates;
+  }
+}
+
 /**
  * Ask the AI to suggest 2–3 captions for a post, using the clip's AI summary
  * + location as the main source, plus a set of hashtag suggestions.
- *
  * Returns `{ captions, hashtags }`. The hashtags are suggestions the user picks
  * from — the app never posts them without a tap.
  */

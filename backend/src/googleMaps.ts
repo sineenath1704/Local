@@ -239,10 +239,49 @@ function parseOpeningHours(raw: unknown): OpeningHours | null {
   return { openNow, weekdayText };
 }
 
-/** ค้นชื่อสถานที่ → พิกัด (TextSearch) */
+/**
+ * ย่อชื่อให้เทียบกันได้ — ตัดช่องว่าง/เครื่องหมายทิ้ง
+ * ("บ้าน สวน ริมน้ำ" กับ "บ้านสวนริมน้ำ" ต้องตรงกัน)
+ */
+function foldPlaceName(value: string): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+/**
+ * ชื่อที่ Google คืนมา "ตรงกับ" ชื่อที่เราค้นไหม
+ * -------------------------------------------------------------
+ * เครื่องมือชั้นต่ำ: ชื่อเดียวกัน หรืออันหนึ่งเป็นส่วนหนึ่งของอีกอัน
+ * ใช้กันไม่ให้เอาผลลัพธ์ที่ "ไม่เกี่ยวข้องเลย" มาเป็นพิกัด
+ */
+export function placeNameLooksRight(expected: string, actual: string): boolean {
+  const e = foldPlaceName(expected);
+  const a = foldPlaceName(actual);
+  if (!e || !a) return false;
+  if (e === a) return true;
+  if (e.length >= 4 && a.includes(e)) return true;
+  if (a.length >= 4 && e.includes(a)) return true;
+  return false;
+}
+
+/**
+ * ค้นชื่อสถานที่ → พิกัด (TextSearch)
+ * -------------------------------------------------------------
+ * `expectName` = ชื่อที่เราคาดว่าจะได้ → จะเลือกผลลัพธ์ที่ "ชื่อตรงกัน"
+ * ไม่ใช่แค่เอาอันแรกมา
+ *
+ * ทำไมต้องเช็ค
+ *   เดิมเอา `results[0]` ตรง ๆ → ถ้าชื่อที่ AI อ่านมาผิด (หรือเป็นชื่อที่
+ *   Google ไม่รู้จัก) พิกัดจะไปตกที่ที่อื่นทันที → บล็อก "เดินทาง" และ
+ *   "สถานที่ใกล้เคียง" ในการ์ดจะผิดทั้งคู่
+ *   → ไม่มีผลไหนที่ชื่อตรง → คืน null (ข้ามบล็อกนั้นไปเลย)
+ *   ดีกว่าการแสดงข้อมูลผิด
+ */
 async function textSearch(
   query: string,
-  budget: TimeBudget
+  budget: TimeBudget,
+  expectName?: string | null
 ): Promise<GeoHit | null> {
   const q = query.trim();
   if (!q) return null;
@@ -251,16 +290,26 @@ async function textSearch(
   )}&language=th&region=th&key=${config.places.googleKey}`;
   const data = await fetchJson(url, { method: "GET" }, budget);
   if (!data || String(data.status ?? "") !== "OK") return null;
-  const first = data?.results?.[0];
-  const lat = Number(first?.geometry?.location?.lat);
-  const lon = Number(first?.geometry?.location?.lng);
+
+  const results: any[] = Array.isArray(data?.results) ? data.results : [];
+  if (!results.length) return null;
+
+  // เลือกผลลัพธ์ที่ชื่อตรงกับที่คาดไว้ (ถ้าไม่ได้ระบุชื่อ → เอาอันแรกเหมือนเดิม)
+  const expected = (expectName ?? "").trim();
+  const picked = expected
+    ? results.find((r) => placeNameLooksRight(expected, String(r?.name ?? "")))
+    : results[0];
+  if (!picked) return null;
+
+  const lat = Number(picked?.geometry?.location?.lat);
+  const lon = Number(picked?.geometry?.location?.lng);
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
   return {
     lat,
     lon,
-    label: String(first?.name ?? "").trim() || q,
+    label: String(picked?.name ?? "").trim() || q,
     // เวลาเปิด-ปิดมาพร้อมกับผลการค้นเลย (ไม่ต้องยิงเพิ่ม)
-    openingHours: parseOpeningHours(first?.opening_hours),
+    openingHours: parseOpeningHours(picked?.opening_hours),
   };
 }
 
@@ -275,7 +324,8 @@ export async function searchPlaceCoords(
   if (!name) return null;
   return textSearch(
     [name, district, province].filter(Boolean).join(" "),
-    budget
+    budget,
+    name
   );
 }
 

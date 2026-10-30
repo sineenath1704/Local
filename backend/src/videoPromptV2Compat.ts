@@ -484,11 +484,21 @@ export async function analyzeVideoCompat(
     // ── ข้อมูลแผนที่ (Google Places + Google Routes) — ยิงหลัง AI สำเร็จ ──
     // ใช้งบเวลาร่วมกัน (พิกัด + เส้นทาง + สถานที่ใกล้เคียง) ไม่เกิน 5 วินาที
     const mapBudget = { left: TOTAL_BUDGET_MS };
-    const map = await fetchMapQuietly(validation.data, diag, mapBudget);
+    //
+    // ชื่อที่ใช้ค้นพิกัด = ชื่อที่มีหลักฐานรองรับ (รอบ "หาสถานที่")
+    // ถ้าไม่มี → ใช้ชื่อที่โมเดลสกัดมาเหมือนเดิม
+    // (พิกัดผิด = บล็อก "เดินทาง" และ "สถานที่ใกล้เคียง" ผิดทั้งคู่)
+    const resolution = input.resolvedPlace?.found ? input.resolvedPlace : null;
+    const mapPlace = {
+      placeName: resolution?.placeName ?? validation.data.core.place_name,
+      province: resolution?.admin.province ?? validation.data.core.location.province,
+      district: resolution?.admin.district ?? validation.data.core.location.district,
+    };
+    const map = await fetchMapQuietly(mapPlace, diag, mapBudget);
 
     // ── สถานที่ใกล้เคียง (Google Places) — บล็อก "สถานที่ที่อยู่ใกล้เคียง" ──
     const nearby = await fetchNearbyQuietly(
-      validation.data,
+      mapPlace,
       map,
       diag,
       mapBudget
@@ -523,15 +533,17 @@ export async function analyzeVideoCompat(
  * ยิง Google Maps (Places + Routes) แบบ "ล้มเงียบ"
  * -------------------------------------------------------------
  * ข้อมูลแผนที่เป็นข้อมูลเสริม → ล้มแล้วต้องไม่ทำให้สรุปคลิปล้มตาม
+ *
+ * `place` = ชื่อ/พื้นที่ที่จะใช้ค้นพิกัด (มาจากรอบ "หาสถานที่" ถ้ามี)
  */
 async function fetchMapQuietly(
-  data: V2Extraction,
+  place: { placeName?: string | null; province?: string | null; district?: string | null },
   diag?: DiagLog,
   budget?: TimeBudget
 ): Promise<MapInfo | null> {
-  const placeName = data.core.place_name;
-  const province = data.core.location.province;
-  const district = data.core.location.district;
+  const placeName = place.placeName;
+  const province = place.province;
+  const district = place.district;
 
   // ไม่มีชื่อสถานที่และไม่มีจังหวัด/อำเภอ → ไม่มีอะไรให้ค้น
   if (!placeName && !district && !province) return null;
@@ -582,7 +594,7 @@ async function fetchMapQuietly(
  * ถ้า Google หาพิกัดไม่ได้ → ใช้พิกัดที่หาเจอจากรอบเส้นทางแทน
  */
 async function fetchNearbyQuietly(
-  data: V2Extraction,
+  place: { placeName?: string | null; province?: string | null; district?: string | null },
   map: MapInfo | null,
   diag?: DiagLog,
   budget?: TimeBudget
@@ -590,9 +602,9 @@ async function fetchNearbyQuietly(
   const t0 = Date.now();
   try {
     const items = await fetchNearbyAttractions({
-      placeName: data.core.place_name,
-      province: data.core.location.province,
-      district: data.core.location.district,
+      placeName: place.placeName,
+      province: place.province,
+      district: place.district,
       fallbackLat: map?.lat ?? null,
       fallbackLon: map?.lon ?? null,
       budget,

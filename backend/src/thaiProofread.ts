@@ -445,7 +445,10 @@ export async function proofreadNarration(
 export interface ProofreadCardCorrections {
   place_name?: string | null;
   address?: string | null;
+  tagline?: string | null;
   description?: string | null;
+  /** จุดเด่นที่แอปเรนเดอร์ใต้การ์ด — ต้องมีจำนวนเท่าเดิม */
+  highlights?: string[] | null;
   contact?: {
     phone?: string | null;
     facebook?: string | null;
@@ -467,7 +470,8 @@ export interface ProofreadCardCorrections {
 export async function proofreadCard(
   card: PostCard,
   transcript?: string | null,
-  diag?: DiagLog
+  diag?: DiagLog,
+  highlights?: string[] | null
 ): Promise<ProofreadCardCorrections | null> {
   const t0 = Date.now();
   if (!card || !Array.isArray(card.blocks) || card.blocks.length === 0) {
@@ -481,9 +485,12 @@ export async function proofreadCard(
       ? {
           name: card.place.name ?? null,
           address: card.place.address ?? null,
+          tagline: card.place.tagline ?? null,
           description: card.place.description ?? null,
         }
       : null,
+    // ไฮไลต์ไม่ได้อยู่ในการ์ด แต่แอปเรนเดอร์ใต้การ์ด → ต้องตรวจด้วย
+    highlights: highlights ?? [],
     contact: card.contact
       ? {
           phone: card.contact.phone ?? null,
@@ -614,6 +621,8 @@ export function applyProofreadToCard(
     if (name) p.name = name;
     const address = acceptProse(card.place.address, c.address);
     if (address) p.address = address;
+    const tagline = acceptProse(card.place.tagline, c.tagline);
+    if (tagline) p.tagline = tagline;
     const description = acceptProse(card.place.description, c.description);
     if (description) p.description = description;
     next.place = p;
@@ -648,6 +657,21 @@ export function applyProofreadToCard(
   }
 
   return next;
+}
+
+/**
+ * ไฮไลต์ (จุดเด่นใต้การ์ด) ที่ตรวจแก้แล้ว
+ * -------------------------------------------------------------
+ * ไฮไลต์ไม่ได้อยู่ใน `card` แต่อยู่ที่ `summary.highlights` /
+ * `summary.place.highlights` → คืนค่าใหม่ให้ผู้เรียกเขียนกลับ
+ *
+ * คืน null = ไม่ผ่าน guard (จำนวนรายการไม่เท่าเดิม / ไม่ใช่รายการ) → ใช้ของเดิม
+ */
+export function applyProofreadHighlights(
+  original: string[] | null | undefined,
+  corrected: unknown
+): string[] | null {
+  return acceptList(original ?? undefined, corrected);
 }
 
 // ============================================================
@@ -737,7 +761,9 @@ export function applyProofreadToSummary(
     if (otop) p.otop_products = otop;
 
     next.place = p;
-    next.highlights = p.highlights;
+    // ไฮไลต์ที่แอปเรนเดอร์ใต้การ์ด = ตัวบนสุดก่อน (`summary.highlights`)
+    // ถ้า `place.highlights` ว่าง อย่าทับค่าที่มีอยู่ทั้งชุดทิ้ง
+    next.highlights = p.highlights?.length ? p.highlights : summary.highlights;
     next.tags = p.tags;
   }
 

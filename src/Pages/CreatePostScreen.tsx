@@ -55,9 +55,11 @@ import {
 } from "../services/placesService";
 import {
   matchAgainstRegistered,
-  sortByMatchLevel,
+  sortByAiRank,
+  EVIDENCE_SOURCE_LABEL,
   type MatchLevel,
 } from "../services/placeMatchService";
+import type { PlaceEvidence, PlaceReading, PlaceResolution } from "../services/placeTypes";
 import {
   findCommunitiesByArea,
   registeredPlaceOf,
@@ -119,80 +121,120 @@ function cardAddress(
   community: string | null | undefined,
   location: { subdistrict?: string | null; district?: string | null; province?: string | null }
 ): string | null {
+  const village = (community ?? "").trim();
+  // ชุมชนกับตำบลบางทีเป็นชื่อเดียวกัน → ไม่ต้องพิมพ์ซ้ำ ("สุเทพ สุเทพ เมือง …")
   const area = [location.subdistrict, location.district, location.province]
     .map((v) => (v ?? "").trim())
     .filter(Boolean)
+    .filter((v) => !village || v !== village)
     .join(" ");
-  const village = (community ?? "").trim();
   const out = village ? `${village} ${area}`.trim() : area;
   return out || null;
 }
 
 /**
- * Swap the old place name for the confirmed one inside a text.
- *
- * The new name is hidden behind a placeholder first: it can contain the old
- * one ("ห้วยหอม" inside "บ้านห้วยหอม"), and without the placeholder that
- * would turn into "บ้านบ้านห้วยหอม".
+ * คำนำหน้าที่ชื่อสถานที่ไทยใช้บ่อย — ใช้ตอนไล่หาชื่อเก่าในข้อความ
+ * (หัวการ์ดเขียน "วัดดอยสุเทพ" แต่ในเนื้อความเขียนแค่ "ดอยสุเทพ")
  */
-function swapNameInText(
+const PLACE_NAME_PREFIXES = ["วัด", "ที่", "แหลง"];
+
+/**
+ * ชื่อเก่าที่อาจโผล่ในข้อความ — ครบทุกรูปแบบ (มี/ไม่มีคำนำหน้า)
+ * เรียงยาวสุดก่อน เพื่อไม่ให้รูปสั้นกลืนรูปยาว
+ */
+function nameVariants(name: string): string[] {
+  const base = (name ?? "").trim();
+  if (!base) return [];
+  const out = new Set<string>([base]);
+  for (const p of PLACE_NAME_PREFIXES) {
+    if (!base.startsWith(p) || base.length <= p.length + 1) continue;
+    const core = base.slice(p.length).trim();
+    if (!core) continue;
+    out.add(core); // "วัดดอยสุเทพ" → "ดอยสุเทพ"
+    for (const q of PLACE_NAME_PREFIXES) out.add(`${q}${core}`);
+  }
+  return [...out].sort((a, b) => b.length - a.length);
+}
+
+/**
+ * แทนที่ชื่อเก่าด้วยชื่อที่ยืนยัน ในข้อความใด ๆ
+ * -------------------------------------------------------------
+ * ทำไมต้องมีฟังก์ชันนี้ (ไม่ใช่แค่ split/join ธรรมดา)
+ *   · ชื่อในหัวการ์ดกับชื่อในเนื้อความมักไม่เหมือนกัน
+ *     ("วัดดอยสุเทพ" กับ "ดอยสุเทพ") → ถ้าแทนที่แบบตรงตัว ชื่อเก่าจะยังโผล่
+ *     แล้วผู้ใช้เห็นชื่อที่ผิดกับชื่อที่ถูก ติดกันบนการ์ด (ต้อง "หายไป")
+ *   · ชื่อใหม่อาจมีชื่อเก่าอยู่ข้างใน ("ห้วยหอม" ใน "บ้านห้วยหอม")
+ *     → ต้องกันไม่ให้กลายเป็น "บ้านบ้านห้วยหอม"
+ *
+ * แนวทาง: กลุ่มชื่อเก่าทุกรูปแบบ → แทนที่ด้วย regex ครั้งเดียว
+ * (ข้อความที่แทนที่จะไม่ถูกสแกนซ้ำ → ไม่เกิดชื่อซ้ำ)
+ */
+function scrubOldName(
   text: string | null | undefined,
   oldName: string | null | undefined,
   newName: string
 ): string | null | undefined {
   const from = (oldName ?? "").trim();
-  const to = newName.trim();
-  if (typeof text !== "string" || !from || !to || from === to) return text;
-  if (!text.includes(from)) return text;
+  const to = (newName ?? "").trim();
+  if (typeof text !== "string" || !text || !from || !to) return text;
+  if (from === to) return text;
+
+  const variants = nameVariants(from).filter((v) => v && v !== to);
+  if (!variants.length) return text;
+
+  // กันชื่อใหม่ที่มีอยู่แล้วในข้อความ (ไม่ให้ถูกไปแตะตอนแทนที่)
   const SENTINEL = "\u0000";
-  return text
-    .split(to)
-    .join(SENTINEL)
-    .split(from)
-    .join(to)
-    .split(SENTINEL)
-    .join(to);
+  let out = text.split(to).join(SENTINEL);
+
+  const pattern = variants
+    .map((v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|");
+  try {
+    out = out.replace(new RegExp(pattern, "g"), to);
+  } catch {
+    return text;
+  }
+  return out.split(SENTINEL).join(to);
 }
 
 /**
- * Put the confirmed name through the WHOLE card.
- *
- * · the card header = the confirmed name
- * · the address = the confirmed community + area
- * · the old name the AI wrote inside the prose → the confirmed name
- *   (the name can be wrong in the headline AND in the sentences below it)
+ * ทำให้การ์ด "เป็น" สถานที่ที่ผู้ใช้ยืนยัน
+ * -------------------------------------------------------------
+ * · หัวการ์ด = ชื่อที่ยืนยัน (เปลี่ยนตัวตน ไม่ใช่ไปแก้สตริง)
+ * · ที่อยู่ = ชุมชน + พื้นที่ที่ยืนยัน
+ * · ชื่อเก่าที่ AI เขียนไว้ทั่วการ์ด → ถูกแทนที่ด้วยชื่อที่ยืนยัน
+ *   (ชื่อเก่าต้อง "หายไป" ไม่ใช่ค้างอยู่ข้าง ๆ ชื่อที่ถูก)
  */
-function applyConfirmedNameToCard(
+function applyConfirmedPlaceToCard(
   card: NonNullable<AiSummaryResult["card"]>,
   oldName: string | null | undefined,
   newName: string,
   community: string | null,
   location: { subdistrict?: string | null; district?: string | null; province?: string | null }
 ): NonNullable<AiSummaryResult["card"]> {
-  const from = oldName;
   const to = newName.trim();
-  const swap = (text: string | null | undefined) => swapNameInText(text, from, to);
+  const swap = (text: string | null | undefined) => scrubOldName(text, oldName, to) ?? null;
   return {
     ...card,
     place: {
       ...(card.place ?? {}),
       name: to,
       address: cardAddress(community, location) ?? card.place?.address ?? null,
-      tagline: swap(card.place?.tagline) ?? null,
-      description: swap(card.place?.description) ?? null,
+      tagline: swap(card.place?.tagline),
+      description: swap(card.place?.description),
     },
-    activity: swap(card.activity) ?? null,
+    activity: swap(card.activity),
     blocks:
       card.blocks?.map((b) => ({
         ...b,
-        title: swap(b.title) ?? null,
+        title: swap(b.title),
         lines: b.lines.map((l) => ({ ...l, text: swap(l.text) ?? "" })),
       })) ?? null,
     sections:
       card.sections?.map((sec) => ({
         ...sec,
         title: swap(sec.title) ?? sec.title,
-        highlight: swap(sec.highlight) ?? null,
+        highlight: swap(sec.highlight),
         lines: sec.lines.map((l) => ({ ...l, text: swap(l.text) ?? "" })),
       })) ?? null,
   };
@@ -231,7 +273,12 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
   const [localPlaceCandidates, setLocalPlaceCandidates] = useState<LocalPlace[]>([]);
   const [locationConfirmed, setLocationConfirmed] = useState(false);
   const [googleCandidates, setGoogleCandidates] = useState<PlaceCandidate[]>([]);
+  // ตัวที่ผู้ใช้เลือกไว้ในรายการ — ยังไม่ใช่ "ยืนยัน" จนกว่าจะกดปุ่มยืนยัน
+  const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
   const [googleLoading, setGoogleLoading] = useState(false);
+  // ผลของรอบ AI ที่หน้าที่เดียวคือ "หาสถานที่" — มาพร้อมหลักฐานในคลิป
+  // (มาจาก backend ที่ root ของ summary → เก็บแยกเพื่อโชว์ในการ์ด)
+  const [placeResolution, setPlaceResolution] = useState<PlaceResolution | null>(null);
   // The Google place the host confirmed — its id is the place's identity in
   // `community_places`, the table the AI chat reads.
   const [confirmedPlace, setConfirmedPlace] = useState<PlaceCandidate | null>(null);
@@ -351,8 +398,13 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
    * ผูกสถานที่ที่ยืนยันแล้วเข้ากับชุมชน (D4) + บอกระดับที่จับคู่ได้ (D28)
    *
    * หาจากบริเวณของสถานที่ · ไม่เจอ = ไม่บันทึก (D11)
+   *
+   * คืนชุมชนที่ผูกได้จริง (ไม่ใช่แค่ id) เพราะชื่อชุมชนที่ผูกได้ต้องไป
+   * **ทับ** ชื่อชุมชนที่รอบสรุปตั้งเอง — ไม่งั้นสรุปจะเก็บชื่อที่ AI เดาไว้
    */
-  const resolveCommunityFor = async (place: PlaceCandidate): Promise<string | null> => {
+  const resolveCommunityFor = async (
+    place: PlaceCandidate
+  ): Promise<{ id: string | null; name: string | null }> => {
     const list = await findCommunitiesByArea({
       subdistrict: place.subdistrict ?? subdistrict.trim(),
       district: place.district ?? district.trim(),
@@ -361,17 +413,18 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     if (list.length === 1) {
       setConfirmedCommunityId(list[0].id);
       setCommunityChoices([]);
-      return list[0].id;
+      setCommunity(list[0].name);
+      return { id: list[0].id, name: list[0].name };
     }
     if (list.length > 1) {
       // มากกว่าหนึ่ง → ให้ผู้ใช้เลือกในการ์ดยืนยัน
       setCommunityChoices(list);
       setConfirmedCommunityId(null);
-      return null;
+      return { id: null, name: null };
     }
     setConfirmedCommunityId(null);
     setCommunityChoices([]);
-    return null;
+    return { id: null, name: null };
   };
 
   /** ระดับที่จับคู่ชุมชนได้ของสถานที่ที่เพิ่งยืนยัน */
@@ -384,48 +437,90 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     return c.matchLevel ?? null;
   };
 
-  /** เขียนชุมชน/ชื่อที่ยืนยันแล้วกลับลง summary (PLAN §6.9) */
+  /**
+   * เขียนชุมชน/ชื่อที่ยืนยันแล้วกลับลง summary (PLAN §6.9)
+   * -------------------------------------------------------------
+   * การ์ดต้อง "เปลี่ยนตัวตน" เป็นสถานที่ที่ผู้ใช้ยืนยัน ไม่ใช่แค่เอาชื่อใหม่
+   * ไป "ต่อท้าย" ชื่อเก่า — ชื่อเก่าที่ AI เขียนไว้ต้องหายไปจากทุกจุด
+   * (หัวการ์ด · คำบรรยาย · บรรทัดในบล็อก · ไฮไลต์ใต้การ์ด · ข้อความรวม)
+   */
   const writeConfirmedPlaceToSummary = (place: PlaceCandidate, communityName?: string | null) => {
     setSummary((prev) => {
       if (!prev) return prev;
       const p = prev.place;
-      if (!p) return prev;
-      const community = communityName ?? p.community ?? null;
+      const community = communityName ?? p?.community ?? null;
       const location = {
-        ...p.location,
-        province: place.province ?? p.location.province ?? null,
-        district: place.district ?? p.location.district ?? null,
-        subdistrict: place.subdistrict ?? p.location.subdistrict ?? null,
+        ...(p?.location ?? { province: null, district: null }),
+        province: place.province ?? p?.location?.province ?? null,
+        district: place.district ?? p?.location?.district ?? null,
+        subdistrict: place.subdistrict ?? p?.location?.subdistrict ?? null,
+        // พิกัดของที่ผู้ใช้ยืนยัน ต้องทับพิกัดที่ AI เดาไว้
+        gps:
+          place.latitude != null && place.longitude != null
+            ? `${place.latitude},${place.longitude}`
+            : p?.location?.gps ?? null,
       };
-      // The name the user confirmed on Google is the final word. The AI
-      // misreads names (a blurry sign, or a guess from a generic shot), and
-      // it used to win because its value was never replaced.
+      // ชื่อเดิมที่ AI อ่านมา — คือตัวที่ต้องถูก "ลบ" ออกจากทั้งการ์ด
+      const oldName = prev.card?.place?.name ?? p?.place_name ?? null;
+      const newName = place.name;
+      // The name the user confirmed is the final word. The AI misreads names
+      // (a blurry sign, or a guess from a generic shot), and it used to win
+      // because its value was never replaced.
       const base: SummaryPlace = {
-        ...p,
-        place_name: place.name,
+        ...(p ?? {
+          location,
+          category: [],
+          activities: [],
+          otop_products: [],
+          highlights: [],
+          tags: [],
+          price_info: { weekday: null, weekend: null },
+          contact: {},
+        }),
+        place_name: newName,
         community,
         location,
+        // คำบรรยายของสถานที่ (ไม่ขึ้นจอการ์ด แต่ถูกบันทึกลง community_places)
+        // → ชื่อเก่าต้องไม่ตามไปด้วย ไม่งั้นข้อมูลที่บันทึกจะขัดกับชื่อที่ยืนยัน
+        atmosphere: scrubOldName(p?.atmosphere, oldName, newName) ?? p?.atmosphere ?? null,
       };
       // The card is what the user actually sees — its header, its address
       // and the name inside its text must agree with the confirmed place.
       const card = prev.card
-        ? applyConfirmedNameToCard(
-            prev.card,
-            prev.card.place?.name ?? p.place_name,
-            place.name,
-            community,
-            location
-          )
+        ? applyConfirmedPlaceToCard(prev.card, oldName, newName, community, location)
         : prev.card;
+      // ไฮไลต์ใต้การ์ดก็ขึ้นจอด้วย → ชื่อเก่าต้องหายไปจากที่นั้นด้วย
+      const highlights = (prev.highlights ?? p?.highlights ?? []).map((h) =>
+        scrubOldName(h, oldName, newName) ?? h
+      );
+      base.highlights = highlights;
       // The summary text is rendered FROM the card, so it carries the same
       // name — it goes to the AI chat as the clip's context, and a wrong
       // name there makes the chat answer about the wrong place.
-      const text = swapNameInText(
-        prev.text,
-        prev.card?.place?.name ?? p.place_name,
-        place.name
-      );
-      return { ...prev, place: base, card, text: text ?? prev.text };
+      const text = scrubOldName(prev.text, oldName, newName) ?? prev.text;
+      return { ...prev, place: base, card, text, highlights };
+    });
+  };
+
+  /**
+   * เขียนชุมชนที่ผู้ใช้เลือกเองกลับลง summary
+   * -------------------------------------------------------------
+   * ชุมชนคือ "หมู่บ้าน" ที่สถานที่อยู่จริง — รอบสรุปมักเดาจากชื่อที่ได้ยิน
+   * ผู้ใช้ที่เลือกเองคือคำตอบที่ถูก → ต้องทับค่าของ AI
+   */
+  const writeCommunityToSummary = (communityName: string) => {
+    setSummary((prev) => {
+      if (!prev) return prev;
+      const p = prev.place;
+      const location = { ...(p?.location ?? { province: null, district: null }) };
+      // ชื่อไม่เปลี่ยน → แต่ที่อยู่ในการ์ดต้องตรงกับชุมชนที่ผู้ใช้เลือก
+      const cardName = prev.card?.place?.name ?? p?.place_name ?? null;
+      const card =
+        prev.card && cardName
+          ? applyConfirmedPlaceToCard(prev.card, cardName, cardName, communityName, location)
+          : prev.card;
+      if (!p) return { ...prev, card };
+      return { ...prev, place: { ...p, community: communityName }, card };
     });
   };
 
@@ -598,6 +693,8 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setSummary(result);
     setSummaryDraft(result?.text ?? "");
     setSummaryDiag(result?._diag ?? null);
+    // ผลของรอบ "หาสถานที่" — มาที่ root ของ summary ไม่ใช่ใน `place`
+    setPlaceResolution(result?.placeResolution ?? null);
     setAccuracy(0);
     // The place's details are the place's, not the summary's — put them back
     // after a regeneration, so a fresh summary never drops them.
@@ -606,7 +703,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     if (result?.place) {
       // นักท่องเที่ยว + ชุมชน → ขั้นตอนเดียวกัน
       setLocationSource("ai");
-      await runLocationVerify(result.place, generation);
+      await runLocationVerify(result.place, generation, result.placeResolution ?? null);
     } else {
       // The call SUCCEEDED and AI genuinely found no place → clear location.
       // (Only reachable now that transport errors return early above.)
@@ -620,6 +717,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
       setCoords(null);
       setLocationConfirmed(false);
       setVerify(null);
+      setPlaceResolution(null);
       setLocationSource("manual");
     }
   };
@@ -645,7 +743,11 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     } | null;
     google_candidates?: PlaceCandidate[];
   };
-  const runLocationVerify = async (place: PlaceToVerify, generation = videoGeneration.current) => {
+  const runLocationVerify = async (
+    place: PlaceToVerify,
+    generation = videoGeneration.current,
+    resolution?: PlaceResolution | null
+  ) => {
     if (generation !== videoGeneration.current) return;
     const aiPlaceName = place.place_name ?? null;
     const aiCommunity = place.community ?? null;
@@ -656,7 +758,8 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
 
     console.log("[verify] aiPlaceName =", aiPlaceName, "community =", aiCommunity,
       "province =", loc.province, "district =", loc.district,
-      "backendCandidates =", backendCandidates.length, "aiGps =", aiGps);
+      "backendCandidates =", backendCandidates.length, "aiGps =", aiGps,
+      "resolution =", resolution?.found ? resolution.placeName : "-");
 
     const res = verifyLocationOffline({
       placeName: aiPlaceName,
@@ -669,6 +772,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setLocationConfirmed(false);
 
     setGoogleCandidates([]);
+    setSelectedCandidateId(null);
     setCoords(null);
     setPendingConfirm(null);
     setRegisteredMatch(null);
@@ -698,7 +802,8 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     if (backendCandidates.length > 0) {
       console.log("[verify] using", backendCandidates.length, "backend Google candidates");
       setLocalPlaceCandidates([]);
-      showCandidates(sortByMatchLevel(backendCandidates), registry);
+      // อันดับที่ AI ให้มาก่อน — ลำดับเดิม (ระดับอำเภอ/ตำบล) เป็นตัวแก้เมื่อ aiRank เท่ากัน
+      showCandidates(sortByAiRank(backendCandidates), registry);
       return;
     }
 
@@ -726,6 +831,9 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
    *
    * `registry` = ที่ลงทะเบียนที่เพิ่ง resolve มา (ส่งเข้ามาเลย ไม่ต้องรอ state)
    * ไม่ส่ง → ใช้ค่าใน state ตามเดิม
+   *
+   * ติ๊กล่วงหน้า: อันดับ 1 ของ AI เท่านั้น (ผลค้นจากแอปเองไม่มี `aiRank`
+   * → ไม่ติ๊กให้ ผู้ใช้ต้องเลือกเอง)
    */
   const showCandidates = (
     list: PlaceCandidate[],
@@ -739,6 +847,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
       : matchAgainstRegistered(list, reg?.placeId ?? null);
     setRegisteredMatch(hit.candidate);
     setPendingConfirm(null);
+    setSelectedCandidateId(list.find((c) => c.aiRank === 1)?.placeId ?? null);
     if (hit.candidate) {
       setPendingName(hit.candidate.name);
       setPendingAddress(hit.candidate.address);
@@ -771,6 +880,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setPendingConfirm(null);
     setRegisteredMatch(null);
     setGoogleCandidates([]);
+    setSelectedCandidateId(null);
     const r = await verifyPlaceOnGoogle({
       placeName: name,
       community: scope.community || undefined,
@@ -785,9 +895,10 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setGoogleLoading(false);
     if (r.candidates.length === 0) {
       setGoogleCandidates([]);
+      setSelectedCandidateId(null);
       return;
     }
-    showCandidates(sortByMatchLevel(r.candidates));
+    showCandidates(sortByAiRank(r.candidates));
   };
 
   const lookupOnGoogle = async (
@@ -811,6 +922,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setPendingConfirm(null);
     setRegisteredMatch(null);
     setGoogleCandidates([]);
+    setSelectedCandidateId(null);
     setLocalPlaceCandidates([]);
     // ขอบเขตการค้นหา = ค่าในฟอร์ม (เหมือนนักท่องเที่ยวทุกประการ)
     const pick = (v: string | null | undefined) => (v ?? "").trim() || undefined;
@@ -826,9 +938,10 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setGoogleLoading(false);
     if (r.candidates.length === 0) {
       setGoogleCandidates([]);
+      setSelectedCandidateId(null);
       return;
     }
-    showCandidates(sortByMatchLevel(r.candidates), registry);
+    showCandidates(sortByAiRank(r.candidates), registry);
   };
 
   /**
@@ -881,17 +994,19 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
       // ผูกกับชุมชน (D4) + ระดับที่จับคู่ได้ (D28)
       // หาจากบริเวณของสถานที่
       // (ถ้าหลายชุมชน → resolveCommunityFor จะเปิดการ์ดให้ผู้ใช้เลือก)
-      await resolveCommunityFor(confirmed);
+      const resolved = await resolveCommunityFor(confirmed);
       const level = matchLevelOf(confirmed);
       setCommunityMatchLevel(level);
 
       // เขียนชุมชน/ชื่อที่ยืนยันแล้วกลับลง summary (PLAN §6.9)
-      writeConfirmedPlaceToSummary(confirmed, community.trim() || null);
+      // ชุมชนที่ผูกได้จริงทับชื่อที่รอบสรุปตั้งเอง
+      const confirmedCommunity = resolved.name ?? (community.trim() || null);
+      writeConfirmedPlaceToSummary(confirmed, confirmedCommunity);
 
       // Save to Supabase places store immediately so it appears on the map.
       void saveVerifiedPlace({
         name: confirmed.name,
-        community: community.trim() || null,
+        community: confirmedCommunity,
         subdistrict: (confirmed.subdistrict ?? subdistrict.trim()) || null,
         district: (confirmed.district ?? district.trim()) || null,
         province: (confirmed.province ?? province.trim()) || null,
@@ -937,6 +1052,21 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setLocationConfirmed(true);
     setLocationSource("ai");
     setVerify(null);
+    // ผู้ใช้เลือกสถานที่นี้เอง = คำตอบที่ถูก → การ์ดต้องกลายเป็นสถานที่นี้
+    writeConfirmedPlaceToSummary(
+      {
+        name: p.name,
+        address: "",
+        placeId: p.googlePlaceId ?? "",
+        latitude: p.latitude,
+        longitude: p.longitude,
+        province: p.province,
+        district: p.district,
+        subdistrict: p.subdistrict,
+        types: [],
+      },
+      p.community ?? p.name
+    );
   };
 
   const selectPlace = (p: PlaceItem) => {
@@ -950,6 +1080,8 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setLocationConfirmed(true);
     setLocationSource("manual");
     setVerify(null);
+    // ชุมชนที่ผู้ใช้เลือกต้องไปอยู่ในการ์ดด้วย (ที่อยู่บนหัวการ์ด)
+    writeCommunityToSummary(p.name);
   };
   const clearLocation = () => {
     setLocationName("");
@@ -965,7 +1097,9 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setLocalPlaceCandidates([]);
     setLocationConfirmed(false);
     setGoogleCandidates([]);
+    setSelectedCandidateId(null);
     setPendingConfirm(null);
+    setPlaceResolution(null);
     setLocationSource("manual");
     setConfirmedPlace(null);
     setPlaceDetails({ priceLevel: null, website: null, phone: null, openingHours: null });
@@ -1272,6 +1406,27 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
 
   const canPost = !!videoUri && !uploading;
 
+  /**
+   * หลักฐานที่ backend ส่งมา — กัน payload เก่า/ไม่ครบไว้ก่อนเอาไปวน
+   * การ์ดหลักฐานโชว์เฉพาะเมื่อ **มีหลักฐานจริง** — การ์ดที่บอกว่า
+   * "AI อ่านได้ชื่อนี้" แต่ไม่มีประโยคอ้างอิง คือคำโกหกที่ฟีเจอร์นี้
+   * ตั้งใจจะลบออก
+   */
+  const resolutionEvidence: PlaceEvidence[] = Array.isArray(placeResolution?.evidence)
+    ? placeResolution.evidence
+    : [];
+
+  /**
+   * ชื่อที่อ่านได้จากแต่ละแหล่ง (เสียงพูด / ตัวหนังสือบนจอ)
+   * -------------------------------------------------------------
+   * ถ้าสองทางได้คนละชื่อ → ระบบค้นทั้งสองชื่อ และผู้ใช้ต้องเลือกเอง
+   * การ์ดนี้จึงต้องบอกตรง ๆ ว่าไม่ตรงกัน ไม่ใช่โชว์ชื่อเดียวแล้วเงียบ ๆ
+   */
+  const resolutionReadings: PlaceReading[] = Array.isArray(placeResolution?.readings)
+    ? placeResolution.readings
+    : [];
+  const readingsDisagree = resolutionReadings.length > 1;
+
   return (
     <View className="flex-1 bg-white">
       <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
@@ -1558,6 +1713,85 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
               </Text>
             </View>
 
+            {/* ── หลักฐานที่ AI ใช้หาชื่อสถานที่ ──
+                รอบ AI ที่หน้าที่เดียวคือ "หาสถานที่" — ทุกชื่อที่มันให้
+                ต้องมีประโยคในคลิปมาหลักฐาน ผู้ใช้ต้องเห็นที่มาของชื่อ
+                ก่อนตัดสินใจติ๊ก */}
+            {placeResolution?.found && resolutionEvidence.length > 0 && (
+              <View className="bg-violet-50 border border-violet-200 rounded-xl p-3 mb-2">
+                <Text className="text-violet-800 text-[11px] font-bold mb-1">
+                  🤖 AI อ่านชื่อนี้จากคลิป
+                </Text>
+                {placeResolution.placeName ? (
+                  <Text className="text-gray-900 font-bold text-[13px] mb-1">
+                    {placeResolution.placeName}
+                  </Text>
+                ) : null}
+                {/* ── ชื่อที่อ่านได้จากแต่ละแหล่ง ──
+                    เสียงพูดกับตัวหนังสือบนจออาจไม่ตรงกัน → ค้นทั้งสองชื่อ
+                    แล้วให้ผู้ใช้เลือก ต้องบอกตรง ๆ ว่าไม่ตรงกัน */}
+                {resolutionReadings.length > 0 && (
+                  <View className="bg-white rounded-lg px-2.5 py-2 mb-1">
+                    {readingsDisagree && (
+                      <Text className="text-amber-700 text-[11px] font-bold mb-1 leading-4">
+                        ⚠️ ชื่อที่อ่านได้จากคลิปไม่ตรงกัน — เลือกอันที่ถูกจากรายการด้านล่าง
+                      </Text>
+                    )}
+                    {resolutionReadings.map((r, i) => (
+                      <View key={i} className={i > 0 ? "mt-1.5" : ""}>
+                        <Text className="text-[9px] text-violet-500 font-bold mb-0.5">
+                          {EVIDENCE_SOURCE_LABEL[r.source] ?? "จากในคลิป"}
+                        </Text>
+                        <Text className="text-gray-900 font-bold text-[12.5px]">
+                          {r.placeName}
+                        </Text>
+                        {r.quote ? (
+                          <Text className="text-gray-700 text-[11px] leading-4 mt-0.5">
+                            “{r.quote}”
+                          </Text>
+                        ) : null}
+                      </View>
+                    ))}
+                  </View>
+                )}
+                {resolutionEvidence.map((ev, i) => (
+                  <View key={i} className="bg-white rounded-lg px-2.5 py-2 mb-1">
+                    <Text className="text-[9px] text-violet-500 font-bold mb-0.5">
+                      {EVIDENCE_SOURCE_LABEL[ev.source] ?? "จากในคลิป"}
+                    </Text>
+                    <Text className="text-gray-700 text-[12px] leading-5">“{ev.quote}”</Text>
+                  </View>
+                ))}
+                {placeResolution.reason ? (
+                  <Text className="text-gray-500 text-[11px] mt-1">{placeResolution.reason}</Text>
+                ) : null}
+                {typeof placeResolution.confidence === "number" ? (
+                  <Text className="text-gray-400 text-[10px] mt-1">
+                    ความมั่นใจ {Math.round(placeResolution.confidence * 100)}%
+                  </Text>
+                ) : null}
+              </View>
+            )}
+
+            {/* ── AI อ่านได้ชื่อ แต่ Google ไม่มีที่นี้ ──
+                บอกตรง ๆ แทนที่จะปล่อยให้ผู้ใช้เดาว่าทำไมถึงไม่มีให้เลือก */}
+            {placeResolution?.found &&
+              !googleLoading &&
+              googleCandidates.length === 0 &&
+              !pendingConfirm &&
+              !registeredMatch &&
+              !communitySearch && (
+              <View className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-2">
+                <Text className="text-amber-900 text-[12px] font-bold mb-1">
+                  🤖 AI อ่านได้ชื่อ “{placeResolution.placeName ?? "ในคลิป"}” แต่ Google Maps ยังไม่มีที่นี้
+                </Text>
+                <Text className="text-amber-800 text-[11px] leading-5">
+                  ชื่อนี้ถูกใส่ไว้ในช่องสถานที่แล้ว — กด “ค้นชื่อนี้ใน Google Maps เอง” ด้านล่าง
+                  หรือแก้ชื่อเองได้
+                </Text>
+              </View>
+            )}
+
             {/* Warnings */}
             {verify.warnings.map((w, i) => (
               <Text key={i} className="text-amber-700 text-[11px] mb-1">⚠️ {w}</Text>
@@ -1594,6 +1828,19 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
                     registeredMatch.province && `จ.${registeredMatch.province}`]
                     .filter(Boolean).join(" • ")}
                 </Text>
+
+                {registeredMatch.aiRank === 1 ? (
+                  <View className="bg-emerald-100 rounded-lg px-2 py-1.5 mt-1.5">
+                    <Text className="text-emerald-700 text-[10px] font-bold">
+                      ✓ ตรงกับคลิปที่สุด
+                    </Text>
+                    {registeredMatch.aiReason ? (
+                      <Text className="text-gray-600 text-[11px] leading-4 mt-0.5">
+                        {registeredMatch.aiReason}
+                      </Text>
+                    ) : null}
+                  </View>
+                ) : null}
 
                 <View className="flex-row mt-2.5">
                   <TouchableOpacity
@@ -1640,6 +1887,25 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
                     .filter(Boolean).join(" • ")}
                 </Text>
 
+                {/* เหตุผลที่ AI ให้ — ผู้ใช้เห็นก่อนกดยืนยัน */}
+                {pendingConfirm.aiRank === 1 ? (
+                  <View className="bg-blue-100 rounded-lg px-2 py-1.5 mt-1.5">
+                    <Text className="text-blue-700 text-[10px] font-bold">
+                      ✓ ตรงกับคลิปที่สุด
+                    </Text>
+                    {pendingConfirm.aiReason ? (
+                      <Text className="text-gray-600 text-[11px] leading-4 mt-0.5">
+                        {pendingConfirm.aiReason}
+                      </Text>
+                    ) : null}
+                    {pendingConfirm.evidenceMatch ? (
+                      <Text className="text-gray-500 text-[11px] leading-4 mt-0.5">
+                        “{pendingConfirm.evidenceMatch}”
+                      </Text>
+                    ) : null}
+                  </View>
+                ) : null}
+
                 <View className="flex-row mt-2.5">
                   <TouchableOpacity
                     onPress={confirmPending}
@@ -1665,27 +1931,84 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
               </View>
             )}
 
-            {/* Multiple Google results → list to choose from */}
+            {/* Multiple Google results → list to choose from
+                ผู้ใช้เลือกก่อน แล้วค่อยกดยืนยัน — เหมือนการ์ดจุดเดียว
+                อันดับ 1 ของ AI ถูกติ๊กไว้ให้แล้ว (ผู้ใช้ยังต้องกดยืนยันเอง) */}
             {googleCandidates.length > 1 && !googleLoading && (
               <>
                 <Text className="text-gray-500 text-[11px] font-bold mt-1 mb-1">
                   พบหลายที่บน Google Maps — เลือกที่ถูกต้อง:
                 </Text>
-                {googleCandidates.map((c) => (
-                  <TouchableOpacity
-                    key={c.placeId}
-                    onPress={() => void confirmGooglePlace(c)}
-                    disabled={confirmingPlace}
-                    activeOpacity={0.8}
-                    className="bg-white border border-blue-200 rounded-xl px-3 py-2 mb-1.5"
-                  >
-                    <Text className="text-gray-900 text-[13px] font-semibold">{c.name}</Text>
-                    <Text className="text-gray-400 text-[11px]" numberOfLines={1}>{c.address}</Text>
-                    <Text className="text-blue-600 text-[10px] mt-0.5">
-                      {confirmingPlace ? "กำลังดึงข้อมูล..." : "แตะเพื่อยืนยันสถานที่นี้"}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
+                {googleCandidates.map((c) => {
+                  const isTop = c.aiRank === 1;
+                  const isSelected = selectedCandidateId === c.placeId;
+                  return (
+                    <TouchableOpacity
+                      key={c.placeId}
+                      onPress={() => setSelectedCandidateId(c.placeId)}
+                      disabled={confirmingPlace}
+                      activeOpacity={0.8}
+                      className={`bg-white rounded-xl px-3 py-2 mb-1.5 ${
+                        isSelected
+                          ? "border-2 border-blue-400 bg-blue-50/40"
+                          : "border border-blue-200"
+                      }`}
+                    >
+                      <View className="flex-row items-start">
+                        {/* วงกลมเลือก — ติ๊กไว้ให้ตัวที่ AI มั่นใจที่สุด */}
+                        <View
+                          className={`w-4 h-4 rounded-full border-2 mt-0.5 mr-2 ${
+                            isSelected ? "bg-blue-500 border-blue-500" : "border-gray-300"
+                          }`}
+                        />
+                        <View className="flex-1">
+                          <Text className="text-gray-900 text-[13px] font-semibold">{c.name}</Text>
+                          <Text className="text-gray-400 text-[11px]" numberOfLines={1}>{c.address}</Text>
+
+                          {isTop ? (
+                            <View className="mt-1">
+                              <Text className="text-blue-600 text-[10px] font-bold">
+                                ✓ ตรงกับคลิปที่สุด
+                              </Text>
+                              {c.aiReason ? (
+                                <Text className="text-gray-500 text-[11px] leading-4 mt-0.5">
+                                  {c.aiReason}
+                                </Text>
+                              ) : null}
+                              {c.evidenceMatch ? (
+                                <Text className="text-gray-400 text-[11px] leading-4 mt-0.5">
+                                  “{c.evidenceMatch}”
+                                </Text>
+                              ) : null}
+                            </View>
+                          ) : null}
+                        </View>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })}
+
+                <TouchableOpacity
+                  onPress={() => {
+                    const picked = googleCandidates.find((c) => c.placeId === selectedCandidateId);
+                    if (picked) void confirmGooglePlace(picked);
+                  }}
+                  disabled={confirmingPlace || !selectedCandidateId}
+                  activeOpacity={0.85}
+                  className={`rounded-xl py-2.5 items-center mt-1 mb-1 ${
+                    confirmingPlace || !selectedCandidateId
+                      ? "bg-[#2D6A4F]/40"
+                      : "bg-[#2D6A4F]"
+                  }`}
+                >
+                  <Text className="text-white font-bold text-[12px]">
+                    {confirmingPlace
+                      ? "กำลังดึงข้อมูล..."
+                      : selectedCandidateId
+                        ? "✓ ยืนยันสถานที่ที่เลือก"
+                        : "แตะสถานที่ที่ต้องการก่อน"}
+                  </Text>
+                </TouchableOpacity>
               </>
             )}
 
@@ -1751,7 +2074,11 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
                 className="flex-row items-center justify-center bg-blue-100 rounded-xl py-2.5 mb-1 mt-1"
               >
                 <MapPinIcon size={15} color="#2563EB" />
-                <Text className="text-blue-700 font-bold text-[12px] ml-1.5">ค้นหาที่ตั้งใน Google Maps</Text>
+                <Text className="text-blue-700 font-bold text-[12px] ml-1.5">
+                  {placeResolution?.found
+                    ? "ค้นชื่อนี้ใน Google Maps เอง"
+                    : "ค้นหาที่ตั้งใน Google Maps"}
+                </Text>
               </TouchableOpacity>
             )}
 
@@ -1851,6 +2178,9 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
                 onPress={() => {
                   setConfirmedCommunityId(c.id);
                   setCommunityChoices([]);
+                  // ชุมชนที่ผู้ใช้เลือกเอง ต้องทับชุมชนที่รอบสรุปตั้งเอง
+                  setCommunity(c.name);
+                  writeCommunityToSummary(c.name);
                 }}
                 activeOpacity={0.8}
                 className="bg-white border border-amber-200 rounded-xl px-3 py-2 mb-1.5"

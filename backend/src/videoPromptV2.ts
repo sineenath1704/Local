@@ -1132,8 +1132,9 @@ export function buildPostCard(
 
     // "ภายในห้องพัก" = 3 หมวด (รอบที่ 8 — ผู้ใช้เลือก "กลาง + แยกหมวด")
     //   ที่นอน: … / ของในห้อง: … / บริการ: …
-    // หนึ่งหมวด = หนึ่งบรรทัด (ข้างในหมวดคั่นด้วย " · ") อ่านเร็วและรู้ทันทีว่า
-    // อะไรคือของในห้อง อะไรคือบริการที่เจ้าของให้
+    // แต่ละชิ้นขึ้นบรรทัดของตัวเอง (นำหน้า "· ") ไม่ยัดรวมเป็นบรรทัดเดียว
+    // → รายละเอียดของชิ้น (วัสดุ/จำนวน/สี/ตำแหน่ง) ไม่ถูกบีบจนอ่านไม่ออก
+    //   และยังแยกออกชัดว่าอันไหนของในห้อง อันไหนบริการที่เจ้าของให้
     const roomLines: string[] = [];
 
     const bedding = describeBedding(data.stay.bedding ?? "");
@@ -1174,46 +1175,50 @@ export function buildPostCard(
     }
 
     if (things.length > 0) {
-      roomLines.push(`ของในห้อง: ${things.join(" · ")}`);
+      roomLines.push("ของในห้อง:");
+      for (const t of things) roomLines.push(`· ${t}`);
       roomItems.push(...things);
     }
     if (services.length > 0) {
-      roomLines.push(`บริการ: ${services.join(" · ")}`);
+      roomLines.push("บริการ:");
+      for (const s of services) roomLines.push(`· ${s}`);
       roomItems.push(...services);
     }
     if (roomLines.length > 0) facts.set("roomInside", roomLines);
   }
 
-  // มีอะไรกิน
+  // มีอะไรกิน — เมนูแยกทีละจานขึ้นบรรทัด (นำหน้า "· ")
+  // → รายละเอียดของแต่ละจาน (วัตถุดิบ/รสชาติ/ราคา) ไม่ถูกยัดรวมเป็นบรรทัดเดียว
   if (data.food) {
-    const bits: string[] = [];
-    if (data.food.menu_highlights.length > 0) {
-      bits.push(data.food.menu_highlights.join(" · "));
+    const lines: string[] = [];
+    for (const m of data.food.menu_highlights) {
+      const t = (m ?? "").trim();
+      if (t) lines.push(`· ${t}`);
     }
-    if (data.food.price_from) bits.push(`ราคาเริ่มต้น ${data.food.price_from}`);
-    if (data.food.seating) bits.push(data.food.seating);
+    if (data.food.price_from) lines.push(`ราคาเริ่มต้น ${data.food.price_from}`);
+    if (data.food.seating) lines.push(`ที่นั่ง: ${data.food.seating}`);
     if (data.food.payment.length > 0) {
-      bits.push(`จ่าย: ${data.food.payment.join("/")}`);
+      lines.push(`จ่าย: ${data.food.payment.join("/")}`);
     }
-    if (bits.length > 0) facts.set("food", [bits.join(" · ")]);
+    if (lines.length > 0) facts.set("food", lines);
   }
 
-  // สินค้า OTOP
+  // สินค้า OTOP — แยกทีละชิ้นขึ้นบรรทัด (นำหน้า "· ")
   if (data.otop) {
-    const bits: string[] = [];
+    const lines: string[] = [];
     for (const prod of data.otop.products) {
       const name = prod.name ?? "สินค้า";
       const price = prod.price ? ` — ${prod.price}` : "";
       const note = prod.note ? ` (${prod.note})` : "";
-      bits.push(`${name}${price}${note}`);
+      lines.push(`· ${name}${price}${note}`);
     }
     if (data.otop.can_buy_on_site) {
-      bits.push(`ซื้อที่นี่ได้: ${data.otop.can_buy_on_site}`);
+      lines.push(`ซื้อที่นี่ได้: ${data.otop.can_buy_on_site}`);
     }
     if (data.otop.can_try_making) {
-      bits.push(`ลองทำเองได้: ${data.otop.can_try_making}`);
+      lines.push(`ลองทำเองได้: ${data.otop.can_try_making}`);
     }
-    if (bits.length > 0) facts.set("otop", [bits.join(" · ")]);
+    if (lines.length > 0) facts.set("otop", lines);
   }
 
   // ── แต่ละกลุ่มข้อมูล = หนึ่งบล็อกที่มีหัวข้อของตัวเอง ──

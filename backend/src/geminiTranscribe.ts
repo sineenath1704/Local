@@ -48,6 +48,15 @@ export interface TranscriptResult {
   transcript: string;
   /** What kind of audio the clip actually carries. */
   audioType: ClipAudioType;
+  /**
+   * Text written in the frames — signs, subtitles, the place name on a board.
+   *
+   * It comes from the SAME call as the transcript (the clip is already in
+   * that request) → no extra cost, no extra wait. It matters because a clip
+   * with music and a sign but no talking is exactly the case where the sign
+   * is the only evidence there is.
+   */
+  onScreenText: string[];
   model: string;
   /** Which path the bytes took to Gemini. */
   transport: Transport;
@@ -124,7 +133,12 @@ export async function transcribeVideo(
             detail: chars
               ? `ได้ข้อความ ${chars} ตัวอักษร (${result.audioType})`
               : `ถอดได้แต่ไม่มีเสียงพูดในคลิป (${result.audioType})`,
-            data: { chars, audioType: result.audioType, transport },
+            data: {
+              chars,
+              audioType: result.audioType,
+              transport,
+              onScreenText: result.onScreenText.length,
+            },
           });
         }
         return {
@@ -181,7 +195,11 @@ async function transcribeVia(
   transport: Transport,
   videoUrl: string,
   signal: AbortSignal
-): Promise<{ transcript: string; audioType: ClipAudioType } | null> {
+): Promise<{
+  transcript: string;
+  audioType: ClipAudioType;
+  onScreenText: string[];
+} | null> {
   if (transport === "external-url") {
     return requestTranscription(videoUrl, signal);
   }
@@ -407,17 +425,30 @@ const TRANSCRIBE_PROMPT = `ถอดเสียงพูดในคลิป�
   (ห้ามเขียนคำไม่ครบ เช่น "เตียง" ต้องไม่กลายเป็น "เตีย")
 - ถ้ามีเพลงหรือเสียงประกอบอยู่ด้วย ให้ระบุ hasMusic = true
 
+[ตัวหนังสือบนจอ — อ่านจากภาพในคลิป]
+- คลิปนี้อยู่ในคำขอนี้อยู่แล้ว → ให้ดูภาพด้วย แล้วคัด "ตัวหนังสือที่เขียนอยู่ในคลิป" มา
+  (ชื่อสถานที่บนป้าย · ป้ายบอกทาง · ซับไตเติล · ข้อความบนจอ · ชื่อร้าน/โรงแรมบนป้าย)
+- คัดแบบตรงตัว ห้ามแก้คำ ห้ามเดา ห้ามเติมคำที่ไม่มีในภาพ
+- เก็บเฉพาะที่ "อ่านออกชัด" — ไม่ต้องครบทุกบรรทัด แต่ถ้าเห็นชื่อสถานที่ให้เก็บไว้
+- ไม่มีตัวหนังสือในคลิปเลย → ให้ onScreenText เป็น []
+- ห้ามใส่คำบรรยายภาพลงใน onScreenText — onScreenText คือ "ตัวอักษรที่เห็น" เท่านั้น
+
 ตอบกลับเป็น JSON เท่านั้น ห้ามมีข้อความอื่นนอก JSON:
-{ "hasSpeech": true หรือ false, "hasMusic": true หรือ false, "transcript": "ข้อความที่ถอดได้ทั้งหมด" }
+{ "hasSpeech": true หรือ false, "hasMusic": true หรือ false, "transcript": "ข้อความที่ถอดได้ทั้งหมด", "onScreenText": ["ตัวหนังสือที่เห็นในคลิป"] }
 
 - hasMusic = true เมื่อมีเพลงหรือเสียงประกอบอยู่ในคลิป
 - hasSpeech = true เมื่อมีเสียงพูดของมนุษย์ที่ถอดได้จริงอย่างน้อยหนึ่งคำ
-- transcript = "" เมื่อไม่มีเสียงพูดให้ถอด`;
+- transcript = "" เมื่อไม่มีเสียงพูดให้ถอด
+- onScreenText = [] เมื่อไม่มีตัวหนังสือในคลิป`;
 
 async function requestTranscription(
   fileUri: string,
   signal: AbortSignal
-): Promise<{ transcript: string; audioType: ClipAudioType } | null> {
+): Promise<{
+  transcript: string;
+  audioType: ClipAudioType;
+  onScreenText: string[];
+} | null> {
   const res = await fetch(
     `${GEMINI_BASE}/models/${encodeURIComponent(config.gemini.model)}:generateContent`,
     {
@@ -489,12 +520,32 @@ async function requestTranscription(
       : transcript.length > 0;
   const hasMusic = parsed?.hasMusic === true || parsed?.hasMusic === "true";
 
+  // ตัวหนังสือบนจอ — มาจากคำขอเดียวกัน (คลิปอยู่ในคำขอนี้อยู่แล้ว)
+  // โมเดลอาจตั้งชื่อคีย์เองได้ → รับได้หลายแบบ แต่ต้องเป็นข้อความจริง
+  const rawOnScreen =
+    parsed?.onScreenText ?? parsed?.on_screen_text ?? parsed?.screenText;
+  const onScreenText: string[] = Array.isArray(rawOnScreen)
+    ? rawOnScreen
+        .map((t: unknown) => (typeof t === "string" ? t.trim() : ""))
+        .filter((t: string) => t.length > 0)
+        .slice(0, 40)
+    : [];
+
   if (!hasSpeech || transcript === "") {
     // Gemini said there is no usable speech. Be honest about the audio type
     // instead of pretending the clip is silent.
-    return { transcript: "", audioType: hasMusic ? "music" : "none" };
+    // (แต่ป้ายบนจอยังมีค่า — คลิปที่ไม่มีเสียงพูดแต่มีป้าย คือเคสที่ป้ายคือหลักฐานเดียว)
+    return {
+      transcript: "",
+      audioType: hasMusic ? "music" : "none",
+      onScreenText,
+    };
   }
-  return { transcript, audioType: hasMusic ? "mixed" : "speech" };
+  return {
+    transcript,
+    audioType: hasMusic ? "mixed" : "speech",
+    onScreenText,
+  };
 }
 
 /** Pull a JSON object out of a model reply that may be wrapped in prose. */

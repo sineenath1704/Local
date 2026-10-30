@@ -1,6 +1,7 @@
 import { API_BASE_URL, API_TIMEOUT_MS } from "./apiConfig";
 import { aiFetch, AiError, asAiError, toastAiError } from "./aiHttp";
 import type { PostCard } from "../data/commentsData";
+import type { PlaceCandidate, PlaceResolution } from "./placeTypes";
 
 /**
  * Caption helper + pre-upload AI summary.
@@ -10,29 +11,6 @@ import type { PostCard } from "../data/commentsData";
  * DB row exists yet — then persisted with the video on post, so the comment
  * sheet reads it instantly later.
  */
-
-/** A Google Places candidate the user can tick. */
-export interface GooglePlaceCandidate {
-  name: string;
-  address: string;
-  placeId: string;
-  latitude: number | null;
-  longitude: number | null;
-  province: string | null;
-  district: string | null;
-  subdistrict: string | null;
-  types: string[];
-  phone?: string | null;
-  openingHours?: string | null;
-  rating?: number | null;
-  userRatingCount?: number | null;
-  website?: string | null;
-  googleMapsUri?: string | null;
-  businessStatus?: string | null;
-  primaryType?: string | null;
-  primaryTypeDisplayName?: string | null;
-  priceLevel?: number | null;
-}
 
 /** Structured place block (mirrors backend AiSummaryResult.place). */
 export interface SummaryPlace {
@@ -88,7 +66,7 @@ export interface SummaryPlace {
     warning?: string | null;
   };
   /** Places the AI found for this clip — the user ticks one, we never pick. */
-  google_candidates?: GooglePlaceCandidate[];
+  google_candidates?: PlaceCandidate[];
 }
 
 /** ผลของหนึ่งขั้นตอนในการสรุป */
@@ -133,6 +111,11 @@ export interface AiSummaryResult {
    */
   card?: PostCard;
   place?: SummaryPlace;
+  /**
+   * ผลของรอบ AI ที่หน้าที่เดียวคือ "หาสถานที่" (พร้อมหลักฐานในคลิป)
+   * อยู่ที่ระดับ root ของ summary — ไม่ใช่ข้างใน `place`
+   */
+  placeResolution?: PlaceResolution;
   tags?: string[];
   highlights?: string[];
   visualTags?: string[];

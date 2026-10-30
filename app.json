@@ -31,7 +31,8 @@
           "photosPermission": "แอป Local ขอเข้าถึงคลังรูปภาพเพื่อให้คุณเปลี่ยนรูปโปรไฟล์ได้"
         }
       ],
-      "expo-web-browser"
+      "expo-web-browser",
+      "expo-status-bar"
     ]
   }
 }

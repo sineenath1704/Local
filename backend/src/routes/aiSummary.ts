@@ -1,5 +1,12 @@
 import { Router, Request, Response } from "express";
-import { generateSummary, generateNarration, type AiSummaryResult } from "../aiClient";
+import {
+  generateSummary,
+  generateNarration,
+  resolvePlace,
+  rankPlaceCandidates,
+  type AiSummaryResult,
+  type PlaceData,
+} from "../aiClient";
 import {
   proofreadSummary,
   proofreadNarration,
@@ -7,16 +14,25 @@ import {
   narrationFacts,
   proofreadCard,
   applyProofreadToCard,
+  applyProofreadHighlights,
 } from "../thaiProofread";
 import { getSummary, saveSummary, hasSummary } from "../summaryStore";
 import { VideoAnalysisInput } from "../prompt";
 import { renderPostText } from "../videoPromptV2";
 import { config } from "../config";
-import { enrichWithGooglePlaces, type LocationScope } from "./places";
+import {
+  enrichWithGooglePlaces,
+  searchClipPlaceCandidates,
+  sortPlaceCandidates,
+  needsSearchAll,
+  type LocationScope,
+  type PlaceSearchOutcome,
+} from "./places";
 import { transcribeVideo, type TranscriptResult } from "../geminiTranscribe";
 import { DiagLog, errorDetail } from "../summaryDiag";
 import { errorBody } from "../middleware/errors";
 import { requestId } from "../middleware/requestContext";
+import type { PlaceResolution } from "../placeTypes";
 
 const router = Router();
 
@@ -97,13 +113,21 @@ async function withTranscript(
   }
 
   console.log(
-    `[summary] transcript: ${result.transcript.length} ตัวอักษร, audioType=${result.audioType}, transport=${result.transport}`
+    `[summary] transcript: ${result.transcript.length} ตัวอักษร, audioType=${result.audioType}, transport=${result.transport}` +
+      (result.onScreenText.length
+        ? `, ตัวหนังสือบนจอ ${result.onScreenText.length} บรรทัด`
+        : "")
   );
   return {
     input: {
       ...input,
       transcript: result.transcript || undefined,
       audioType: result.audioType,
+      // ตัวหนังสือบนจอมาจากคำขอเดียวกับเสียงพูด (คลิปอยู่ในคำขอนั้นอยู่แล้ว)
+      // → รอบ "หาสถานที่" เห็นมันทันที ไม่ต้องรอบพิเศษ
+      onScreenText: result.onScreenText.length
+        ? result.onScreenText
+        : input.onScreenText,
     },
     transcript: result,
   };
@@ -126,19 +150,33 @@ async function proofreadSummaryFor(
 ): Promise<AiSummaryResult> {
   const card = summary.card;
   if (config.ai.vcaV2Enabled && card) {
-    const corrections = await proofreadCard(card, transcript, diag);
+    // ไฮไลต์ไม่ได้อยู่ในการ์ด แต่แอปเรนเดอร์ใต้การ์ด → ต้องตรวจด้วย
+    const originalHighlights =
+      summary.highlights ?? summary.place?.highlights ?? [];
+    const corrections = await proofreadCard(
+      card,
+      transcript,
+      diag,
+      originalHighlights
+    );
     if (!corrections) return summary;
     const fixed = applyProofreadToCard(card, corrections);
+    const highlights =
+      applyProofreadHighlights(originalHighlights, corrections.highlights) ??
+      originalHighlights;
     return {
       ...summary,
       card: fixed,
       // ข้อความล้วนต้องตรงกับการ์ด (แอป + Caption helper อ่าน text)
       text: renderPostText(fixed),
+      // ไฮไลต์ที่ตรวจแล้ว (แอปอ่านจากตัวบนสุดก่อน)
+      highlights,
       // ชื่อที่แก้แล้วต้องไปถึงจุดที่ใช้ค้น Google ด้วย
       place: summary.place
         ? {
             ...summary.place,
             place_name: fixed.place?.name ?? summary.place.place_name,
+            highlights,
           }
         : summary.place,
     };
@@ -170,6 +208,126 @@ async function proofreadNarrationFor(
 }
 
 /**
+ * รอบ "หาสถานที่" — มีหน้าที่เดียวคือหาชื่อพร้อมหลักฐานที่ตรวจสอบได้
+ * -------------------------------------------------------------
+ * ทำงานก่อนรอบสรุป เพราะ:
+ *   · ชื่อที่ผ่านหลักฐานจะถูกใส่เป็น hint ให้รอบสรุป (ไม่ให้โมเดลตั้งชื่อใหม่)
+ *   · คำค้น Google ต้องมาจากหลักฐาน ไม่ใช่จากการเดาของรอบสรุป
+ *
+ * ล้มเหลวหรือไม่มีหลักฐาน → คืน null → ระบบถอยไปใช้วิธีเดิม (รอบสรุปตั้งชื่อเอง)
+ */
+async function resolvePlaceSafely(
+  input: VideoAnalysisInput,
+  diag: DiagLog
+): Promise<PlaceResolution | null> {
+  try {
+    const resolution = await resolvePlace(input, diag);
+    return resolution.found ? resolution : null;
+  } catch {
+    // resolvePlace บันทึกลง diag ให้แล้ว → ไม่ต้องบันทึกซ้ำ
+    return null;
+  }
+}
+
+/**
+ * ค้นผู้สมัครสถานที่ + ให้ AI จัดอันดับ — ทำงาน**ขนานกับรอบสรุป**
+ * -------------------------------------------------------------
+ * คำค้นมาจากหลักฐานในคลิป → ไม่ต้องรอรอบสรุป → รอบสรุปกับการค้น+จัดอันดับ
+ * จึงเดินพร้อมกัน (ปกติรอบสรุปใช้เวลานานกว่าการค้นมาก)
+ *
+ * คืน `null` = ค้นไม่สำเร็จ (เช่น Google ล่ม) → ให้ระบบถอยไปค้นตามวิธีเดิม
+ * คืนผลที่ไม่มีผู้สมัคร = ค้นแล้วไม่เจอจริง → ไม่ต้องค้นซ้ำ
+ */
+async function searchAndRankPlaces(
+  resolution: PlaceResolution,
+  scope: LocationScope | undefined,
+  diag: DiagLog
+): Promise<PlaceSearchOutcome | null> {
+  const t0 = Date.now();
+  try {
+    // ขอบเขต: ของแอป > พื้นที่ที่มีหลักฐาน (เหมือนที่ enrichWithGooglePlaces ใช้)
+    const activeScope: LocationScope | undefined = scope
+      ? {
+          community: scope.community ?? resolution.community ?? null,
+          subdistrict: scope.subdistrict ?? resolution.admin.subdistrict ?? null,
+          district: scope.district ?? resolution.admin.district ?? null,
+          province: scope.province ?? resolution.admin.province ?? null,
+        }
+      : undefined;
+
+    const outcome = await searchClipPlaceCandidates({
+      evidenceQueries: resolution.queries,
+      fallbackParts: [
+        resolution.placeName,
+        resolution.community,
+        resolution.admin.subdistrict,
+        resolution.admin.district,
+        resolution.admin.province,
+      ],
+      scope: activeScope,
+      maxCandidates: 8,
+      // เสียงกับป้ายบนจออ่านได้คนละชื่อ → ค้นทั้งสองคำ ให้ผู้ใช้ติ๊กเอง
+      searchAll: needsSearchAll(resolution),
+    });
+
+    // ให้ AI จัดอันดับ: เทียบแต่ละผู้สมัครกับหลักฐานในคลิป
+    const ranked = await rankPlaceCandidates(resolution, outcome.candidates, diag);
+
+    if (diag) {
+      diag.add({
+        id: "places",
+        label: "ค้นสถานที่ (Google Places)",
+        status: outcome.candidates.length ? "ok" : "failed",
+        ms: Date.now() - t0,
+        detail: outcome.candidates.length
+          ? `เจอ ${outcome.candidates.length} จุด — รอผู้ใช้ติ๊ก`
+          : `ค้นแล้วไม่เจอสถานที่ (คำค้น: ${outcome.queries.join(" | ")})`,
+        data: {
+          candidates: outcome.candidates.length,
+          queries: outcome.queries.length,
+        },
+      });
+      if (!outcome.candidates.length) {
+        diag.problem(
+          `ค้น Google Places แล้วไม่เจอสถานที่ — คำค้น "${outcome.queries.join(" | ")}"`
+        );
+      }
+    }
+
+    return {
+      ...outcome,
+      candidates: sortPlaceCandidates(ranked, activeScope),
+    };
+  } catch (err: any) {
+    diag.problem(`ค้น Google Places ล้มเหลว: ${errorDetail(err)}`);
+    return null;
+  }
+}
+
+/**
+ * `place` ขั้นต่ำจากผลหาสถานที่ — ใช้เมื่อรอบสรุปไม่ได้ให้ฟิลด์ place มาเลย
+ * แต่รอบ "หาสถานที่" หาชื่อพร้อมหลักฐานได้ → อย่าทิ้งผลที่หาได้
+ */
+function placeFromResolution(resolution: PlaceResolution): PlaceData {
+  return {
+    place_name: resolution.placeName,
+    community: resolution.community,
+    location: {
+      province: resolution.admin.province,
+      district: resolution.admin.district,
+      subdistrict: resolution.admin.subdistrict,
+    },
+    category: resolution.category ? [resolution.category] : [],
+    activities: [],
+    price_info: { weekday: null, weekend: null },
+    contact: {},
+    otop_products: [],
+    highlights: [],
+    tags: [],
+  };
+}
+
+/**
  * POST /ai-summary/preview
  * -------------------------------------------------------------
  * Generate a summary WITHOUT a saved video row — used at UPLOAD time,
@@ -187,9 +345,23 @@ router.post("/preview", async (req: Request, res: Response) => {
     // uploader's words, not just the picture).
     const { input: withAudio } = await withTranscript(input, diag);
 
-    // Step 2: M3 summarizes — from the video, the transcript, and the text
-    // on screen together.
-    const rawSummary = await generateSummary(withAudio, diag);
+    // Step 1b: หาสถานที่ (มีหลักฐานรองรับ) — ต้องเสร็จก่อนรอบสรุป
+    //   · ชื่อที่ผ่านหลักฐานจะถูกใส่เป็น hint ให้รอบสรุป
+    //   · คำค้น Google มาจากหลักฐาน ไม่ต้องรอชื่อที่รอบสรุปตั้งเอง
+    const resolution = await resolvePlaceSafely(withAudio, diag);
+    const withPlace: VideoAnalysisInput = resolution
+      ? { ...withAudio, resolvedPlace: resolution }
+      : withAudio;
+
+    // Step 2 + Step 3 ขนานกัน — รอบสรุป ↔ ค้น Google + จัดอันดับผู้สมัคร
+    // (คำค้นมาจากหลักฐาน จึงไม่ต้องรอรอบสรุป)
+    const scope = readScope(req.body);
+    const [rawSummary, searched] = await Promise.all([
+      generateSummary(withPlace, diag),
+      resolution
+        ? searchAndRankPlaces(resolution, scope, diag)
+        : Promise.resolve(null),
+    ]);
 
     // Step 2b: proofread pass — the model writes fresh Thai, so it slips on
     // spelling. Copy-edit it BEFORE Google, because the place name is part
@@ -200,26 +372,37 @@ router.post("/preview", async (req: Request, res: Response) => {
       diag
     );
 
+    // ผลการหาสถานที่ติดไปกับสรุป — ไม่งั้นคำค้นจะกลับไปใช้ชื่อที่รอบสรุปตั้งเอง
+    const summaryWithResolution = resolution
+      ? {
+          ...cleanSummary,
+          place: cleanSummary.place ?? placeFromResolution(resolution),
+          placeResolution: resolution,
+        }
+      : cleanSummary;
+
     // Hand any transcript the caller supplied to the enricher so it can build a
     // better Google Places search query. See places.ts `_transcript`.
     const summaryWithCtx = withAudio.transcript
       ? {
-          ...cleanSummary,
+          ...summaryWithResolution,
           _transcript: withAudio.transcript,
           _onScreenText: withAudio.onScreenText ?? [],
         }
-      : cleanSummary;
+      : summaryWithResolution;
 
     // Step 3: Google Places returns candidate places for the user to tick.
     // The scope (community / tambol / amphur) comes from the client — without
     // it we can only search the whole country. PLAN §5.3
+    // `searched` = ผลค้นที่ทำไว้ขนานกับรอบสรุป → ไม่ต้องจ่ายซ้ำ
     const enriched = await enrichWithGooglePlaces(
       summaryWithCtx,
       diag,
-      readScope(req.body)
+      scope,
+      searched
     ).catch((err: any) => {
       diag.problem(`ค้น Google Places ล้มเหลว: ${errorDetail(err)}`);
-      return cleanSummary;
+      return summaryWithCtx;
     });
 
     // Step 4: Stage 2 Storytelling Narration
@@ -275,7 +458,22 @@ router.post("/:postId/generate", async (req: Request, res: Response) => {
   const diag = new DiagLog();
   try {
     const { input } = await withTranscript(readInput(req.body), diag);
-    const rawSummary = await generateSummary(input, diag);
+
+    // หาสถานที่ (มีหลักฐานรองรับ) — ก่อนรอบสรุป เพื่อให้ชื่อที่ผ่านหลักฐาน
+    // เป็นทั้ง hint ให้รอบสรุป และคำค้น Google
+    const resolution = await resolvePlaceSafely(input, diag);
+    const withPlace: VideoAnalysisInput = resolution
+      ? { ...input, resolvedPlace: resolution }
+      : input;
+
+    // รอบสรุป ↔ ค้น Google + จัดอันดับ — ขนานกัน
+    const scope = readScope(req.body);
+    const [rawSummary, searched] = await Promise.all([
+      generateSummary(withPlace, diag),
+      resolution
+        ? searchAndRankPlaces(resolution, scope, diag)
+        : Promise.resolve(null),
+    ]);
 
     // Same proofread → Google → narration order as /preview: the corrected
     // place name is the one that goes into the Google search query.
@@ -284,16 +482,24 @@ router.post("/:postId/generate", async (req: Request, res: Response) => {
       input.transcript,
       diag
     );
-    const summaryWithCtx = input.transcript
-      ? { ...cleanSummary, _transcript: input.transcript }
+    const summaryWithResolution = resolution
+      ? {
+          ...cleanSummary,
+          place: cleanSummary.place ?? placeFromResolution(resolution),
+          placeResolution: resolution,
+        }
       : cleanSummary;
+    const summaryWithCtx = input.transcript
+      ? { ...summaryWithResolution, _transcript: input.transcript }
+      : summaryWithResolution;
     const enriched = await enrichWithGooglePlaces(
       summaryWithCtx,
       diag,
-      readScope(req.body)
+      scope,
+      searched
     ).catch((err: any) => {
       diag.problem(`ค้น Google Places ล้มเหลว: ${errorDetail(err)}`);
-      return cleanSummary;
+      return summaryWithCtx;
     });
     const narrationText = await generateNarration(enriched, diag).catch(() => enriched.text);
     const cleanNarration = await proofreadNarrationFor(

@@ -2,7 +2,7 @@ import { Router, Request, Response } from "express";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { config, isPlacesConfigured } from "../config";
 import type { AiSummaryResult } from "../aiClient";
-import type { CommunityMatchLevel, PlaceCandidate } from "../placeTypes";
+import type { CommunityMatchLevel, PlaceCandidate, PlaceResolution } from "../placeTypes";
 import {
   filterByScope,
   matchLevelFor,
@@ -66,10 +66,15 @@ export class PlacesApiError extends Error {
  *     name/location the AI read from the clip. Choosing is the user's job.
  *  6) GET /places/community — every place of one community, read back for the
  *     community profile page (PLAN §5.7).
+ *  7) searchPlaceCandidatesMulti() — internal: ค้นหลายคำแล้วรวมผล ตอนที่รอบ
+ *     "หาสถานที่" ให้คำค้นที่มีหลักฐานรองรับมาหลายคำ
  *
  * Cost note: a search used to cost 6 billable calls (1 text search + 5 Place
  * Details). It is now 1 call to search, and 1 more for details — but only for
  * the place the user actually ticks.
+ *
+ * หลังเพิ่มการค้นหลายคำ: หนึ่งคำค้น = 1 ค่าเรียก API → การค้นหลายคำจึง
+ * หยุดเร็วทันทีที่เจอผู้สมัครที่ตรงขอบเขตแล้ว (ดู `searchPlaceCandidatesMulti`)
  */
 
 // ─────────────────────────────────────────────
@@ -366,6 +371,124 @@ export async function searchPlaceCandidates(query: string): Promise<PlaceCandida
 }
 
 /**
+ * ผลการค้นหลายคำ
+ * -------------------------------------------------------------
+ * คำค้นหนึ่งคำมักไม่พอ — ชื่อที่ AI อ่านมาอาจสะกดต่างจากที่ Google
+ * บันทึกไว้ หรือพื้นที่ที่คลิปพูดถึงอาจไม่ใช่ชื่อที่ Google ใช้
+ * → ลองหลายคำ แล้วรวมผลที่ได้ (ตัดซ้ำ) ให้ผู้ใช้ติ๊กเอง
+ */
+export interface MultiSearchResult {
+  /** ผู้สมัครที่รวมจากทุกคำค้น (ตัดรายการซ้ำแล้ว) */
+  candidates: PlaceCandidate[];
+  /** คำค้นที่ลองจริง */
+  queries: string[];
+  /** ข้อความ error ของคำค้นที่ล้มเหลว — ไม่ทำให้ทั้งหมดล้มเหลว */
+  errors: string[];
+}
+
+/** เติม "ประเทศไทย" ให้คำค้น — แอปใช้ข้อมูลแค่ประเทศไทย */
+function withThailandSuffix(query: string): string {
+  const q = (query ?? "").trim();
+  if (!q) return "";
+  if (q.includes("ประเทศไทย") || q.toLowerCase().includes("thailand")) return q;
+  return `${q} ประเทศไทย`;
+}
+
+/**
+ * มีผู้สมัครที่ "ตรงขอบเขต" แรง ๆ แล้วไหม (อยู่หมู่บ้านเดียวกัน / ตำบลเดียวกัน)
+ * → ใช้ตัดสินว่าจะหยุดค้นคำต่อไหม (ประหยัดค่าเรียก API)
+ */
+function hasStrongScopeMatch(
+  candidates: PlaceCandidate[],
+  scope: LocationScope
+): boolean {
+  return candidates.some((c) => {
+    const level = matchLevelFor(c, scope);
+    return level === "village" || level === "subdistrict";
+  });
+}
+
+/**
+ * ค้น Google หลายคำ แล้วรวมผล
+ * -------------------------------------------------------------
+ * แต่ละคำค้น = 1 ค่าเรียก API (บิลลิ่ม) → จึงหยุดเร็วเมื่อ:
+ *   - ได้ผู้สมัครครบ `maxCandidates` แล้ว
+ *   - หรือเจอผู้สมัครที่ตรงขอบเขต (หมู่บ้าน/ตำบล) แล้ว — คำค้นที่เหลือ
+ *     แทบไม่มีทางดีกว่า และแต่ละคำค้นคือเงิน
+ *
+ * คำค้นแรกล้มเหลว = ปัญหาของ Google (คีย์/บิลลิ่ม) → **throw**
+ * (PLAN §2.6.2 — "ผิดพลาด" กับ "ค้นไม่เจอ" ต้องไม่กลายเป็นเรื่องเดียวกัน)
+ * คำค้นหลังล้มเหลว = ของบางคำค้น → ใช้ผลที่ได้ไปต่อ แล้วรายงานไว้
+ */
+export async function searchPlaceCandidatesMulti(
+  queries: string[],
+  opts: {
+    /** จำนวนผู้สมัครสูงสุดที่จะเก็บ */
+    maxCandidates?: number;
+    /** ขอบเขตที่กำลังหา — ใช้ตัดสินว่าจะหยุดค้นเร็วไหม */
+    scope?: LocationScope;
+    /**
+     * ค้น **ทุก** คำค้นให้ครบ ไม่หยุดที่คำแรกที่เจอผู้สมัครตรงขอบเขต
+     * -------------------------------------------------------------
+     * ใช้ตอนเสียงพูดกับตัวหนังสือบนจออ่านได้คนละชื่อ → ต้องค้นทั้งสอง
+     * คำค้น แล้วให้ผู้ใช้เลือกเองว่าอันไหนถูก (ถ้าหยุดที่คำแรก
+     * ผู้สมัครของชื่อที่สองจะไม่มีโอกาสโผล่บนจอเลย)
+     */
+    searchAll?: boolean;
+    /** ใช้แทนการยิง Google จริง — มีไว้ให้เทสต์ (ค่าเริ่มต้นคือของจริง) */
+    search?: (query: string) => Promise<PlaceCandidate[]>;
+  } = {}
+): Promise<MultiSearchResult> {
+  const maxCandidates = opts.maxCandidates ?? 8;
+  const runSearch = opts.search ?? searchPlaceCandidates;
+  const list = (queries ?? [])
+    .map((q) => (q ?? "").trim())
+    .filter(Boolean);
+
+  // โหมด "ค้นทุกคำ" — แบ่งงบผู้สมัครให้แต่ละคำค้นได้ของของตัวเอง
+  // (ถ้าให้คำแรกกินงบหมด คำที่สองจะไม่มีผู้สมัครมาให้เลือก)
+  const perQueryCap = opts.searchAll
+    ? Math.max(3, Math.ceil(maxCandidates / 2))
+    : maxCandidates;
+  const totalCap = opts.searchAll
+    ? perQueryCap * Math.max(1, list.length)
+    : maxCandidates;
+
+  const out: PlaceCandidate[] = [];
+  const seen = new Set<string>();
+  const errors: string[] = [];
+  const used: string[] = [];
+
+  for (const query of list) {
+    used.push(query);
+    let batch: PlaceCandidate[] = [];
+    try {
+      batch = await runSearch(query);
+    } catch (err: any) {
+      errors.push(`${query} — ${errorDetail(err)}`);
+      if (used.length === 1 && !out.length) throw err;
+      continue;
+    }
+
+    let added = 0;
+    for (const c of batch) {
+      if (added >= perQueryCap) break;
+      const key = c.placeId || `${c.name}|${c.address}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(c);
+      added++;
+      if (out.length >= totalCap) break;
+    }
+    if (out.length >= totalCap) break;
+    // หยุดเร็วได้เฉพาะตอน "ค้นคำเดียวพอ" — ถ้ามีหลายชื่อต้องค้นให้ครบ
+    if (!opts.searchAll && opts.scope && hasStrongScopeMatch(out, opts.scope)) break;
+  }
+
+  return { candidates: out, queries: used, errors };
+}
+
+/**
  * Fetch the full record for ONE place id. ONE billable call.
  *
  * Called only after the user ticks a candidate — this is where the contact /
@@ -445,6 +568,172 @@ export async function getPlaceDetails(placeId: string): Promise<PlaceCandidate |
 // ─────────────────────────────────────────────
 
 /**
+ * ผลการค้นผู้สมัครสถานที่
+ * -------------------------------------------------------------
+ * แยกออกมาเป็นชิ้นเดียว เพราะต้องเรียกได้สองทาง:
+ *   · ตามรอบสรุป (เดิม) → ค้นหลังรอบสรุปเสร็จ
+ *   · ตามรอบ "หาสถานที่" (ใหม่) → ค้นก่อน/ขนานกับรอบสรุป
+ *     เพราะคำค้นมาจากหลักฐานในคลิป ไม่ต้องรอชื่อที่รอบสรุปตั้งชื่อเอง
+ */
+export interface PlaceSearchOutcome {
+  /** ผู้สมัครที่ผ่านการกรองขอบเขตแล้ว (เรียงตามระดับขอบเขต → คะแนน AI) */
+  candidates: PlaceCandidate[];
+  /** คำค้นที่ลองจริง */
+  queries: string[];
+  /** คำค้นที่ล้มเหลว (ไม่ทำให้ทั้งหมองล้มเหลว) */
+  errors: string[];
+  /** จำนวนผู้สมัครดิบก่อนกรองขอบเขต */
+  rawCount: number;
+}
+
+/**
+ * เรียงผู้สมัคร: ระดับขอบเขตก่อน (หมู่บ้าน > ตำบล > อำเภอ) → คะแนน AI
+ * -------------------------------------------------------------
+ * คะแนน AI เป็นตัวตัดสินรอง เพราะหลังกรองขอบเขตแบบ strict แล้ว
+ * ผู้สมัครที่เหลือมักอยู่ระดับเดียวกัน → ให้ AI เทียบกับหลักฐานในคลิปตัดสิน
+ * ผู้สมัครที่ยังไม่ได้คะแนน (ไม่มีรอบจัดอันดับ) จะอยู่ท้ายกลุ่มของตัวเอง
+ */
+export function sortPlaceCandidates(
+  candidates: PlaceCandidate[],
+  scope?: LocationScope
+): PlaceCandidate[] {
+  const score = (c: PlaceCandidate) => {
+    let s = 0;
+    if (scope?.province && (c.province === scope.province || c.address.includes(scope.province))) s += 3;
+    if (scope?.district && (c.district === scope.district || c.address.includes(scope.district))) s += 2;
+    if (scope?.subdistrict && c.address.includes(scope.subdistrict)) s += 1;
+    return s;
+  };
+  return [...candidates]
+    .map((c, i) => ({ c, i }))
+    .sort((a, b) => {
+      const byLevel =
+        MATCH_RANK[b.c.matchLevel ?? "district"] - MATCH_RANK[a.c.matchLevel ?? "district"];
+      if (byLevel !== 0) return byLevel;
+      const sa = a.c.aiScore ?? -1;
+      const sb = b.c.aiScore ?? -1;
+      if (sb !== sa) return sb - sa;
+      const byScore = score(b.c) - score(a.c);
+      if (byScore !== 0) return byScore;
+      return a.i - b.i;
+    })
+    .map((o) => o.c);
+}
+
+/**
+ * คำค้นหลายคำ → รายการคำค้นที่จะยิงจริง (ไม่ซ้ำ / ไม่ว่าง)
+ * -------------------------------------------------------------
+ * · คำค้นที่มีหลักฐานรองรับมาก่อนเสมอ (แม่นกว่า)
+ * · คำค้นสำรองจากชื่อ+พื้นที่ต่อท้าย (เผื่อคำแรกไม่เจอ)
+ * · ทุกคำเติม "ประเทศไทย" (แอปใช้ข้อมูลแค่ประเทศไทย)
+ */
+export function buildPlaceQueries(
+  evidenceQueries: string[] | undefined,
+  fallbackParts: (string | null | undefined)[] | undefined
+): string[] {
+  const out: string[] = [];
+  for (const q of evidenceQueries ?? []) {
+    const query = withThailandSuffix(q);
+    if (query && !out.includes(query)) out.push(query);
+  }
+  const parts = (fallbackParts ?? []).filter(
+    (x): x is string => typeof x === "string" && x.trim() !== ""
+  );
+  if (parts.length) {
+    const fallback = `${parts.join(" ")} ประเทศไทย`.trim();
+    if (fallback && !out.includes(fallback)) out.push(fallback);
+  }
+  return out;
+}
+
+/**
+ * ต้องค้น **ทุก** คำค้นไหม — คือมีชื่อที่อ่านได้มากกว่าหนึ่งค่าไหม
+ * -------------------------------------------------------------
+ * เสียงพูดกับตัวหนังสือบนจออ่านได้คนละชื่อ → ค้นทั้งสองคำค้น
+ * แล้วให้ผู้ใช้ติ๊กเองว่าอันไหนถูก (ถ้าหยุดที่คำแรกที่เจอ
+ * ผู้สมัครของชื่อที่สองจะไม่มีโอกาสโผล่บนจอเลย)
+ */
+export function needsSearchAll(resolution?: PlaceResolution | null): boolean {
+  if (!resolution?.found) return false;
+  const names = new Set(
+    (resolution.readings ?? [])
+      .map((r) => (r.placeName ?? "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+  return names.size > 1;
+}
+
+/**
+ * ค้นผู้สมัครสถานที่ → กรองขอบเขต → เรียงลำดับ
+ * -------------------------------------------------------------
+ * `evidenceQueries` = คำค้นที่มีหลักฐานรองรับ (จากรอบ "หาสถานที่")
+ *   → มาก่อนเสมอ เพราะแม่นกว่าคำค้นที่สร้างจากชื่อที่รอบสรุปตั้งชื่อเอง
+ * `fallbackParts` = ชื่อ/ชุมชน/พื้นที่ (จากรอบสรุป หรือจากรอบหาสถานที่)
+ *   → ใช้เป็นคำค้นสำรอง ถ้าคำค้นหลักฐานไม่เจอ
+ *
+ * แต่ละคำค้น = 1 ค่าเรียก API → จึงหยุดเร็วเมื่อเจอผู้สมัครที่ตรงขอบเขตแล้ว
+ * (ดู `searchPlaceCandidatesMulti`)
+ */
+export async function searchClipPlaceCandidates(opts: {
+  evidenceQueries?: string[];
+  fallbackParts?: (string | null | undefined)[];
+  scope?: LocationScope;
+  maxCandidates?: number;
+  /** ค้นทุกคำค้นให้ครบ (ใช้เมื่อมี 2 ชื่อจาก 2 แหล่ง — ผู้ใช้ต้องเลือกเอง) */
+  searchAll?: boolean;
+  /** ใช้แทนการยิง Google จริง — มีไว้ให้เทสต์ */
+  search?: (query: string) => Promise<PlaceCandidate[]>;
+}): Promise<PlaceSearchOutcome> {
+  const scope = opts.scope;
+  const queries = buildPlaceQueries(opts.evidenceQueries, opts.fallbackParts);
+
+  if (!queries.length) {
+    return { candidates: [], queries: [], errors: [], rawCount: 0 };
+  }
+
+  console.log("[places] searching candidates with queries:", queries.join(" | "));
+
+  const search = await searchPlaceCandidatesMulti(queries, {
+    scope,
+    maxCandidates: opts.maxCandidates ?? 8,
+    searchAll: opts.searchAll,
+    search: opts.search,
+  });
+
+  // Filter to Thailand-only results.
+  const thCandidates = search.candidates.filter(
+    (c) => c.address.includes("ไทย") || c.address.toLowerCase().includes("thailand")
+  );
+  const pool = thCandidates.length > 0 ? thCandidates : search.candidates;
+
+  // กรองด้วยขอบเขต (ชั้นที่ 1-3 ของ PLAN §2.2.2)
+  let scoped = filterByScope(pool, scope, true);
+
+  // จังหวัดต้องตรงด้วย — ชื่อตำบลซ้ำกันข้ามจังหวัดได้ (เช่น "บ้านป่า")
+  // ถ้าไม่มีผู้สมัครในจังหวัดที่ขอเลย → เก็บของเดิมไว้ (ผู้ใช้ยังต้องติ๊กเอง)
+  const wantedProvince = scope?.province?.trim();
+  if (wantedProvince) {
+    const inProvince = scoped.filter(
+      (c) => c.province === wantedProvince || c.address.includes(wantedProvince)
+    );
+    if (inProvince.length > 0) scoped = inProvince;
+  }
+
+  // ติดป้ายระดับที่จับคู่ได้ — เรียงลำดับตามป้ายนี้
+  const tagged = scoped.map((c) => ({
+    ...c,
+    matchLevel: scope ? matchLevelFor(c, scope) : null,
+  }));
+
+  return {
+    candidates: sortPlaceCandidates(tagged, scope),
+    queries: search.queries,
+    errors: search.errors,
+    rawCount: pool.length,
+  };
+}
+
+/**
  * After M3 returns a summary, look up candidate places for the clip and hand
  * the LIST back to the app.
  *
@@ -454,11 +743,14 @@ export async function getPlaceDetails(placeId: string): Promise<PlaceCandidate |
  *
  * `scope` (ไม่บังคับ) = ขอบเขตที่กำลังหา — ชุมชน/ตำบล/อำเภอ/จังหวัด
  * ถ้ามี scope → คำค้นจะแคบลง และผลจะถูกกรองเป็น 3 ชั้น + ติดป้าย `matchLevel`
+ *
+ * `preSearched` = ผลค้นที่ทำไว้ล่วงหน้า (ขนานกับรอบสรุป) → ไม่ต้องค้นซ้ำ
  */
 export async function enrichWithGooglePlaces(
   summary: AiSummaryResult,
   diag?: DiagLog,
-  scope?: LocationScope
+  scope?: LocationScope,
+  preSearched?: PlaceSearchOutcome | null
 ): Promise<AiSummaryResult> {
   const t0 = Date.now();
 
@@ -501,6 +793,10 @@ export async function enrichWithGooglePlaces(
     ? JSON.stringify((summary as any).reasoning)
     : undefined;
 
+  // ผลจากรอบ "หาสถานที่" (มีหลักฐานรองรับ) — เชื่อถือกว่าที่รอบสรุปอ่านมา
+  const resolution = summary.placeResolution;
+  const resAdmin = resolution?.found ? resolution.admin : null;
+
   // Detect province from location or context texts
   const knownProvince =
     place.location?.province ||
@@ -510,12 +806,28 @@ export async function enrichWithGooglePlaces(
   const knownSubdistrict = place.location?.subdistrict || null;
 
   // ขอบเขตที่ส่งมาเหนือกว่าข้อมูลในคลิป (เช่น host บอกว่าอยู่ชุมชนไหน)
+  // ลำดับ: ขอบเขตจากแอป > พื้นที่ที่มีหลักฐาน (รอบหาสถานที่) > เดาจากรอบสรุป
   const scopedCommunity = scope?.community || null;
-  const scopedSubdistrict = scope?.subdistrict || knownSubdistrict || null;
-  const scopedDistrict = scope?.district || knownDistrict || null;
-  const scopedProvince = scope?.province || knownProvince || null;
+  const scopedSubdistrict =
+    scope?.subdistrict || resAdmin?.subdistrict || knownSubdistrict || null;
+  const scopedDistrict =
+    scope?.district || resAdmin?.district || knownDistrict || null;
+  const scopedProvince =
+    scope?.province || resAdmin?.province || knownProvince || null;
 
-  // Build search query — combine place_name / community WITH district and province for maximum precision!
+  // ขอบเขตที่ใช้กรองผล — ต้องได้ก่อนค้น เพราะใช้ตัดสินว่าจะหยุดค้นเร็วไหม
+  const activeScope: LocationScope | undefined = scope
+    ? {
+        community: scopedCommunity,
+        subdistrict: scopedSubdistrict,
+        district: scopedDistrict,
+        province: scopedProvince,
+      }
+    : undefined;
+
+  // ── ค้นผู้สมัคร ───────────────────────────────────────────────────────
+  // 1) คำค้นจากรอบ "หาสถานที่" — มีหลักฐานรองรับ เลยแม่นที่สุด
+  // 2) คำค้นเดิม (ชื่อที่รอบสรุปอ่านมา + ขอบเขต) — เผื่อคำแรกไม่เจอ
   // ตำบลต้องอยู่ในคำค้นด้วย — เดิมค้นได้แค่ระดับอำเภอ (PLAN §5.2)
   const queryParts = [
     place.place_name,
@@ -526,102 +838,79 @@ export async function enrichWithGooglePlaces(
     scopedProvince,
   ].filter((x): x is string => typeof x === "string" && x.trim() !== "");
 
-  let query = "";
-  if (queryParts.length > 0) {
-    query = `${queryParts.join(" ")} ประเทศไทย`.trim();
-  } else if (scopedProvince) {
-    query = `${[scopedSubdistrict, scopedDistrict, scopedProvince]
-      .filter(Boolean)
-      .join(" ")} ประเทศไทย`.trim();
-  }
+  // ถ้ามีผลค้นที่ทำไว้ล่วงหน้า (ขนานกับรอบสรุป) → ใช้เลย ไม่ต้องจ่ายซ้ำ
+  let outcome: PlaceSearchOutcome | null = preSearched ?? null;
 
-  if (!query) {
-    if (diag) {
-      diag.add({
-        id: "places",
-        label: "ค้นสถานที่ (Google Places)",
-        status: "failed",
-        ms: Date.now() - t0,
-        detail: "สร้างคำค้นไม่ได้ (ไม่มีชื่อสถานที่/ชุมชน/จังหวัด)",
+  if (!outcome) {
+    try {
+      outcome = await searchClipPlaceCandidates({
+        evidenceQueries: resolution?.found ? resolution.queries : [],
+        fallbackParts: queryParts.length
+          ? queryParts
+          : scopedProvince
+          ? [scopedSubdistrict, scopedDistrict, scopedProvince]
+          : [],
+        scope: activeScope,
+        maxCandidates: 8,
+        // ชื่อ 2 ค่า (เสียงกับป้ายบนจอไม่ตรงกัน) → ค้นให้ครบทั้งสองคำ
+        searchAll: needsSearchAll(resolution),
       });
-      diag.problem("สร้างคำค้น Google ไม่ได้ — ไม่มีชื่อสถานที่หรือจังหวัดเลย");
-    }
-    return summary;
-  }
-
-  console.log("[places] searching candidates with query:", query);
-
-  let candidates: PlaceCandidate[] = [];
-  try {
-    candidates = await searchPlaceCandidates(query);
-  } catch (err: any) {
-    if (diag) {
-      const msg = errorDetail(err);
-      diag.add({
-        id: "places",
-        label: "ค้นสถานที่ (Google Places)",
-        status: "failed",
-        ms: Date.now() - t0,
-        detail: `เรียก Google Places ไม่สำเร็จ: ${msg}`,
-      });
-      diag.problem(`เรียก Google Places ไม่สำเร็จ: ${msg}`);
-    }
-    return summary; // non-fatal
-  }
-
-  if (candidates.length === 0) {
-    if (diag) {
-      diag.add({
-        id: "places",
-        label: "ค้นสถานที่ (Google Places)",
-        status: "failed",
-        ms: Date.now() - t0,
-        detail: `ค้นแล้วไม่เจอสถานที่ (คำค้น: ${query})`,
-      });
-      diag.problem(`ค้น Google Places แล้วไม่เจอสถานที่ — คำค้น "${query}"`);
-    }
-    return summary;
-  }
-
-  // Filter to Thailand-only results.
-  const thCandidates = candidates.filter(
-    (c) => c.address.includes("ไทย") || c.address.toLowerCase().includes("thailand")
-  );
-  const pool = thCandidates.length > 0 ? thCandidates : candidates;
-
-  // กรองด้วยขอบเขต (ชั้นที่ 1-3 ของ PLAN §2.2.2)
-  // strict = true → ไม่เหลือก็คืน [] ให้แอปไปเปิดเส้นทาง "ค้นใหม่ในชุมชน"
-  const activeScope: LocationScope | undefined = scope
-    ? {
-        community: scopedCommunity,
-        subdistrict: scopedSubdistrict,
-        district: scopedDistrict,
-        province: scopedProvince,
+    } catch (err: any) {
+      if (diag) {
+        const msg = errorDetail(err);
+        diag.add({
+          id: "places",
+          label: "ค้นสถานที่ (Google Places)",
+          status: "failed",
+          ms: Date.now() - t0,
+          detail: `เรียก Google Places ไม่สำเร็จ: ${msg}`,
+        });
+        diag.problem(`เรียก Google Places ไม่สำเร็จ: ${msg}`);
       }
-    : undefined;
-  const scoped = filterByScope(pool, activeScope, true);
+      return summary; // non-fatal
+    }
+  }
 
-  // ติดป้ายระดับที่จับคู่ได้ — เรียงลำดับตามป้ายนี้
-  const scored = scoped.map((c) => ({
-    ...c,
-    matchLevel: activeScope ? matchLevelFor(c, activeScope) : null,
-  }));
+  // คำค้นบางคำล้มเหลว — บอกไว้ แต่ไม่ทำให้ทั้งหมดล้มเหลว
+  for (const e of outcome.errors) {
+    diag?.problem(`คำค้น Google บางคำล้มเหลว: ${e}`);
+  }
 
-  // Order the list so the most likely match is first — but the user still has
-  // to tick it. Ordering is a hint, not a decision.
-  const ranked = [...scored].sort((a, b) => {
-    const byLevel =
-      MATCH_RANK[b.matchLevel ?? "district"] - MATCH_RANK[a.matchLevel ?? "district"];
-    if (byLevel !== 0) return byLevel;
-    const score = (c: PlaceCandidate) => {
-      let s = 0;
-      if (scopedProvince && (c.province === scopedProvince || c.address.includes(scopedProvince))) s += 3;
-      if (scopedDistrict && (c.district === scopedDistrict || c.address.includes(scopedDistrict))) s += 2;
-      if (scopedSubdistrict && c.address.includes(scopedSubdistrict)) s += 1;
-      return s;
-    };
-    return score(b) - score(a);
-  });
+  const ranked = outcome.candidates;
+
+  // Clean up internal fields before returning.
+  const { _transcript, _onScreenText, ...cleanSummary } = summary as any;
+  void _transcript; void _onScreenText;
+
+  // ชื่อที่มีหลักฐานรองรับ ทับชื่อที่รอบสรุปตั้งชื่อเอง
+  // (ชื่อนี้ผ่านการตรวจว่าอยู่ในคลิปจริง → เชื่อถือได้กว่า)
+  const confirmedName = resolution?.found ? resolution.placeName : null;
+  const placeOut = {
+    ...place,
+    place_name: confirmedName ?? place.place_name,
+  };
+
+  if (ranked.length === 0) {
+    if (diag) {
+      const noQuery = outcome.queries.length === 0;
+      diag.add({
+        id: "places",
+        label: "ค้นสถานที่ (Google Places)",
+        status: "failed",
+        ms: Date.now() - t0,
+        detail: noQuery
+          ? "สร้างคำค้นไม่ได้ (ไม่มีชื่อสถานที่/ชุมชน/จังหวัด)"
+          : `ค้นแล้วไม่เจอสถานที่ (คำค้น: ${outcome.queries.join(" | ")})`,
+      });
+      diag.problem(
+        noQuery
+          ? "สร้างคำค้น Google ไม่ได้ — ไม่มีชื่อสถานที่หรือจังหวัดเลย"
+          : `ค้น Google Places แล้วไม่เจอสถานที่ — คำค้น "${outcome.queries.join(" | ")}"`
+      );
+    }
+    // ไม่มีผู้สมัคร แต่ชื่อที่มีหลักฐานยังได้ถูกใช้ (แอปจะเปิด "ค้นใหม่ในชุมชน")
+    return { ...cleanSummary, place: placeOut };
+  }
 
   console.log("[places] candidate list:", ranked.length, "— awaiting user pick");
 
@@ -631,35 +920,42 @@ export async function enrichWithGooglePlaces(
       acc[k] = (acc[k] ?? 0) + 1;
       return acc;
     }, {});
-    diag.add({
-      id: "places",
-      label: "ค้นสถานที่ (Google Places)",
-      status: "ok",
-      ms: Date.now() - t0,
-      detail: `เจอ ${ranked.length} จุด — รอผู้ใช้ติ๊ก`,
-      // `data` เก็บค่าแบบแบนเท่านั้น → สรุประดับการจับคู่เป็นข้อความเดียว
-      data: {
-        candidates: ranked.length,
-        levels: Object.entries(levels)
-          .map(([level, count]) => `${level}:${count}`)
-          .join(" "),
-      },
-    });
-    if (activeScope && ranked.length === 0 && pool.length > 0) {
+    // ถ้าค้นไว้ล่วงหน้า (ขนานกับรอบสรุป) → ผู้เรียกบันทึกผลไว้แล้ว ไม่ต้องบันทึกซ้ำ
+    if (!preSearched) {
+      diag.add({
+        id: "places",
+        label: "ค้นสถานที่ (Google Places)",
+        status: "ok",
+        ms: Date.now() - t0,
+        detail: `เจอ ${ranked.length} จุด — รอผู้ใช้ติ๊ก`,
+        // `data` เก็บค่าแบบแบนเท่านั้น → สรุประดับการจับคู่เป็นข้อความเดียว
+        data: {
+          candidates: ranked.length,
+          queries: outcome.queries.length,
+          levels: Object.entries(levels)
+            .map(([level, count]) => `${level}:${count}`)
+            .join(" "),
+        },
+      });
+    }
+    if (activeScope && ranked.length === 0 && outcome.rawCount > 0) {
       diag.problem(
-        `ค้น Google แล้วได้ ${pool.length} จุด แต่ไม่มีจุดไหนอยู่ในขอบเขตที่ขอ ` +
+        `ค้น Google แล้วได้ ${outcome.rawCount} จุด แต่ไม่มีจุดไหนอยู่ในขอบเขตที่ขอ ` +
           `(ตำบล/อำเภอ) — ต้องเปิดเส้นทาง "ค้นใหม่ในชุมชน"`
+      );
+    }
+    // พื้นที่ที่ใช้กรองต่างจากที่รอบสรุปอ่านมา — บันทึกไว้ให้เห็นว่าใช้อันไหน
+    if (resAdmin && knownProvince && resAdmin.province !== knownProvince) {
+      diag.problem(
+        `พื้นที่จากหลักฐาน (${resAdmin.province}) ต่างจากที่รอบสรุปอ่านมา (${knownProvince}) — ใช้ตัวหนักฐาน`
       );
     }
   }
 
-  // Clean up internal fields before returning.
-  const { _transcript, _onScreenText, ...cleanSummary } = summary as any;
-  void _transcript; void _onScreenText;
   return {
     ...cleanSummary,
     place: {
-      ...place,
+      ...placeOut,
       google_candidates: ranked,
     },
   };
