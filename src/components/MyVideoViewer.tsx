@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from "react";
+import React, { useRef, useState } from "react";
 import {
   View,
   Text,
@@ -6,167 +6,131 @@ import {
   TouchableWithoutFeedback,
   TextInput,
   StatusBar,
-  StyleSheet,
   FlatList,
   useWindowDimensions,
   Platform,
   Alert,
   Modal,
   KeyboardAvoidingView,
-  ViewToken,
+  ActivityIndicator,
 } from "react-native";
-import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useVideoPlayer, VideoView } from "expo-video";
 import {
   ArrowLeftIcon,
-  PencilSquareIcon,
-  TrashIcon,
-  EyeIcon,
   XMarkIcon,
 } from "react-native-heroicons/outline";
-import { useMyProfile } from "../state/MyProfileContext";
-import { MyVideo } from "../data/profileLocalData";
+import type { VideoPost } from "../data/homeFeedData";
+import VideoFeedItem from "./VideoFeedItem";
+import SaveToFolderSheet from "./SaveToFolderSheet";
+import ShareSheet from "./ShareSheet";
 
 interface MyVideoViewerProps {
+  /** คลิปที่ผู้ใช้แตะเข้ามา */
   initialVideoId: string;
+  /** คลิปทั้งหมดที่เลื่อนดูได้ (คลิปของฉัน · คลิปที่ถูกใจ · คลิปที่บันทึก) */
+  posts: VideoPost[];
   onBack: () => void;
+  /** คลิปของตัวเองเอง → มีปุ่มแก้ไข/ลบ */
+  canEdit?: boolean;
+  /** แก้ไขคำบรรยาย + แฮทแท็ก */
+  onSaveEdit?: (
+    videoId: string,
+    patch: { caption: string; hashtags: string[] }
+  ) => Promise<void>;
+  /** ลบคลิปของตัวเอง */
+  onDelete?: (videoId: string) => Promise<void>;
 }
 
-function OwnVideoItem({
-  video,
-  isActive,
-  height,
-  topInset,
-  bottomInset,
-  onEdit,
+/** "ชายทะเล ทะเลไทย #เที่ยว #วันหยุด" → ["#เที่ยว", "#วันหยุด"] */
+function parseHashtags(raw: string): string[] {
+  return raw
+    .split(/[\s,]+/)
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .map((t) => (t.startsWith("#") ? t : `#${t}`));
+}
+
+/**
+ * ผู้ดูคลิปแบบเต็มจอ (ใช้ในหน้าโปรไฟล์)
+ * -------------------------------------------------------------
+ * ใช้ `VideoFeedItem` ตัวเดียวกับหน้าแรก → ไลก์ · คอมเมนต์ · เซฟ · แชร์
+ * ทำงานเหมือนกันเป๊ะ พร้อมตัวเลขจากฐานข้อมูล
+ * คลิปของตัวเองจะมีปุ่ม "แก้ไข" (แก้ได้แค่คำบรรยาย + แฮทแท็ก) และ "ลบ"
+ */
+export default function MyVideoViewer({
+  initialVideoId,
+  posts,
+  onBack,
+  canEdit,
+  onSaveEdit,
   onDelete,
-}: {
-  video: MyVideo;
-  isActive: boolean;
-  height: number;
-  topInset: number;
-  bottomInset: number;
-  onEdit: (v: MyVideo) => void;
-  onDelete: (v: MyVideo) => void;
-}) {
-  const [, setPlaying] = useState(true);
-  const player = useVideoPlayer(video.videoSource, (p) => {
-    p.loop = true;
-    if (isActive) p.play();
-  });
-
-  useEffect(() => {
-    if (!player) return;
-    if (isActive) {
-      player.play();
-      setPlaying(true);
-    } else {
-      player.pause();
-      setPlaying(false);
-    }
-  }, [isActive, player]);
-
-  const togglePlay = () => {
-    if (!player) return;
-    if (player.playing) {
-      player.pause();
-      setPlaying(false);
-    } else {
-      player.play();
-      setPlaying(true);
-    }
-  };
-
-  return (
-    <View style={{ width: "100%", height }} className="relative bg-black">
-      <View style={[StyleSheet.absoluteFill, { alignItems: "center", justifyContent: "center" }]}>
-        <VideoView
-          player={player}
-          style={{ width: "100%", height: "100%" }}
-          contentFit="contain"
-          nativeControls={false}
-        />
-      </View>
-      <TouchableWithoutFeedback onPress={togglePlay}>
-        <View style={StyleSheet.absoluteFill} />
-      </TouchableWithoutFeedback>
-
-      <LinearGradient
-        colors={["transparent", "rgba(0,0,0,0.35)", "rgba(0,0,0,0.9)"]}
-        style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 260 }}
-        pointerEvents="none"
-      />
-
-      {/* Owner action buttons */}
-      <View
-        style={{ position: "absolute", right: 14, bottom: bottomInset + 120 }}
-        className="items-center z-20"
-      >
-        <TouchableOpacity onPress={() => onEdit(video)} activeOpacity={0.8} className="items-center mb-5">
-          <View className="w-11 h-11 rounded-full bg-black/40 border border-white/20 items-center justify-center">
-            <PencilSquareIcon size={22} color="#FFFFFF" />
-          </View>
-          <Text className="text-white text-[11px] font-semibold mt-1">แก้ไข</Text>
-        </TouchableOpacity>
-        <TouchableOpacity onPress={() => onDelete(video)} activeOpacity={0.8} className="items-center">
-          <View className="w-11 h-11 rounded-full bg-black/40 border border-white/20 items-center justify-center">
-            <TrashIcon size={22} color="#F87171" />
-          </View>
-          <Text className="text-white text-[11px] font-semibold mt-1">ลบ</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Caption + views */}
-      <View style={{ position: "absolute", left: 16, right: 80, bottom: bottomInset + 24 }} className="z-20">
-        <View className="flex-row items-center mb-2">
-          <EyeIcon size={14} color="#FFFFFF" />
-          <Text className="text-white/90 text-[12px] ml-1 font-semibold">{video.views} ครั้ง</Text>
-        </View>
-        <Text className="text-white/95 text-[13px] leading-5">{video.caption}</Text>
-      </View>
-    </View>
-  );
-}
-
-export default function MyVideoViewer({ initialVideoId, onBack }: MyVideoViewerProps) {
+}: MyVideoViewerProps) {
   const insets = useSafeAreaInsets();
   const { height: screenHeight } = useWindowDimensions();
-  const { ownedVideos, updateVideoCaption, deleteVideo } = useMyProfile();
+  const isSmallDevice = screenHeight < 700;
+  const bottomOffset = 20;
 
-  const initialIndex = Math.max(0, ownedVideos.findIndex((v) => v.id === initialVideoId));
-  const [activeId, setActiveId] = useState(ownedVideos[initialIndex]?.id ?? "");
+  const initialIndex = Math.max(0, posts.findIndex((p) => p.id === initialVideoId));
+  const [activeId, setActiveId] = useState(posts[initialIndex]?.id ?? "");
 
-  const [editTarget, setEditTarget] = useState<MyVideo | null>(null);
+  // Sheets ระดับหน้าจอ (เหมือนหน้าแรก)
+  const [saveVideoId, setSaveVideoId] = useState<string | null>(null);
+  const [shareVideoId, setShareVideoId] = useState<string | null>(null);
+
+  // แก้ไขคำบรรยาย + แฮทแท็ก
+  const [editTarget, setEditTarget] = useState<VideoPost | null>(null);
   const [draftCaption, setDraftCaption] = useState("");
+  const [draftHashtags, setDraftHashtags] = useState("");
+  const [saving, setSaving] = useState(false);
 
   const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 60 }).current;
-  const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: ViewToken[] }) => {
-    if (viewableItems.length > 0 && viewableItems[0].item) {
-      setActiveId((viewableItems[0].item as MyVideo).id);
+  const onViewableItemsChanged = useRef(
+    ({ viewableItems }: { viewableItems: { item?: unknown }[] }) => {
+      const first = viewableItems[0]?.item as VideoPost | undefined;
+      if (first?.id) setActiveId(first.id);
     }
-  }).current;
+  ).current;
 
-  // If list becomes empty after deletes, go back.
-  useEffect(() => {
-    if (ownedVideos.length === 0) onBack();
-  }, [ownedVideos.length, onBack]);
+  const openEdit = (videoId: string) => {
+    const post = posts.find((p) => p.id === videoId);
+    if (!post) return;
+    setEditTarget(post);
+    setDraftCaption(post.caption);
+    setDraftHashtags(post.hashtags.join(" "));
+  };
 
-  const handleDelete = (v: MyVideo) => {
-    Alert.alert("ลบคลิป", `ต้องการลบคลิปนี้ออกจากโปรไฟล์ใช่ไหม?`, [
+  const saveEdit = async () => {
+    if (!editTarget || !onSaveEdit) return;
+    setSaving(true);
+    try {
+      await onSaveEdit(editTarget.id, {
+        caption: draftCaption.trim(),
+        hashtags: parseHashtags(draftHashtags),
+      });
+      setEditTarget(null);
+    } catch (err: any) {
+      Alert.alert("บันทึกไม่สำเร็จ", err?.message ?? String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const confirmDelete = (videoId: string) => {
+    Alert.alert("ลบคลิป", "ต้องการลบคลิปนี้ออกจากโปรไฟล์ใช่ไหม?", [
       { text: "ยกเลิก", style: "cancel" },
-      { text: "ลบ", style: "destructive", onPress: () => deleteVideo(v.id) },
+      {
+        text: "ลบ",
+        style: "destructive",
+        onPress: () => {
+          if (!onDelete) return;
+          onDelete(videoId)
+            .then(() => onBack())
+            .catch((err: any) =>
+              Alert.alert("ลบคลิปไม่สำเร็จ", err?.message ?? String(err))
+            );
+        },
+      },
     ]);
-  };
-
-  const openEdit = (v: MyVideo) => {
-    setEditTarget(v);
-    setDraftCaption(v.caption);
-  };
-
-  const saveCaption = () => {
-    if (editTarget) updateVideoCaption(editTarget.id, draftCaption);
-    setEditTarget(null);
   };
 
   return (
@@ -184,20 +148,27 @@ export default function MyVideoViewer({ initialVideoId, onBack }: MyVideoViewerP
       </TouchableOpacity>
 
       <FlatList
-        data={ownedVideos}
-        keyExtractor={(v) => v.id}
-        initialScrollIndex={initialIndex}
+        data={posts}
+        keyExtractor={(p) => p.id}
+        initialScrollIndex={posts.length > 0 ? initialIndex : undefined}
         getItemLayout={(_, index) => ({ length: screenHeight, offset: screenHeight * index, index })}
         renderItem={({ item }) => (
-          <OwnVideoItem
-            video={item}
-            isActive={item.id === activeId}
-            height={screenHeight}
-            topInset={insets.top}
-            bottomInset={Math.max(insets.bottom, 20)}
-            onEdit={openEdit}
-            onDelete={handleDelete}
-          />
+          <View style={{ height: screenHeight, width: "100%" }}>
+            <VideoFeedItem
+              post={item}
+              isActive={item.id === activeId}
+              screenHeight={screenHeight}
+              isSmallDevice={isSmallDevice}
+              bottomOffset={bottomOffset}
+              topInset={insets.top}
+              headerTitle={canEdit ? "คลิปของฉัน" : "คลิปที่เลือก"}
+              hideFollowButton={canEdit}
+              onRequestEdit={canEdit ? openEdit : undefined}
+              onRequestDelete={canEdit && onDelete ? confirmDelete : undefined}
+              onRequestSave={(videoId) => setSaveVideoId(videoId)}
+              onRequestShare={(videoId) => setShareVideoId(videoId)}
+            />
+          </View>
         )}
         pagingEnabled
         showsVerticalScrollIndicator={false}
@@ -209,8 +180,27 @@ export default function MyVideoViewer({ initialVideoId, onBack }: MyVideoViewerP
         onViewableItemsChanged={onViewableItemsChanged}
       />
 
-      {/* Edit caption modal */}
-      <Modal visible={editTarget !== null} transparent animationType="slide" onRequestClose={() => setEditTarget(null)}>
+      {/* Save-to-folder sheet */}
+      <SaveToFolderSheet
+        visible={saveVideoId !== null}
+        videoId={saveVideoId}
+        onClose={() => setSaveVideoId(null)}
+      />
+
+      {/* Share sheet */}
+      <ShareSheet
+        visible={shareVideoId !== null}
+        videoId={shareVideoId}
+        onClose={() => setShareVideoId(null)}
+      />
+
+      {/* แก้ไขคำบรรยาย + แฮทแท็ก */}
+      <Modal
+        visible={editTarget !== null}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setEditTarget(null)}
+      >
         <TouchableWithoutFeedback onPress={() => setEditTarget(null)}>
           <View className="flex-1 bg-black/50" />
         </TouchableWithoutFeedback>
@@ -220,23 +210,44 @@ export default function MyVideoViewer({ initialVideoId, onBack }: MyVideoViewerP
             style={{ paddingBottom: Math.max(insets.bottom, 14) + 10 }}
           >
             <View className="flex-row items-center justify-between mb-3">
-              <Text className="text-lg font-black text-gray-900">แก้ไขคำบรรยาย</Text>
+              <Text className="text-lg font-black text-gray-900">แก้ไขข้อมูลคลิป</Text>
               <TouchableOpacity onPress={() => setEditTarget(null)} className="p-1">
                 <XMarkIcon size={22} color="#6B7280" />
               </TouchableOpacity>
             </View>
+
+            <Text className="text-gray-500 text-[12px] mb-1.5">คำบรรยาย</Text>
             <TextInput
               value={draftCaption}
               onChangeText={setDraftCaption}
               placeholder="เขียนคำบรรยายคลิป..."
               placeholderTextColor="#9CA3AF"
               multiline
-              autoFocus
               className="bg-gray-100 rounded-xl px-3.5 py-3 text-[14px] text-gray-900 mb-4"
               style={{ minHeight: 90, textAlignVertical: "top" }}
             />
-            <TouchableOpacity onPress={saveCaption} activeOpacity={0.85} className="bg-[#2D6A4F] py-3.5 rounded-2xl items-center">
-              <Text className="text-white font-bold text-[15px]">บันทึก</Text>
+
+            <Text className="text-gray-500 text-[12px] mb-1.5">แฮทแท็ก</Text>
+            <TextInput
+              value={draftHashtags}
+              onChangeText={setDraftHashtags}
+              placeholder="#เที่ยว #ธรรมชาติ (คั่นด้วยช่องว่าง)"
+              placeholderTextColor="#9CA3AF"
+              autoCapitalize="none"
+              className="bg-gray-100 rounded-xl px-3.5 py-3 text-[14px] text-gray-900 mb-4"
+            />
+
+            <TouchableOpacity
+              onPress={saveEdit}
+              disabled={saving}
+              activeOpacity={0.85}
+              className={`py-3.5 rounded-2xl items-center ${saving ? "bg-gray-300" : "bg-[#2D6A4F]"}`}
+            >
+              {saving ? (
+                <ActivityIndicator color="#FFFFFF" />
+              ) : (
+                <Text className="text-white font-bold text-[15px]">บันทึก</Text>
+              )}
             </TouchableOpacity>
           </View>
         </KeyboardAvoidingView>

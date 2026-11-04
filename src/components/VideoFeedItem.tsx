@@ -33,6 +33,8 @@ import {
   HomeModernIcon,
   ArrowRightIcon,
   PlusIcon,
+  PencilSquareIcon,
+  TrashIcon,
   MapIcon as MapOutline,
 } from "react-native-heroicons/outline";
 
@@ -57,6 +59,14 @@ export interface VideoFeedItemProps {
   onOpenProfile?: (authorId: string) => void;
   onRequestSave?: (videoId: string) => void;
   onRequestShare?: (videoId: string) => void;
+  /** ปุ่ม "แก้ไข" ในแถบด้านขวา — ใช้ตอนดูคลิปของตัวเองในหน้าโปรไฟล์ */
+  onRequestEdit?: (videoId: string) => void;
+  /** ปุ่ม "ลบ" ในแถบด้านขวา — เฉพาะคลิปของตัวเอง */
+  onRequestDelete?: (videoId: string) => void;
+  /** คลิปของตัวเองเอง → ไม่ต้องมีปุ่ม "ติดตาม" */
+  hideFollowButton?: boolean;
+  /** หัวข้อกลางหน้าจอ (หน้าแรกใช้ "สำหรับคุณ") */
+  headerTitle?: string;
 }
 
 export default function VideoFeedItem({
@@ -71,6 +81,10 @@ export default function VideoFeedItem({
   onOpenProfile,
   onRequestSave,
   onRequestShare,
+  onRequestEdit,
+  onRequestDelete,
+  hideFollowButton,
+  headerTitle,
 }: VideoFeedItemProps) {
   // Action-driven state from the global interaction store (real taps only)
   const { isLiked: isLikedFn, isSaved: isSavedFn, toggleLike, isFollowing: isFollowingFn, toggleFollow } =
@@ -92,8 +106,8 @@ export default function VideoFeedItem({
     (post.initialSaves ?? 0) + (isSaved ? 1 : 0) - (post.initialSaved ? 1 : 0)
   );
   const sharesCount = post.initialShares ?? 0;
-  // Comment count = real count from the DB.
-  const commentCount = post.initialComments ?? 0;
+  // Comment count = real count from the DB (อัปเดตสดเมื่อมีคอมเมนต์ใหม่)
+  const [commentCount, setCommentCount] = useState<number>(post.initialComments ?? 0);
 
   const [showComments, setShowComments] = useState<boolean>(false);
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
@@ -281,7 +295,7 @@ export default function VideoFeedItem({
         {/* Center Tab: "สำหรับคุณ" */}
         <View className="items-center">
           <Text className="text-white text-base font-bold tracking-wide">
-            สำหรับคุณ
+            {headerTitle ?? "สำหรับคุณ"}
           </Text>
           <View className="h-0.5 w-10 bg-[#00D26A] rounded-full mt-1.5" />
         </View>
@@ -363,19 +377,21 @@ export default function VideoFeedItem({
               className="border-2 border-white"
             />
           </TouchableOpacity>
-          {/* Follow Button (hidden when already following) */}
-          <TouchableOpacity
-            onPress={() => toggleFollow(post.authorId)}
-            activeOpacity={0.8}
-            className={`w-5 h-5 rounded-full items-center justify-center -mt-2.5 border border-white ${isFollowing ? "bg-[#00D26A]" : "bg-[#EA580C]"
-              }`}
-          >
-            {isFollowing ? (
-              <CheckIcon size={12} color="#FFFFFF" strokeWidth={3} />
-            ) : (
-              <PlusIcon size={13} color="#FFFFFF" strokeWidth={3} />
-            )}
-          </TouchableOpacity>
+          {/* Follow Button (hidden when already following / คลิปของตัวเอง) */}
+          {!hideFollowButton && (
+            <TouchableOpacity
+              onPress={() => toggleFollow(post.authorId)}
+              activeOpacity={0.8}
+              className={`w-5 h-5 rounded-full items-center justify-center -mt-2.5 border border-white ${isFollowing ? "bg-[#00D26A]" : "bg-[#EA580C]"
+                }`}
+            >
+              {isFollowing ? (
+                <CheckIcon size={12} color="#FFFFFF" strokeWidth={3} />
+              ) : (
+                <PlusIcon size={13} color="#FFFFFF" strokeWidth={3} />
+              )}
+            </TouchableOpacity>
+          )}
         </View>
 
         {/* Like Button (Individual State) */}
@@ -439,6 +455,34 @@ export default function VideoFeedItem({
           </View>
           <Text className="text-white text-[11px] font-semibold mt-0.5">{formatCount(sharesCount)}</Text>
         </TouchableOpacity>
+
+        {/* Edit Button — only for the owner's own clip (หน้าโปรไฟล์) */}
+        {onRequestEdit && (
+          <TouchableOpacity
+            onPress={() => onRequestEdit(post.id)}
+            activeOpacity={0.7}
+            className="items-center mb-4"
+          >
+            <View className="w-10 h-10 items-center justify-center">
+              <PencilSquareIcon size={28} color="#FFFFFF" strokeWidth={1.8} />
+            </View>
+            <Text className="text-white text-[11px] font-semibold mt-0.5">แก้ไข</Text>
+          </TouchableOpacity>
+        )}
+
+        {/* Delete Button — only for the owner's own clip */}
+        {onRequestDelete && (
+          <TouchableOpacity
+            onPress={() => onRequestDelete(post.id)}
+            activeOpacity={0.7}
+            className="items-center mb-4"
+          >
+            <View className="w-10 h-10 items-center justify-center">
+              <TrashIcon size={26} color="#F87171" strokeWidth={1.8} />
+            </View>
+            <Text className="text-white text-[11px] font-semibold mt-0.5">ลบ</Text>
+          </TouchableOpacity>
+        )}
 
         {/* Vinyl Music Record (Spinning) */}
         <Animated.View
@@ -530,6 +574,9 @@ export default function VideoFeedItem({
       <CommentSheet
         visible={showComments}
         postId={post.id}
+        post={post}
+        initialCount={post.initialComments}
+        onCountChange={setCommentCount}
         onClose={() => setShowComments(false)}
       />
     </View>

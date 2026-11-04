@@ -192,9 +192,9 @@ export function formatClosedDaysStr(days: string[]): string {
 }
 
 export interface ParsedGoogleHours {
-  /** Hours for จ.-ศ., e.g. "08:00 – 17:00". Empty when the whole group is closed. */
+  /** Hours of the weekday group (default จ.-ศ.), e.g. "08:00 – 17:00". Empty when the whole group is closed. */
   weekdayHours: string;
-  /** Hours for ส.-อา. */
+  /** Hours of the weekend group (default ส.-อา.). */
   weekendHours: string;
   /** Keys of days Google lists as closed, e.g. ["อา"]. */
   closedDayKeys: string[];
@@ -215,11 +215,18 @@ export interface ParsedGoogleHours {
  * 08:30-18:00 at the weekend lost the weekend hours entirely. That's the bug
  * this replaces.
  *
+ * `groups` lets the caller say which days count as "weekday" and which as
+ * "weekend". The form's two boxes are not always จ.-ศ. / ส.-อา. — a Thai
+ * homestay checks guests in on Friday, so its groups are อา.-พฤ. / ศ.-ส. Without
+ * this, Friday's hours would land in the "วันธรรมดา" box. Omit `groups` and
+ * the split stays จ.-ศ. / ส.-อา.
+ *
  * Returns null when the string has no recognisable day, so callers can tell
  * "Google has no hours" apart from "Google says closed all week".
  */
 export function parseOpeningHours(
-  raw: string | null | undefined
+  raw: string | null | undefined,
+  groups?: { weekdayKeys?: string[] | null; weekendKeys?: string[] | null }
 ): ParsedGoogleHours | null {
   if (!raw) return null;
 
@@ -241,8 +248,8 @@ export function parseOpeningHours(
 
   if (byKey.size === 0) return null;
 
-  const weekdayKeys = ["จ", "อ", "พ", "พฤ", "ศ"];
-  const weekendKeys = ["ส", "อา"];
+  const weekdayKeys = groups?.weekdayKeys?.length ? groups.weekdayKeys : ["จ", "อ", "พ", "พฤ", "ศ"];
+  const weekendKeys = groups?.weekendKeys?.length ? groups.weekendKeys : ["ส", "อา"];
 
   const group = (keys: string[]): { hours: string; mixed: boolean } => {
     const open = keys.map((k) => byKey.get(k)).filter((v): v is string => Boolean(v));

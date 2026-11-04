@@ -37,20 +37,28 @@ const CONFIRM_WORD = "ลบบัญชี";
 const DELETION_BULLETS = [
   "วิดีโอทุกคลิป รูป thumbnail และไฟล์ใน Storage ทั้งหมด",
   "ไลก์ เซฟ คอมเมนต์ รวมถึงรูปและวิดีโอในคอมเมนต์",
-  "โฟลเดอร์ที่บันทึกไว้ และคลิปที่เพิ่มร่วมกับผู้อื่น",
-  "แชทและข้อความทุกห้องที่คุณเป็นสมาชิก",
-  "ทริปที่วางแผนไว้ และการจองทุกรายการ",
-  "รูปโปรไฟล์ bio และข้อมูล OTOP (ถ้าเคยลงทะเบียนเป็นเจ้าของชุมชน)",
+  "โฟลเดอร์ที่คุณเป็นเจ้าของ และสถานที่ที่คุณบันทึกไว้",
+  "ทริปที่วางแผนไว้ การจอง และสแตมป์ของคุณ",
+  "รูปโปรไฟล์ ไบโอ และการเป็นสมาชิกในห้องแชททั้งหมด",
 ];
 
-// Visible-but-kept behaviour (schema-level ON DELETE SET NULL).
-const SURVIVOR_NOTE =
-  "ชุมชน/สถานที่ที่คุณเคยเพิ่มเข้าระบบจะยังคงอยู่ในผลการค้นหา แต่จะไม่มีชื่อเจ้าของแสดง";
+/**
+ * กฎของระบบ: ลบบัญชี = ลบแค่ของตัวเอง · ของคนอื่นต้องอยู่ครบ
+ * ตัวอย่างที่ชัดที่สุด: ไลก์ที่เรากดบนคลิปของคนอื่น → หายแค่ "ร่องรอยของเรา"
+ * (แถว video_likes) ส่วนคลิปของเขายังอยู่ และจำนวนไลก์ของเขาลดลงถูกต้อง
+ */
+const OTHER_PEOPLE_NOTE =
+  "ข้อมูลของคนอื่นจะไม่หายไปด้วย เช่น คลิปที่คนอื่นเป็นเจ้าของยังอยู่ครบ หายแค่ร่องรอยของคุณ เช่น ไลก์ที่คุณกดไว้บนคลิปนั้น";
 
-// Side-effects a host needs to know about before pulling the trigger
-// (services/bookings owned by their community also disappear).
-const HOST_CASCADE_NOTE =
-  "หากคุณเคยเป็นเจ้าของชุมชน: การจองและแสตมป์ที่นักท่องเที่ยวคนอื่นทำไว้กับชุมชนของคุณจะหายไปด้วย";
+// Visible-but-kept behaviour (schema-level ON DELETE SET NULL).
+// เก็บไว้เพราะการลบทิ้ง = ลบของคนอื่น (ข้อความในห้องแชทร่วม, โฟลเดอร์ของคนอื่น)
+const SURVIVOR_NOTE =
+  "บางอย่างจะยังอยู่โดยไม่มีชื่อคุณ เช่น สถานที่ที่คุณลงทะเบียนไว้ ข้อความที่คุณพิมพ์ และคลิปที่คุณเพิ่มในโฟลเดอร์ของคนอื่น";
+
+// Side-effects a host needs to know about before pulling the trigger.
+// หลังแก้ FK แล้ว ชุมชนจะไม่หายตามบัญชี → ของนักท่องเที่ยวคนอื่นไม่หาย
+const HOST_SURVIVE_NOTE =
+  "หากคุณเคยเป็นเจ้าของชุมชน: ชุมชนและบริการของชุมชนจะยังอยู่ และการจอง/สแตมป์ที่นักท่องเที่ยวคนอื่นทำไว้จะไม่หายไปด้วย — เพียงแต่ชุมชนจะไม่มีชื่อคุณเป็นเจ้าของ";
 
 interface DeleteAccountSheetProps {
   visible: boolean;
@@ -182,17 +190,24 @@ export default function DeleteAccountSheet({
               </View>
             ))}
 
+            {/* กฎของระบบ — ของคนอื่นไม่หายตาม */}
+            <View className="mt-3 rounded-2xl bg-emerald-50 border border-emerald-200 px-3.5 py-3">
+              <Text className="text-[13px] text-emerald-800 leading-[19px]">
+                {OTHER_PEOPLE_NOTE}
+              </Text>
+            </View>
+
             {/* Caveat box — accent in yellow so it reads as info, not alarm. */}
-            <View className="mt-3 rounded-2xl bg-amber-50 border border-amber-200 px-3.5 py-3">
+            <View className="mt-2 rounded-2xl bg-amber-50 border border-amber-200 px-3.5 py-3">
               <Text className="text-[13px] text-amber-800 leading-[19px]">
                 {SURVIVOR_NOTE}
               </Text>
             </View>
 
             {isHost ? (
-              <View className="mt-2 rounded-2xl bg-red-50 border border-red-200 px-3.5 py-3">
-                <Text className="text-[13px] text-red-700 leading-[19px]">
-                  {HOST_CASCADE_NOTE}
+              <View className="mt-2 rounded-2xl bg-gray-50 border border-gray-200 px-3.5 py-3">
+                <Text className="text-[13px] text-gray-700 leading-[19px]">
+                  {HOST_SURVIVE_NOTE}
                 </Text>
               </View>
             ) : null}

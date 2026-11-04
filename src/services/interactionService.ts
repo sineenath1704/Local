@@ -1,11 +1,16 @@
 import { supabase, isSupabaseConfigured } from "../lib/supabase";
 import { VideoPost } from "../data/homeFeedData";
+import { rowToPost } from "./feedService";
 
 /**
  * Interaction service — likes & saves backed by Supabase (per-user).
  * -------------------------------------------------------------
  * video_likes / video_saves hold (user_id, video_id). Counter columns on
  * `videos` are maintained by DB triggers (bump_video_likes / _saves).
+ *
+ * ⚠️ ทุกฟังก์ชันที่ "เขียน" จะ **โยน error** เมื่อ query ล้มเหลว
+ *   (เคยแค่ log ไว้ → หน้าจอบอกว่าสำเร็จทั้งที่ไม่มีอะไรถูกบันทึก)
+ *   ผู้เรียกต้อง catch แล้ว rollback + แจ้งผู้ใช้
  */
 
 async function currentUid(): Promise<string | null> {
@@ -35,79 +40,84 @@ export async function loadMyInteractions(): Promise<{ likedIds: string[]; savedI
 
 export async function likeVideo(videoId: string): Promise<void> {
   const uid = await currentUid();
-  if (!uid) return;
-  const { error } = await supabase.from("video_likes").insert({ user_id: uid, video_id: videoId });
-  console.log("[like] insert", videoId, "error =", error ? JSON.stringify(error) : "none");
+  if (!uid) throw new Error("กรุณาเข้าสู่ระบบก่อนกดไลก์");
+  // upsert → กดซ้ำไม่ error (23505)
+  const { error } = await supabase
+    .from("video_likes")
+    .upsert({ user_id: uid, video_id: videoId }, { onConflict: "user_id,video_id" });
+  console.log("[like] upsert", videoId, "error =", error ? JSON.stringify(error) : "none");
+  if (error) throw new Error(`กดไลก์ไม่สำเร็จ: ${error.message}`);
 }
 
 export async function unlikeVideo(videoId: string): Promise<void> {
   const uid = await currentUid();
-  if (!uid) return;
+  if (!uid) throw new Error("กรุณาเข้าสู่ระบบก่อนกดไลก์");
   const { error } = await supabase.from("video_likes").delete().eq("user_id", uid).eq("video_id", videoId);
   console.log("[like] delete", videoId, "error =", error ? JSON.stringify(error) : "none");
+  if (error) throw new Error(`เอาไลก์ออกไม่สำเร็จ: ${error.message}`);
 }
 
 export async function saveVideoRow(videoId: string): Promise<void> {
   const uid = await currentUid();
-  if (!uid) return;
-  const { error } = await supabase.from("video_saves").insert({ user_id: uid, video_id: videoId });
-  console.log("[save] insert", videoId, "error =", error ? JSON.stringify(error) : "none");
+  if (!uid) throw new Error("กรุณาเข้าสู่ระบบก่อนบันทึกคลิป");
+  const { error } = await supabase
+    .from("video_saves")
+    .upsert({ user_id: uid, video_id: videoId }, { onConflict: "user_id,video_id" });
+  console.log("[save] upsert", videoId, "error =", error ? JSON.stringify(error) : "none");
+  if (error) throw new Error(`บันทึกคลิปไม่สำเร็จ: ${error.message}`);
 }
 
 export async function unsaveVideoRow(videoId: string): Promise<void> {
   const uid = await currentUid();
-  if (!uid) return;
+  if (!uid) throw new Error("กรุณาเข้าสู่ระบบก่อนบันทึกคลิป");
   const { error } = await supabase.from("video_saves").delete().eq("user_id", uid).eq("video_id", videoId);
   console.log("[save] delete", videoId, "error =", error ? JSON.stringify(error) : "none");
-}
-
-/** VideoRow → VideoPost (same mapping the feed uses). */
-function rowToPost(row: any): VideoPost {
-  const author = row.users;
-  return {
-    id: row.id,
-    authorId: row.user_id,
-    videoSource: { uri: row.video_url },
-    poster: row.thumbnail_url ? { uri: row.thumbnail_url } : undefined,
-    author: {
-      name: author?.display_name ?? "ชุมชน",
-      handle: author?.username ?? "@local",
-      avatar: author?.avatar_url ? { uri: author.avatar_url } : undefined,
-    },
-    location: {
-      village: row.location_name ?? "",
-      district: row.district ? `อ.${row.district}` : "",
-      province: row.province ?? "",
-    },
-    caption: row.caption ?? "",
-    hashtags: Array.isArray(row.hashtags) ? row.hashtags.filter((x: unknown) => typeof x === "string") : [],
-    booking: { roomsText: "เปิดรับนักท่องเที่ยว", price: 0 },
-    initialLikes: row.likes_count ?? 0,
-    initialComments: row.comments_count ?? 0,
-    initialSaves: row.saves_count ?? 0,
-    initialShares: row.shares_count ?? 0,
-    initialLiked: false,
-    initialSaved: false,
-  };
+  if (error) throw new Error(`เอาคลิปออกจากที่บันทึกไม่สำเร็จ: ${error.message}`);
 }
 
 const VIDEO_SELECT =
-  "id, user_id, video_url, thumbnail_url, caption, hashtags, location_name, province, district, likes_count, comments_count, saves_count, shares_count, created_at, users!left(id, display_name, username, avatar_url)";
+  "id, user_id, video_url, thumbnail_url, caption, hashtags, location_name, province, district, likes_count, comments_count, saves_count, shares_count, created_at";
 
-/** Videos the current user LIKED (newest first), resolved to full posts. */
+/** โหลดผู้ใช้ (ผู้เขียนคลิป) มาเติมในโพสต์ — แยก query ไม่ join เพื่อไม่ต้องพึ่ง FK ของ PostgREST */
+async function attachAuthors(rows: any[]): Promise<any[]> {
+  const authorIds = Array.from(new Set(rows.map((r: any) => r.user_id).filter(Boolean)));
+  if (authorIds.length === 0) return rows;
+  const { data: users } = await supabase
+    .from("users")
+    .select("id, display_name, username, avatar_url")
+    .in("id", authorIds);
+  const userById = new Map((users ?? []).map((u: any) => [u.id, u]));
+  return rows.map((r: any) => ({ ...r, users: userById.get(r.user_id) ?? null }));
+}
+
+/**
+ * Videos the current user LIKED (newest first), resolved to full posts.
+ * โยน error เมื่อ query ล้มเหลว (เช่น ยังไม่ได้ grant ตาราง) — เพื่อให้หน้าโปรไฟล์
+ * แยก "ไม่มีคลิปที่ถูกใจ" ออกจาก "โหลดไม่สำเร็จ" ได้
+ */
 export async function loadLikedVideos(): Promise<VideoPost[]> {
   if (!isSupabaseConfigured) return [];
   const uid = await currentUid();
   if (!uid) return [];
-  const { data: likes } = await supabase
+  const { data: likes, error: le } = await supabase
     .from("video_likes")
     .select("video_id, created_at")
     .eq("user_id", uid)
     .order("created_at", { ascending: false });
+  if (le) {
+    console.warn("[loadLikedVideos] likes error =", JSON.stringify(le));
+    throw new Error(`โหลดคลิปที่ถูกใจไม่สำเร็จ: ${le.message}`);
+  }
   const ids = (likes ?? []).map((r: any) => r.video_id);
   if (ids.length === 0) return [];
-  const { data } = await supabase.from("videos").select(VIDEO_SELECT).in("id", ids);
-  return (data ?? []).map(rowToPost);
+  const { data, error } = await supabase.from("videos").select(VIDEO_SELECT).in("id", ids);
+  if (error) {
+    console.warn("[loadLikedVideos] videos error =", JSON.stringify(error));
+    throw new Error(`โหลดคลิปที่ถูกใจไม่สำเร็จ: ${error.message}`);
+  }
+  const rows = await attachAuthors(data ?? []);
+  const likedIds = new Set(ids);
+  return rows.map((r) => rowToPost(r, likedIds, new Set<string>()));
 }
 
 /** Videos the current user SAVED (optionally only those in a given folder). */
@@ -115,15 +125,14 @@ export async function loadSavedVideos(videoIds: string[]): Promise<VideoPost[]> 
   if (!isSupabaseConfigured || videoIds.length === 0) return [];
   const { data, error } = await supabase
     .from("videos")
-    .select("id, user_id, video_url, thumbnail_url, caption, hashtags, location_name, province, district, likes_count, comments_count, saves_count, shares_count, created_at")
+    .select(VIDEO_SELECT)
     .in("id", videoIds);
   console.log("[loadSavedVideos] ids =", videoIds.length, "rows =", data?.length ?? 0, "error =", error ? JSON.stringify(error) : "none");
-  if (error || !data) return [];
+  if (error || !data) {
+    throw new Error(`โหลดคลิปที่บันทึกไม่สำเร็จ: ${error?.message ?? "ไม่ทราบสาเหตุ"}`);
+  }
 
-  // Fetch authors separately (avoid join recursion).
-  const authorIds = Array.from(new Set(data.map((r: any) => r.user_id)));
-  const { data: users } = await supabase.from("users").select("id, display_name, username, avatar_url").in("id", authorIds);
-  const userById = new Map((users ?? []).map((u: any) => [u.id, u]));
-
-  return data.map((r: any) => rowToPost({ ...r, users: userById.get(r.user_id) ?? null }));
+  const rows = await attachAuthors(data);
+  const savedIds = new Set(videoIds);
+  return rows.map((r) => rowToPost(r, new Set<string>(), savedIds));
 }

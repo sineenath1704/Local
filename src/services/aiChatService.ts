@@ -1,5 +1,6 @@
 import { API_TIMEOUT_MS } from "./apiConfig";
 import { aiFetch, AiError, AiFetchOptions, toastAiError } from "./aiHttp";
+import type { PlaceChoice, ClipContext, TripDraft, TripSlots } from "../data/tripsData";
 
 export interface ChatTurn {
   role: "user" | "assistant";
@@ -9,6 +10,66 @@ export interface ChatTurn {
 export interface FolderContext {
   folderName: string;
   places: string[];
+}
+
+/**
+ * คำตอบจาก backend — ถ้าชื่อสถานที่ที่ถามซ้ำกันหลายแห่ง
+ * จะมี `placeCandidates` ให้ผู้ใช้เลือก (ไม่มี = คำตอบธรรมดา)
+ */
+export interface ChatReply {
+  reply: string;
+  placeCandidates?: PlaceChoice[];
+  /**
+   * สถานะข้อมูลแผนทริป — มีเฉพาะตอนที่เอไaiกำลังช่วยวางแผนทริป
+   * (ไม่มี = ข้อความธรรมดา → ห้ามแสดงปุ่มแผน)
+   */
+  tripDraft?: TripDraft;
+}
+
+/**
+ * อ่าน `tripDraft` ที่ backend ส่งกลับมา
+ * ค่าที่ผิดรูปแบบ → ทิ้งทั้งก้อน (ไม่ทำให้แชทพัง)
+ */
+function parseTripDraft(raw: unknown): TripDraft | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const d = raw as Record<string, unknown>;
+  if (!d.slots || typeof d.slots !== "object") return undefined;
+  const slots = d.slots as TripSlots;
+  const missing = Array.isArray(d.missing)
+    ? d.missing.filter((m): m is string => typeof m === "string")
+    : [];
+  return {
+    slots,
+    missing,
+    planReady: d.planReady === true,
+  };
+}
+
+/** แปลงรายการสถานที่จาก backend → ใช้เฉพาะที่มี placeId+name จริง */
+function parsePlaceCandidates(raw: unknown): PlaceChoice[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const list: PlaceChoice[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const c = item as Record<string, unknown>;
+    if (typeof c.placeId !== "string" || !c.placeId.trim()) continue;
+    if (typeof c.name !== "string" || !c.name.trim()) continue;
+    const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+    const str = (v: unknown) => (typeof v === "string" && v.trim() ? v : null);
+    list.push({
+      placeId: c.placeId.trim(),
+      name: c.name.trim(),
+      address: str(c.address),
+      province: str(c.province),
+      district: str(c.district),
+      subdistrict: str(c.subdistrict),
+      community: str(c.community),
+      rating: num(c.rating),
+      userRatingsTotal: num(c.userRatingsTotal),
+      googleMapsUrl: str(c.googleMapsUrl),
+    });
+  }
+  return list.length > 0 ? list : undefined;
 }
 
 /** Every call raises a toast on failure, then rethrows for the caller to render. */
@@ -50,12 +111,36 @@ export interface SendChatOptions {
    * ถ้าไม่ส่ง backend จะเดาจากชื่อชุมชนในข้อความแทน
    */
   communityId?: string | null;
+  /**
+   * place_id ของสถานที่ที่ผู้ใช้เลือกจากรายการ (กรณีชื่อซ้ำ)
+   * → backend ดึงรายละเอียดของอันนี้ตรง ๆ ไม่ต้องค้นชื่อใหม่
+   * ส่ง "ตัวระบุ" เท่านั้น — ไม่ส่งข้อมูลสถานที่มาเอง
+   */
+  placeId?: string | null;
+  /** ชื่อสถานที่ที่ผู้ใช้เลือก (กันไว้ให้ backend รู้ว่าเลือกอันไหน) */
+  placeName?: string | null;
+  /**
+   * บริบทจากคลิปที่ผู้ใช้กูลับมาแชท (ปุ่ม "คุยต่อกับ AI เรื่องนี้")
+   * → backend แทรกเป็นบล็อกแยกใน system prompt ให้โมเดลยึดเป็นข้อมูลหลัก
+   * (ชื่อสถานที่ ที่ตั้ง ราคา เวลาเปิด กติกา วิธีเดินทางที่พูดในคลิป)
+   */
+  clipContext?: ClipContext | null;
+  /**
+   * ช่องข้อมูลแผนทริปที่ผู้ใช้ให้ไว้แล้ว (สะสม) → backend merge กับค่าที่โมเดลสกัดใหม่
+   * ค่าที่โมเดลไม่รู้ (null) จะไม่ทับค่านี้
+   */
+  tripDraft?: TripSlots | null;
+  /**
+   * แผนทริปที่กำลังจะให้เอไaiแก้ไข (จาก ItineraryViewer) → แทรกเป็นบล็อกข้อมูล
+   * ใน system prompt เพื่อให้เอไaiรู้ว่าแก้อะไรจากแผนเดิม
+   */
+  planContext?: unknown;
 }
 
 export async function sendChat(
   messages: ChatTurn[],
   folderOrOpts?: FolderContext | SendChatOptions,
-): Promise<string> {
+): Promise<ChatReply> {
   // Two call shapes accepted: (messages, folderCtx) — the legacy one — or
   // (messages, opts). The cleanest discriminator is `mode` and `token`,
   // which never existed on the legacy `FolderContext`.
@@ -87,7 +172,11 @@ export async function sendChat(
     headers.Authorization = `Bearer ${opts.token}`;
   }
 
-  const data = await withToast<{ reply?: unknown }>({
+  const data = await withToast<{
+    reply?: unknown;
+    placeCandidates?: unknown;
+    tripDraft?: unknown;
+  }>({
     label: "ai-chat",
     path: "/ai-chat",
     method: "POST",
@@ -98,6 +187,11 @@ export async function sendChat(
       folderId: opts.folderId ?? undefined,
       mode: opts.mode ?? "tourist",
       communityId: opts.communityId ?? undefined,
+      placeId: opts.placeId ?? undefined,
+      placeName: opts.placeName ?? undefined,
+      clipContext: opts.clipContext ?? undefined,
+      tripDraft: opts.tripDraft ?? undefined,
+      planContext: opts.planContext ?? undefined,
     },
     timeoutMs: API_TIMEOUT_MS * 3,
   });
@@ -114,5 +208,11 @@ export async function sendChat(
       timeoutMs: API_TIMEOUT_MS * 3,
     });
   }
-  return data.reply;
+  const placeCandidates = parsePlaceCandidates(data.placeCandidates);
+  const tripDraft = parseTripDraft(data.tripDraft);
+  return {
+    reply: data.reply,
+    ...(placeCandidates ? { placeCandidates } : {}),
+    ...(tripDraft ? { tripDraft } : {}),
+  };
 }

@@ -87,3 +87,20 @@ export async function fetchPlaceDetails(placeId: string): Promise<PlaceDetailsRe
     clearTimeout(timer);
   }
 }
+
+/**
+ * URL ของรูปสถานที่ ที่เอาไปใช้โดยตรงได้ (เช่นใส่ `<Image source={{ uri }} />`)
+ *
+ * backend คืน path สัมพัทธ์ (`/places/photo?ref=…`) เพราะมันไม่รู้ public URL
+ * ของตัวเอง — ที่นี่จึงต่อด้วย API_BASE_URL ให้เป็น URL เต็ม
+ *
+ * รูปมาจาก route ของ backend (ไม่ใช่ Google โดยตรง) เพราะ API key ของ
+ * Google เป็น server-only — ถ้าให้แอปยิงเอง key จะหลุดไปกับไบนารี
+ */
+export function placePhotoUrl(photoUrl?: string | null): string | null {
+  const raw = (photoUrl ?? "").trim();
+  if (!raw) return null;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (raw.startsWith("/")) return `${API_BASE_URL}${raw}`;
+  return null;
+}

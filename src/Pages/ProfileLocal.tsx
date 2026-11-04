@@ -117,16 +117,20 @@ export default function ProfileLocal({
   const isOtopHost = user?.role === "host" && user?.otop_verified;
 
   // Own posted videos — real data from Supabase (no mock).
-  const { videos: myVideos } = useMyVideos();
+  const { posts: myVideos, updatePost: updateMyVideo, removePost: removeMyVideo } = useMyVideos();
 
   const followersCount = 0;
-  const totalLikesReceived = myVideos.reduce((sum, v) => sum + v.likesCount, 0);
+  const totalLikesReceived = myVideos.reduce((sum, v) => sum + (v.initialLikes ?? 0), 0);
 
   const [activeTab, setActiveTab] = useState<ProfileTabKey>("videos");
   const [showInfoModal, setShowInfoModal] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [viewerVideoId, setViewerVideoId] = useState<string | null>(null);
+  // ผู้ดูคลิปเต็มจอ — เปิดจากแท็บ "วิดีโอ" / "ถูกใจ" / "บันทึก"
+  const [viewer, setViewer] = useState<{
+    id: string;
+    source: "mine" | "liked" | "saved";
+  } | null>(null);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
 
@@ -662,33 +666,53 @@ export default function ProfileLocal({
   // Liked tab: the current user's liked videos, loaded from Supabase.
   const likedKey = likedVideoIds.join(",");
   const [likedVideos, setLikedVideos] = useState<VideoPost[]>([]);
+  const [likedError, setLikedError] = useState<string | null>(null);
+  const [likedReload, setLikedReload] = useState(0);
   useEffect(() => {
     let active = true;
-    loadLikedVideos().then((v) => {
-      console.log("[profile] likedVideos fetched =", v.length, "likedIds =", likedVideoIds.length);
-      if (active) setLikedVideos(v);
-    });
+    loadLikedVideos()
+      .then((v) => {
+        console.log("[profile] likedVideos fetched =", v.length, "likedIds =", likedVideoIds.length);
+        if (!active) return;
+        setLikedVideos(v);
+        setLikedError(null);
+      })
+      .catch((err: any) => {
+        if (!active) return;
+        console.warn("[profile] likedVideos FAIL", err?.message ?? err);
+        setLikedError(err?.message ?? "โหลดคลิปที่ถูกใจไม่สำเร็จ");
+      });
     return () => {
       active = false;
     };
-  }, [likedKey]);
+  }, [likedKey, likedReload]);
 
   // Saved tab: loose saves (not in any folder), loaded from Supabase.
   const inFolderIds = new Set(folders.flatMap((f) => f.videoIds));
   const looseSavedIds = savedVideoIds.filter((id) => !inFolderIds.has(id));
   const looseKey = looseSavedIds.join(",");
   const [looseSaved, setLooseSaved] = useState<VideoPost[]>([]);
+  const [savedError, setSavedError] = useState<string | null>(null);
+  const [savedReload, setSavedReload] = useState(0);
   useEffect(() => {
     let active = true;
-    loadSavedVideos(looseKey ? looseKey.split(",") : []).then((v) => {
-      console.log("[profile] looseSaved fetched =", v.length, "savedIds =", savedVideoIds.length, "loose =", looseSavedIds.length);
-      if (active) setLooseSaved(v);
-    });
+    loadSavedVideos(looseKey ? looseKey.split(",") : [])
+      .then((v) => {
+        console.log("[profile] looseSaved fetched =", v.length, "savedIds =", savedVideoIds.length, "loose =", looseSavedIds.length);
+        if (!active) return;
+        setLooseSaved(v);
+        setSavedError(null);
+      })
+      .catch((err: any) => {
+        if (!active) return;
+        console.warn("[profile] looseSaved FAIL", err?.message ?? err);
+        setSavedError(err?.message ?? "โหลดคลิปที่บันทึกไม่สำเร็จ");
+      });
     return () => {
       active = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [looseKey]);
+  }, [looseKey, savedReload]);
 
   // ── โหลดชุมชน + สถานที่ในชุมชน (PLAN §7.1) ─────────────────────────
   // ชุมชนมาจาก `users.community_id` ก่อน ถ้าไม่มีค่อยหาจากเลขทะเบียน OTOP
@@ -726,14 +750,30 @@ export default function ProfileLocal({
     setShowNewFolder(false);
   };
 
-  // Tell host to hide the bottom bar while the own-video viewer is open
+  // Tell host to hide the bottom bar while the full-screen clip viewer is open
   React.useEffect(() => {
-    onFullScreenChange?.(viewerVideoId !== null);
-  }, [viewerVideoId, onFullScreenChange]);
+    onFullScreenChange?.(viewer !== null);
+  }, [viewer, onFullScreenChange]);
 
-  // Full-screen own-video viewer (feed-style) with edit/delete
-  if (viewerVideoId) {
-    return <MyVideoViewer initialVideoId={viewerVideoId} onBack={() => setViewerVideoId(null)} />;
+  // Full-screen clip viewer (feed-style) — like/comment/save/share เหมือนหน้าแรก
+  // แท็บ "วิดีโอ" ของฉันมีปุ่มแก้ไข (คำบรรยาย + แฮทแท็ก) และปุ่มลบด้วย
+  if (viewer) {
+    const viewerPosts =
+      viewer.source === "mine"
+        ? myVideos
+        : viewer.source === "liked"
+        ? likedVideos
+        : looseSaved;
+    return (
+      <MyVideoViewer
+        initialVideoId={viewer.id}
+        posts={viewerPosts}
+        canEdit={viewer.source === "mine"}
+        onSaveEdit={updateMyVideo}
+        onDelete={removeMyVideo}
+        onBack={() => setViewer(null)}
+      />
+    );
   }
 
   return (
@@ -896,14 +936,14 @@ export default function ProfileLocal({
             )}
           </View>
 
-          {/* 6a. VIDEOS tab — owned videos (tap → feed-style viewer w/ edit & delete) */}
+          {/* 6a. VIDEOS tab — owned videos (tap → full-screen clip viewer w/ edit & delete) */}
           {activeTab === "videos" && (
             <View className="flex-row flex-wrap">
               {myVideos.length > 0 ? (
                 myVideos.map((video, index) => (
                   <TouchableOpacity
                     key={video.id}
-                    onPress={() => setViewerVideoId(video.id)}
+                    onPress={() => setViewer({ id: video.id, source: "mine" })}
                     activeOpacity={0.85}
                     style={{
                       width: gridItemWidth,
@@ -914,14 +954,14 @@ export default function ProfileLocal({
                     className="bg-gray-100 relative overflow-hidden"
                   >
                     <Image
-                      source={video.thumbnailUrl ? { uri: video.thumbnailUrl } : avatar}
+                      source={video.poster ? video.poster : avatar}
                       className="w-full h-full"
                       resizeMode="cover"
                     />
                     <View style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 40, backgroundColor: "rgba(0,0,0,0.35)" }} />
                     <View className="absolute bottom-1.5 left-1.5 flex-row items-center">
                       <PlayOutline size={12} color="#FFFFFF" strokeWidth={2.5} />
-                      <Text className="text-white text-[11px] font-bold ml-1">{video.likesCount}</Text>
+                      <Text className="text-white text-[11px] font-bold ml-1">{video.initialLikes}</Text>
                     </View>
                   </TouchableOpacity>
                 ))
@@ -969,11 +1009,25 @@ export default function ProfileLocal({
 
               {/* Loose saved clips (not in any folder) */}
               <Text className="text-gray-400 text-[11px] font-bold mt-3 mb-2 uppercase">คลิปที่บันทึกไว้ (ยังไม่ได้จัดโฟลเดอร์)</Text>
-              {looseSaved.length > 0 ? (
+              {savedError ? (
+                <View className="items-center py-6">
+                  <Text className="text-red-600 text-[13px] text-center">โหลดคลิปที่บันทึกไม่สำเร็จ</Text>
+                  <Text className="text-gray-400 text-[11px] text-center mt-1">{savedError}</Text>
+                  <TouchableOpacity
+                    onPress={() => setSavedReload((n) => n + 1)}
+                    activeOpacity={0.8}
+                    className="mt-3 px-4 py-2 rounded-full bg-[#2D6A4F]"
+                  >
+                    <Text className="text-white text-[12px] font-bold">ลองใหม่</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : looseSaved.length > 0 ? (
                 <View className="flex-row flex-wrap -mx-0.5">
                   {looseSaved.map((v, index) => (
-                    <View
+                    <TouchableOpacity
                       key={v.id}
+                      onPress={() => setViewer({ id: v.id, source: "saved" })}
+                      activeOpacity={0.85}
                       style={{ width: (screenWidth - 32 - 8) / 3, height: ((screenWidth - 32 - 8) / 3) * 1.35, margin: 2 }}
                       className="bg-gray-100 relative overflow-hidden rounded-lg"
                     >
@@ -984,7 +1038,7 @@ export default function ProfileLocal({
                           <PlayOutline size={20} color="#9CA3AF" />
                         </View>
                       )}
-                    </View>
+                    </TouchableOpacity>
                   ))}
                 </View>
               ) : (
@@ -998,10 +1052,24 @@ export default function ProfileLocal({
           {/* 6c. LIKED tab */}
           {activeTab === "liked" && (
             <View className="flex-row flex-wrap">
-              {likedVideos.length > 0 ? (
+              {likedError ? (
+                <View className="w-full items-center py-12">
+                  <Text className="text-red-600 text-[13px] text-center">โหลดคลิปที่ถูกใจไม่สำเร็จ</Text>
+                  <Text className="text-gray-400 text-[11px] text-center mt-1">{likedError}</Text>
+                  <TouchableOpacity
+                    onPress={() => setLikedReload((n) => n + 1)}
+                    activeOpacity={0.8}
+                    className="mt-3 px-4 py-2 rounded-full bg-[#2D6A4F]"
+                  >
+                    <Text className="text-white text-[12px] font-bold">ลองใหม่</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : likedVideos.length > 0 ? (
                 likedVideos.map((video, index) => (
-                  <View
+                  <TouchableOpacity
                     key={video.id}
+                    onPress={() => setViewer({ id: video.id, source: "liked" })}
+                    activeOpacity={0.85}
                     style={{
                       width: gridItemWidth,
                       height: gridItemWidth * 1.35,
@@ -1022,7 +1090,7 @@ export default function ProfileLocal({
                       <PlayOutline size={12} color="#FFFFFF" strokeWidth={2.5} />
                       <Text className="text-white text-[11px] font-bold ml-1">{video.initialLikes}</Text>
                     </View>
-                  </View>
+                  </TouchableOpacity>
                 ))
               ) : (
                 <View className="w-full py-16 items-center justify-center">

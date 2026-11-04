@@ -155,12 +155,95 @@ alter table public.folder_collaborators enable row level security;
 alter table public.trip_plans enable row level security;
 
 -- ---------- FOLDERS (เจ้าของ หรือ ผู้ร่วม, หรือ สาธารณะ) ----------
+--
+-- ⚠️ ห้ามอ้างตารางข้ามกันใน policy ของโฟลเดอร์โดยตรง
+--    (เดิม: folders → folder_collaborators → folders → …)
+--    → Postgres ตอบ 42P17 "infinite recursion detected in policy"
+--    แก้โดยย้ายการตรวจสิทธิ์ข้ามตารางไปไว้ในฟังก์ชัน SECURITY DEFINER
+--    (ฟังก์ชันรันด้วยสิทธิ์เจ้าของตาราง → ข้าม RLS → วงจรถูกตัด)
+--    ดูรายละเอียด: supabase/migrations/fix_folders_policy_recursion.sql
+--
+create or replace function public.folder_owner_id(p_folder_id uuid)
+returns uuid
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select f.owner_id
+  from public.folders f
+  where f.id = p_folder_id
+  limit 1;
+$$;
+
+create or replace function public.is_folder_member(p_folder_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select exists (
+    select 1
+    from public.folders f
+    where f.id = p_folder_id
+      and (
+        f.owner_id = auth.uid()
+        or exists (
+          select 1
+          from public.folder_collaborators fc
+          where fc.folder_id = f.id
+            and fc.user_id = auth.uid()
+        )
+      )
+  );
+$$;
+
+create or replace function public.is_folder_public(p_folder_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select exists (
+    select 1
+    from public.folders f
+    where f.id = p_folder_id
+      and f.is_public = true
+  );
+$$;
+
+create or replace function public.can_write_folder(p_folder_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select exists (
+    select 1
+    from public.folders f
+    where f.id = p_folder_id
+      and (
+        f.owner_id = auth.uid()
+        or exists (
+          select 1
+          from public.folder_collaborators fc
+          where fc.folder_id = f.id
+            and fc.user_id = auth.uid()
+            and fc.permission = 'editor'
+        )
+      )
+  );
+$$;
+
 drop policy if exists "folders select own or shared" on public.folders;
 create policy "folders select own or shared" on public.folders
   for select using (
     auth.uid() = owner_id
     or is_public = true
-    or exists (select 1 from public.folder_collaborators fc where fc.folder_id = id and fc.user_id = auth.uid())
+    or public.is_folder_member(id)
   );
 
 drop policy if exists "folders insert own" on public.folders;
@@ -180,43 +263,26 @@ drop policy if exists "folder_collab select" on public.folder_collaborators;
 create policy "folder_collab select" on public.folder_collaborators
   for select using (
     auth.uid() = user_id
-    or exists (select 1 from public.folders f where f.id = folder_id and f.owner_id = auth.uid())
+    or public.folder_owner_id(folder_id) = auth.uid()
   );
 
 drop policy if exists "folder_collab manage by owner" on public.folder_collaborators;
 create policy "folder_collab manage by owner" on public.folder_collaborators
-  for all using (exists (select 1 from public.folders f where f.id = folder_id and f.owner_id = auth.uid()))
-  with check (exists (select 1 from public.folders f where f.id = folder_id and f.owner_id = auth.uid()));
+  for all using (public.folder_owner_id(folder_id) = auth.uid())
+  with check (public.folder_owner_id(folder_id) = auth.uid());
 
 -- ---------- FOLDER ITEMS (อ่าน/เขียนผ่านสิทธิ์ของโฟลเดอร์) ----------
 drop policy if exists "folder_items select via folder" on public.folder_items;
 create policy "folder_items select via folder" on public.folder_items
   for select using (
-    exists (
-      select 1 from public.folders f
-      where f.id = folder_id
-        and (f.owner_id = auth.uid() or f.is_public = true
-          or exists (select 1 from public.folder_collaborators fc where fc.folder_id = f.id and fc.user_id = auth.uid()))
-    )
+    public.is_folder_member(folder_id)
+    or public.is_folder_public(folder_id)
   );
 
 drop policy if exists "folder_items write via folder" on public.folder_items;
 create policy "folder_items write via folder" on public.folder_items
-  for all using (
-    exists (
-      select 1 from public.folders f
-      where f.id = folder_id
-        and (f.owner_id = auth.uid()
-          or exists (select 1 from public.folder_collaborators fc where fc.folder_id = f.id and fc.user_id = auth.uid() and fc.permission = 'editor'))
-    )
-  ) with check (
-    exists (
-      select 1 from public.folders f
-      where f.id = folder_id
-        and (f.owner_id = auth.uid()
-          or exists (select 1 from public.folder_collaborators fc where fc.folder_id = f.id and fc.user_id = auth.uid() and fc.permission = 'editor'))
-    )
-  );
+  for all using (public.can_write_folder(folder_id))
+  with check (public.can_write_folder(folder_id));
 
 -- ---------- TRIP PLANS (เจ้าของ หรือ แชร์) ----------
 drop policy if exists "trips select own or shared" on public.trip_plans;
@@ -243,6 +309,17 @@ grant select, insert, update, delete on public.folders to authenticated;
 grant select, insert, update, delete on public.folder_items to authenticated;
 grant select, insert, update, delete on public.folder_collaborators to authenticated;
 grant select, insert, update, delete on public.trip_plans to authenticated;
+
+-- policy ของโฟลเดอร์เรียกฟังก์ชันช่วยตรวจสิทธิ์ → ผู้เรียกต้องมีสิทธิ์ EXECUTE
+revoke all on function public.folder_owner_id(uuid) from public;
+revoke all on function public.is_folder_member(uuid) from public;
+revoke all on function public.is_folder_public(uuid) from public;
+revoke all on function public.can_write_folder(uuid) from public;
+
+grant execute on function public.folder_owner_id(uuid) to authenticated;
+grant execute on function public.is_folder_member(uuid) to authenticated;
+grant execute on function public.is_folder_public(uuid) to authenticated;
+grant execute on function public.can_write_folder(uuid) to authenticated;
 
 -- ─────────────────────────────────────────────────────────────────
 --  6) คอมเมนต์ (อ่านง่ายตอน inspect schema ใน dashboard)

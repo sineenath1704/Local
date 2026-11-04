@@ -320,8 +320,17 @@ create trigger trg_users_updated before update on public.users
 
 -- ============================================================
 --  COUNTER TRIGGERS (keep videos.*_count accurate)
+-- ------------------------------------------------------------
+--  ⚠️ ต้องเป็น SECURITY DEFINER
+--     trigger ทำงานด้วยสิทธิ์ของผู้กด (authenticated) ถ้าไม่ใส่
+--     → ประโยค update public.videos จะโดน RLS ของ videos บล็อก
+--     → พอไลก์/เซฟคลิปของคนอื่น → trigger โดน → ทั้ง INSERT ล้มเหลว
+--     (ดู supabase/migrations/fix_interaction_policies.sql)
 -- ============================================================
-create or replace function public.bump_video_likes() returns trigger language plpgsql as $$
+create or replace function public.bump_video_likes() returns trigger language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
 begin
   if (tg_op = 'INSERT') then
     update public.videos set likes_count = likes_count + 1 where id = new.video_id;
@@ -353,7 +362,10 @@ drop trigger if exists trg_follows on public.follows;
 create trigger trg_follows after insert or delete on public.follows
   for each row execute function public.bump_follows();
 
-create or replace function public.bump_video_saves() returns trigger language plpgsql as $$
+create or replace function public.bump_video_saves() returns trigger language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
 begin
   if (tg_op = 'INSERT') then
     update public.videos set saves_count = saves_count + 1 where id = new.video_id;
@@ -366,7 +378,10 @@ drop trigger if exists trg_video_saves on public.video_saves;
 create trigger trg_video_saves after insert or delete on public.video_saves
   for each row execute function public.bump_video_saves();
 
-create or replace function public.bump_comments() returns trigger language plpgsql as $$
+create or replace function public.bump_comments() returns trigger language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
 begin
   if (tg_op = 'INSERT') then
     update public.videos set comments_count = comments_count + 1 where id = new.video_id;

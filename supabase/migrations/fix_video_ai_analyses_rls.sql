@@ -18,6 +18,8 @@ drop policy if exists "Anyone can read video_ai_analyses"
   on public.video_ai_analyses;
 
 -- Owners can read the analysis of their own posts.
+drop policy if exists "Owners can read their video_ai_analyses"
+  on public.video_ai_analyses;
 create policy "Owners can read their video_ai_analyses"
   on public.video_ai_analyses for select
   using (

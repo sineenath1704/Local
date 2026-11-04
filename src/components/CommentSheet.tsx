@@ -12,6 +12,7 @@ import {
   Platform,
   ScrollView,
   ActivityIndicator,
+  Alert,
   Animated,
   PanResponder,
   useWindowDimensions,
@@ -46,7 +47,14 @@ import {
 } from "../data/commentsData";
 import { fetchAiSummary } from "../services/aiSummaryService";
 import { asAiError, type AiError } from "../services/aiHttp";
+import {
+  addVideoComment,
+  isRealVideoId,
+  loadVideoComments,
+} from "../services/commentsService";
 import { useAiPlanner } from "../state/AiPlannerContext";
+import type { ClipContext } from "../data/tripsData";
+import type { VideoPost } from "../data/homeFeedData";
 import PostCardView from "./PostCard";
 
 type TabKey = "comments" | "reviews" | "ai";
@@ -55,19 +63,38 @@ interface CommentSheetProps {
   visible: boolean;
   postId: string;
   onClose: () => void;
+  /** จำนวนคอมเมนต์ที่ฐานข้อมูลมีอยู่แล้ว (คอมเมนต์จริง) — ใช้โชว์ตัวเลขก่อนโหลดเสร็จ */
+  initialCount?: number;
+  /** แจ้งจำนวนคอมเมนต์ล่าสุดกลับไปให้ผู้เรียก (อัปเดตตัวเลขบนแถบปุ่ม) */
+  onCountChange?: (count: number) => void;
+  /**
+   * คลิปเต็ม (ข้อมูลจากฟีด) — ใช้แนบคลิปไปกับแชท ("คุยต่อกับ AI เรื่องนี้")
+   * ให้ผู้ใช้ดูคลิปซ้ำในแชทได้ และใช้ที่ตั้งของคลิปเป็นที่อยู่ตั้งต้น
+   */
+  post?: VideoPost;
 }
 
 /** Round avatar — shows the person's image, or a letter fallback circle. */
 function Avatar({
   avatarKey,
+  avatarUri,
   name,
   size = 40,
 }: {
   avatarKey?: string;
+  avatarUri?: string | null;
   name: string;
   size?: number;
 }) {
   const img = resolveCommentImage(avatarKey);
+  if (avatarUri) {
+    return (
+      <Image
+        source={{ uri: avatarUri }}
+        style={{ width: size, height: size, borderRadius: size / 2 }}
+      />
+    );
+  }
   if (img) {
     return (
       <Image
@@ -124,7 +151,7 @@ function CommentRow({
   return (
     <View className="px-4 py-3">
       <View className="flex-row">
-        <Avatar avatarKey={comment.avatarKey} name={comment.authorName} size={40} />
+        <Avatar avatarKey={comment.avatarKey} avatarUri={comment.avatarUri} name={comment.authorName} size={40} />
         <View className="flex-1 ml-3">
           <Text className="text-gray-900 font-bold text-[13px]">
             {comment.authorName}
@@ -188,7 +215,7 @@ function ReplyRow({ reply, onReply }: { reply: CommentReply; onReply: () => void
   };
   return (
     <View className="flex-row mb-2.5">
-      <Avatar avatarKey={reply.avatarKey} name={reply.authorName} size={30} />
+      <Avatar avatarKey={reply.avatarKey} avatarUri={reply.avatarUri} name={reply.authorName} size={30} />
       <View className="flex-1 ml-2.5">
         <Text className="text-gray-900 font-bold text-[12px]">{reply.authorName}</Text>
         <Text className="text-gray-800 text-[12px] leading-5 mt-0.5">{reply.text}</Text>
@@ -407,11 +434,132 @@ function AiSummaryPanel({
   );
 }
 
-export default function CommentSheet({ visible, postId, onClose }: CommentSheetProps) {
+/**
+ * บริบทจากสรุปของคลิป → ส่งให้ backend แทรกเป็นบล็อกแยกใน system prompt
+ * -------------------------------------------------------------
+ * เก็บเฉพาะข้อมูลที่มีผลต่อการตัดสินใจไปเที่ยว: ชื่อสถานที่ · ที่ตั้ง ·
+ * ราคา/เวลาเปิด/กติกา · วิธีเดินทางที่พูดในคลิป · ช่องทางติดต่อ
+ * (ข้อมูลที่ไม่มีในคลิป = ไม่ต้องแต่งขึ้นมาเอง)
+ */
+function buildClipContext(summary: AiSummary, post?: VideoPost): ClipContext {
+  const card = summary.card;
+  const place = summary.place;
+
+  const placeName = card?.place?.name ?? place?.place_name ?? null;
+
+  // ที่อยู่: จากการ์ดก่อน → จากสรุปรูปแบบเดิม → ที่ตั้งของคลิปในฟีด
+  const loc = place?.location;
+  const locationLine = loc
+    ? [
+        loc.subdistrict && `ต.${loc.subdistrict}`,
+        loc.district && `อ.${loc.district}`,
+        loc.province && `จ.${loc.province}`,
+      ]
+        .filter(Boolean)
+        .join(" ")
+    : "";
+  const postLocation = post
+    ? [post.location.village, post.location.district && `อ.${post.location.district}`, post.location.province && `จ.${post.location.province}`]
+        .filter(Boolean)
+        .join(" ")
+    : "";
+  const address = card?.place?.address ?? (locationLine || postLocation || null);
+
+  const description = card?.place?.description ?? card?.place?.tagline ?? place?.atmosphere ?? null;
+
+  // ข้อมูลสำคัญ: ทีละบรรทัด เรียงตามลำดับที่การ์ดแสดง (สำคัญสุดมาก่อน)
+  const details: string[] = [];
+  let directions: string | null = null;
+
+  for (const block of card?.blocks ?? []) {
+    const lines = (block.lines ?? [])
+      .map((l) => (l.text || "").trim())
+      .filter(Boolean);
+    if (lines.length === 0) continue;
+    const title = (block.title ?? "").trim();
+    // บล็อก "เดินทาง" แยกไว้ในช่องเฉพาะ → ให้โมเดลตอบเรื่องเดินทางได้ตรง ๆ
+    if (title.includes("เดินทาง")) {
+      directions = lines.join(" · ");
+      continue;
+    }
+    details.push(title ? `${title}: ${lines.join(" · ")}` : lines.join(" · "));
+  }
+
+  // การ์ดเก่า (รูปแบบ sections) — เก็บข้อมูลไว้ให้ครบเหมือนกัน
+  if (details.length === 0 && card?.sections) {
+    for (const section of card.sections) {
+      const lines = (section.lines ?? [])
+        .map((l) => (l.text || "").trim())
+        .filter(Boolean);
+      if (lines.length === 0) continue;
+      const title = (section.title ?? "").trim();
+      if (title.includes("เดินทาง")) {
+        directions = lines.join(" · ");
+        continue;
+      }
+      const highlight = section.highlight ? `${section.highlight} — ` : "";
+      details.push(`${title}: ${highlight}${lines.join(" · ")}`);
+    }
+  }
+
+  // คลิปเก่าที่สรุปแบบข้อความล้วน (ไม่มีการ์ด) → เก็บจากข้อมูลที่มีรูปแบบ
+  if (details.length === 0 && place) {
+    const price = place.price_info;
+    const priceLine = [
+      price?.weekday && `วันธรรมดา ${price.weekday}`,
+      price?.weekend && `วันหยุด ${price.weekend}`,
+      price?.level && `ระดับราคา ${price.level}`,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    if (priceLine) details.push(`ราคา: ${priceLine}`);
+    if (place.opening_hours) details.push(`เวลาเปิด: ${place.opening_hours}`);
+    if (place.activities?.length) details.push(`กิจกรรม: ${place.activities.join(", ")}`);
+    if (place.highlights?.length) details.push(`จุดเด่น: ${place.highlights.join(", ")}`);
+    if (place.atmosphere) details.push(`บรรยากาศ: ${place.atmosphere}`);
+  }
+
+  const cardContact = card?.contact;
+  const placeContact = place?.contact;
+  const phone = cardContact?.phone ?? placeContact?.phone ?? null;
+  const facebook = cardContact?.facebook ?? placeContact?.facebook ?? null;
+  const line = cardContact?.line ?? placeContact?.line ?? null;
+  const website = placeContact?.website ?? null;
+  if (cardContact?.hours) {
+    details.push(`เวลาเปิด: ${cardContact.hours}`);
+  }
+  const contact =
+    phone || facebook || line || website
+      ? { phone, facebook, line, website }
+      : undefined;
+
+  return {
+    placeName: placeName ?? null,
+    address: address ?? null,
+    description: description ?? null,
+    details: details.length > 0 ? details : undefined,
+    directions: directions ?? null,
+    contact,
+    gps: place?.location?.gps ?? null,
+    narration: summary.text || null,
+  };
+}
+
+export default function CommentSheet({
+  visible,
+  postId,
+  onClose,
+  initialCount,
+  onCountChange,
+  post,
+}: CommentSheetProps) {
   const insets = useSafeAreaInsets();
   const { height: screenH } = useWindowDimensions();
-  const base = useMemo(() => getPostCommentData(postId), [postId]);
   const { openChatWithSeed } = useAiPlanner();
+
+  // คลิปจริง (uuid ในฐานข้อมูล) → อ่าน/เขียนคอมเมนต์จริง
+  // โพสต์จำลอง (ไฟล์ JSON) → ใช้ข้อมูลตัวอย่างเหมือนเดิม
+  const isReal = useMemo(() => isRealVideoId(postId), [postId]);
 
   // Fixed sheet height so it never grows/shrinks with its content (the AI tab
   // used to push the sheet past the top; the empty state used to shrink it).
@@ -452,7 +600,8 @@ export default function CommentSheet({ visible, postId, onClose }: CommentSheetP
   const [tab, setTab] = useState<TabKey>("comments");
 
   // Local, editable copies so new comments/replies appear immediately
-  const [comments, setComments] = useState<CommentItem[]>(base.comments);
+  const [comments, setComments] = useState<CommentItem[]>([]);
+  const [loadingComments, setLoadingComments] = useState(false);
   const [draft, setDraft] = useState("");
   const [replyTarget, setReplyTarget] = useState<{ id: string; name: string } | null>(null);
 
@@ -465,24 +614,57 @@ export default function CommentSheet({ visible, postId, onClose }: CommentSheetP
   // Build a seed message from the AI summary + hand it to the AI chat.
   const handleContinueInChat = () => {
     if (!aiSummary || aiSummary.status !== "ready") return;
-    const place = aiSummary.place?.place_name;
+    const clipContext = buildClipContext(aiSummary, post);
+    const place = clipContext.placeName;
+    // ถามให้ตรงกับสิ่งที่มีผลต่อการตัดสินใจไปเที่ยว
+    // (ชื่อสถานที่ตามแผนที่ · ที่ตั้ง · เดินทาง · งบ · ข้อมูลที่ต้องรู้ก่อนไป)
     const seed =
-      `ช่วยเล่าเพิ่มเติม / แนะนำเกี่ยวกับคลิปนี้หน่อย\n\n` +
-      (place ? `สถานที่: ${place}\n` : "") +
+      `ช่วยเล่าเพิ่มเติมเรื่องสถานที่ในคลิปนี้หน่อย — อยากรู้ว่า\n` +
+      `1) ชื่อสถานที่ตามแผนที่คืออะไร อยู่ที่ไหน (ตำบล/อำเภอ/จังหวัด)\n` +
+      `2) เดินทางไปยังไง\n` +
+      `3) ใช้งบประมาณเท่าไหร่\n` +
+      `4) มีอะไรที่ควรรู้ก่อนตัดสินใจไป\n` +
+      (place ? `\nสถานที่: ${place}\n` : "") +
       `สรุปจาก AI: ${aiSummary.text}`;
-    openChatWithSeed(seed);
+    // ส่งคลิปไปด้วย → ในแชทจะเห็นคลิปเป็นวิดีโอ แตะดูซ้ำได้
+    openChatWithSeed(seed, { clipContext, video: post ?? null });
     onClose();
   };
 
   // Reset local state whenever a different post opens
   useEffect(() => {
-    setComments(base.comments);
+    const baseData = getPostCommentData(postId);
+    setComments(baseData.comments);
     setTab("comments");
     setDraft("");
     setReplyTarget(null);
     setAiSummary(null);
     setAiFetchedFor(null);
-  }, [base, postId]);
+  }, [postId]);
+
+  // โหลดคอมเมนต์จริงจากฐานข้อมูล (คลิปจริงเท่านั้น)
+  // เดิมไม่เคยโหลด → คอมเมนต์ที่เขียนไว้ก่อนหน้านี้ไม่เคยโชว์ และที่เขียนใหม่
+  // ก็หายเมื่อคอมโพเนนต์ถูก unmount
+  useEffect(() => {
+    if (!visible || !isReal) return;
+    let cancelled = false;
+    setLoadingComments(true);
+    loadVideoComments(postId)
+      .then((list) => {
+        if (!cancelled) setComments(list);
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        console.warn("[commentSheet] load comments FAIL", err?.message ?? err);
+        Alert.alert("โหลดความคิดเห็นไม่สำเร็จ", err?.message ?? String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingComments(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, postId, isReal]);
 
   // Re-arm the close guard + drag position each time the sheet opens.
   useEffect(() => {
@@ -525,25 +707,102 @@ export default function CommentSheet({ visible, postId, onClose }: CommentSheetP
     };
   }, [visible, tab, postId, aiFetchedFor]);
 
-  const commentCount = countComments({ ...base, comments });
+  const base = useMemo(() => getPostCommentData(postId), [postId]);
+  const commentCount = Math.max(countComments({ ...base, comments }), initialCount ?? 0);
   const reviewCount = countReviews(base);
+
+  // บอกตัวเลขที่แถบปุ่ม (นอกจอ) ให้ตรงกับที่เห็นในชีต
+  useEffect(() => {
+    onCountChange?.(commentCount);
+  }, [commentCount, onCountChange]);
 
   const handleSend = () => {
     const text = draft.trim();
     if (!text) return;
 
-    if (replyTarget) {
-      const reply = makeLocalReply(text);
+    const target = replyTarget;
+    setDraft("");
+    setReplyTarget(null);
+
+    // โพสต์จำลอง → เก็บใน state อย่างเดียว (เหมือนเดิม)
+    if (!isReal) {
+      if (target) {
+        const reply = makeLocalReply(text);
+        setComments((prev) =>
+          prev.map((c) =>
+            c.id === target.id ? { ...c, replies: [...c.replies, reply] } : c
+          )
+        );
+      } else {
+        setComments((prev) => [makeLocalComment(text), ...prev]);
+      }
+      return;
+    }
+
+    // คลิปจริง → เขียนลงฐานข้อมูล (ถ้าล้มเหลว คอมเมนต์ที่ค้างไว้จะถูกเอาออก)
+    const optimisticId = `local-${Date.now()}`;
+    if (target) {
       setComments((prev) =>
         prev.map((c) =>
-          c.id === replyTarget.id ? { ...c, replies: [...c.replies, reply] } : c
+          c.id === target.id
+            ? { ...c, replies: [...c.replies, { ...makeLocalReply(text), id: optimisticId }] }
+            : c
         )
       );
     } else {
-      setComments((prev) => [makeLocalComment(text), ...prev]);
+      setComments((prev) => [{ ...makeLocalComment(text), id: optimisticId }, ...prev]);
     }
-    setDraft("");
-    setReplyTarget(null);
+
+    addVideoComment(postId, text, target?.id ?? null)
+      .then((saved) => {
+        setComments((prev) =>
+          target
+            ? prev.map((c) =>
+                c.id === target.id
+                  ? {
+                      ...c,
+                      replies: c.replies.map((r) =>
+                        r.id === optimisticId
+                          ? {
+                              id: saved.id,
+                              authorName: saved.authorName,
+                              avatarUri: saved.avatarUri,
+                              timeAgo: saved.timeAgo,
+                              text: saved.text,
+                              likes: saved.likes,
+                            }
+                          : r
+                      ),
+                    }
+                  : c
+              )
+            : prev.map((c) =>
+                c.id === optimisticId
+                  ? {
+                      ...c,
+                      id: saved.id,
+                      authorName: saved.authorName,
+                      avatarUri: saved.avatarUri,
+                      timeAgo: saved.timeAgo,
+                      text: saved.text,
+                      likes: saved.likes,
+                    }
+                  : c
+              )
+        );
+      })
+      .catch((err: any) => {
+        setComments((prev) =>
+          target
+            ? prev.map((c) =>
+                c.id === target.id
+                  ? { ...c, replies: c.replies.filter((r) => r.id !== optimisticId) }
+                  : c
+              )
+            : prev.filter((c) => c.id !== optimisticId)
+        );
+        Alert.alert("ส่งความคิดเห็นไม่สำเร็จ", err?.message ?? String(err));
+      });
   };
 
   const startReply = (commentId: string, name: string) => {
@@ -642,7 +901,12 @@ export default function CommentSheet({ visible, postId, onClose }: CommentSheetP
                 showsVerticalScrollIndicator={false}
                 contentContainerStyle={{ paddingVertical: 4 }}
               >
-                {comments.length === 0 ? (
+                {loadingComments ? (
+                  <View className="py-16 items-center">
+                    <ActivityIndicator size="large" color="#2D6A4F" />
+                    <Text className="text-gray-400 text-sm mt-3">กำลังโหลดความคิดเห็น...</Text>
+                  </View>
+                ) : comments.length === 0 ? (
                   <View className="py-16 items-center">
                     <Text className="text-gray-400 text-sm">ยังไม่มีความคิดเห็น มาเป็นคนแรกกันเลย</Text>
                   </View>

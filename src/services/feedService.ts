@@ -11,7 +11,7 @@ import { VideoPost } from "../data/homeFeedData";
  * query fails, this returns an empty list with a status the UI uses to show an
  * empty / error state ("ยังไม่มีวิดีโอในขณะนี้").
  */
-interface VideoRow {
+export interface VideoRow {
   id: string;
   user_id: string;
   video_url: string;
@@ -39,7 +39,16 @@ function toHashtags(raw: unknown): string[] {
   return [];
 }
 
-function rowToPost(row: VideoRow, likedIds: Set<string>, savedIds: Set<string>): VideoPost {
+/**
+ * แปลงแถวของตาราง `videos` (+ ผู้เขียน) เป็น VideoPost
+ * ใช้ร่วมกันทั้งฟีดหน้าแรก · แท็บ "ถูกใจ/บันทึก" · ผู้ดูคลิปของตัวเอง
+ * เพื่อให้ทุกที่แสดงตัวเลขและปุ่มกดเหมือนกันเป๊ะ
+ */
+export function rowToPost(
+  row: VideoRow,
+  likedIds: Set<string>,
+  savedIds: Set<string>
+): VideoPost {
   const author = row.users;
   return {
     id: row.id,

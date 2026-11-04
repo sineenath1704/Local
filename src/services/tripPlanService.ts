@@ -6,6 +6,8 @@ import {
   Trip,
   TripBudget,
   TripFolderPlace,
+  TripPlanLodging,
+  TripPlanVehicle,
 } from "../data/tripsData";
 import {
   normalizeItineraryDays,
@@ -84,6 +86,64 @@ function folderPlacesFromMeta(meta: any): TripFolderPlace[] {
     }));
 }
 
+/**
+ * จุดในแผน (`{label, address?, coords:{lat,lng}}`) → พิกัดของแอป
+ * คืน undefined ถ้าไม่มีพิกัดที่ใช้ได้ (ไม่เดาพิกัด)
+ */
+function coordsOf(raw: any): { lat: number; lng: number } | undefined {
+  const c = raw?.coords ?? raw?.coordinates ?? null;
+  if (!c) return undefined;
+  const lat = Number(c.lat);
+  const lng = Number(c.lng ?? c.lon ?? c.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return undefined;
+  return { lat, lng };
+}
+
+/** ชื่อจุดจากแผน (`{label}` / `{name}`) */
+function labelOf(raw: any): string | undefined {
+  const l = String(raw?.label ?? raw?.name ?? "").trim();
+  return l || undefined;
+}
+
+/** ที่พักที่ระบบเสนอ (เก็บใน `itinerary_data.lodgingSuggestions`) */
+function lodgingFromData(raw: any): TripPlanLodging[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((l: any) => l && (l.name || l.label))
+    .map((l: any) => ({
+      name: String(l.name ?? l.label),
+      address: l.address ?? null,
+      coordinates: coordsOf(l) ?? null,
+      price: typeof l.price === "number" ? l.price : null,
+      priceUnit: l.priceUnit ?? null,
+      priceText: l.priceText ?? null,
+      distanceKm: typeof l.distanceKm === "number" ? l.distanceKm : null,
+      phone: l.phone ?? null,
+      website: l.website ?? null,
+      rating: typeof l.rating === "number" ? l.rating : null,
+      source: l.source ?? null,
+    }));
+}
+
+/** รถ + ที่มาของราคาน้ำมัน */
+function vehicleFromData(raw: any): TripPlanVehicle | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const kmPerLitre = Number(raw.kmPerLitre);
+  return {
+    key: String(raw.key ?? ""),
+    label: String(raw.label ?? ""),
+    kmPerLitre: Number.isFinite(kmPerLitre) ? kmPerLitre : null,
+    fuelType: raw.fuelType ?? null,
+    fuelPricePerLitre:
+      typeof raw.fuelPricePerLitre === "number" ? raw.fuelPricePerLitre : null,
+    fuelPriceSource: String(raw.fuelPriceSource ?? ""),
+    fuelPriceEffectiveDate: raw.fuelPriceEffectiveDate ?? undefined,
+    fuelPriceFetchedAt: raw.fuelPriceFetchedAt ?? undefined,
+    fuelPriceIsEstimate: raw.fuelPriceIsEstimate === true,
+    fuelPriceText: raw.fuelPriceText ?? undefined,
+  };
+}
+
 /** แถวในตาราง → รูปแบบที่แอปใช้ */
 export function tripPlanRowToTrip(row: TripPlanRow): Trip {
   const data = (row.itinerary_data ?? {}) as any;
@@ -101,23 +161,52 @@ export function tripPlanRowToTrip(row: TripPlanRow): Trip {
       );
   const budget: TripBudget = normalizeTripBudget(data.budget);
 
+  // จุดเริ่ม/จุดสิ้นสุด — แผนเก็บเป็น object (มีพิกัด) ส่วนคอลัมน์เก็บแค่ชื่อ
+  const startPointLabel = labelOf(data.startPoint) ?? row.start_location;
+  const startPointCoords = coordsOf(data.startPoint);
+  const returnMode: Trip["returnMode"] =
+    (data.returnMode ?? meta.returnMode) === "custom" ? "custom" : "same_as_start";
+  const endPointLabel =
+    labelOf(data.endPoint) ?? labelOf(meta.endPoint) ?? row.return_location ?? undefined;
+  const endPointCoords = coordsOf(data.endPoint) ?? coordsOf(meta.endPoint);
+
+  const warnings = Array.isArray(data.warnings) ? data.warnings.map(String) : undefined;
+  const assumptions = Array.isArray(data.assumptions)
+    ? data.assumptions.map(String)
+    : undefined;
+
   return {
     id: row.id,
     planId: row.id,
     title: row.plan_name,
     summary: typeof data.summary === "string" ? data.summary : "",
     status: appStatus(row),
-    startPoint: row.start_location,
+    startPoint: startPointLabel,
+    startPointCoords,
+    startTime: typeof data.startTime === "string" ? data.startTime : undefined,
     destinations,
     days: days.length || Number(data.daysCount) || 1,
     nights: Math.max(0, (days.length || Number(data.daysCount) || 1) - 1),
-    budgetPerPerson: Number(row.budget_limit) || budget.perPerson || 0,
+    budgetPerPerson:
+      Number(row.budget_limit) || Number(data.budgetPerPerson) || budget.perPerson || 0,
     style: styleKey(row.travel_style),
     itinerary: days,
     budget,
     sourceFolderId: row.source_folder_id ?? undefined,
     folderPlaces: folderPlacesFromMeta(meta),
     createdAt: new Date(row.created_at).getTime() || Date.now(),
+    // ── ข้อมูลของแพลนที่คำนวณจริง (ต้องคืนมาให้ครบ ไม่งั้นแผนที่โหลดกลับมาไม่มีแผนที่/ตัวเลข) ──
+    returnMode,
+    endPoint: endPointLabel,
+    endPointCoords,
+    travelers: Number(data.travelers) || undefined,
+    vehicle: vehicleFromData(data.vehicle ?? meta.vehicle),
+    fuel: data.fuel ?? meta.fuel ?? undefined,
+    lodging: lodgingFromData(data.lodgingSuggestions),
+    warnings,
+    assumptions,
+    routeSource: typeof data.routeSource === "string" ? data.routeSource : undefined,
+    routeCredit: typeof data.routeCredit === "string" ? data.routeCredit : undefined,
   };
 }
 
@@ -144,5 +233,93 @@ export async function fetchMyTripPlans(limit = 50): Promise<Trip[]> {
   } catch (e: any) {
     console.warn("[tripPlanService] โหลดแผนทริปไม่สำเร็จ:", e?.message ?? e);
     return [];
+  }
+}
+
+/**
+ * แก้ไขแผนที่บันทึกไว้ → บันทึกกลับลง `trip_plans`
+ * =============================================================
+ * RLS ของ `trip_plans` เปิดให้ผู้ใช้อัปเดตแถวของตัวเอง
+ * (policy "trips write own" + grant `update` ให้ `authenticated`)
+ * → แอปแก้แผนเองได้ ไม่ต้องผ่าน backend
+ *
+ * คืน true เมื่อบันทึกสำเร็จ (ผู้เรียกต้องจัดการกรณีล้มเหลวเอง)
+ */
+export interface TripPlanPatch {
+  /** ไทม์ไลน์ที่ผู้ใช้แก้ → เขียนทับ `itinerary_data.days` */
+  itinerary?: ItineraryDay[];
+  /** ข้อมูลแผนที่แก้ทั้งก้อน → merge เข้า `itinerary_data` */
+  itineraryData?: Record<string, unknown>;
+  /** สถานะของแอป (draft|planned|active|completed) */
+  appStatus?: Trip["status"];
+  planName?: string;
+  startLocation?: string;
+  returnLocation?: string | null;
+  startDate?: string | null;
+  endDate?: string | null;
+  budgetLimit?: number | null;
+  travelStyle?: string | null;
+}
+
+/** สถานะของแอป → ค่าที่คอลัมน์ status ของ DB ยอมรับ (upcoming|draft|past) */
+function dbStatus(appStatusValue: Trip["status"]): "upcoming" | "draft" | "past" {
+  if (appStatusValue === "completed") return "past";
+  if (appStatusValue === "planned" || appStatusValue === "active") return "upcoming";
+  return "draft";
+}
+
+export async function updateMyTripPlan(
+  planId: string,
+  patch: TripPlanPatch
+): Promise<boolean> {
+  if (!isSupabaseConfigured || !planId) return false;
+  try {
+    // อ่านของเดิมก่อน → merge ไม่ให้ข้อมูลที่ไม่ได้แก้หาย
+    const { data: row, error: readErr } = await supabase
+      .from("trip_plans")
+      .select("id, creator_id, itinerary_data")
+      .eq("id", planId)
+      .maybeSingle();
+    if (readErr) {
+      console.warn("[tripPlanService] อ่านแผนเพื่อแก้ไขไม่สำเร็จ:", readErr.message);
+      return false;
+    }
+    if (!row) return false;
+
+    const current = (row.itinerary_data ?? {}) as any;
+    const meta = (current.__meta ?? {}) as any;
+    const nextData: any = {
+      ...current,
+      ...(patch.itineraryData ?? {}),
+    };
+    if (patch.itinerary) nextData.days = patch.itinerary;
+    nextData.__meta = {
+      ...meta,
+      ...(patch.appStatus ? { appStatus: patch.appStatus } : {}),
+      editedAt: new Date().toISOString(),
+    };
+
+    const update: Record<string, unknown> = { itinerary_data: nextData };
+    if (patch.planName !== undefined) update.plan_name = patch.planName;
+    if (patch.startLocation !== undefined) update.start_location = patch.startLocation;
+    if (patch.returnLocation !== undefined) update.return_location = patch.returnLocation;
+    if (patch.startDate !== undefined) update.start_date = patch.startDate;
+    if (patch.endDate !== undefined) update.end_date = patch.endDate;
+    if (patch.budgetLimit !== undefined) update.budget_limit = patch.budgetLimit;
+    if (patch.travelStyle !== undefined) update.travel_style = patch.travelStyle;
+    if (patch.appStatus !== undefined) update.status = dbStatus(patch.appStatus);
+
+    let query = supabase.from("trip_plans").update(update).eq("id", planId);
+    // กันไปแก้แผวของคนอื่น (RLS ก็บังคับอยู่แล้ว แต่กรองซ้ำชัดกว่า)
+    if (row.creator_id) query = query.eq("creator_id", row.creator_id);
+    const { error } = await query;
+    if (error) {
+      console.warn("[tripPlanService] บันทึกการแก้ไขแผนไม่สำเร็จ:", error.message);
+      return false;
+    }
+    return true;
+  } catch (e: any) {
+    console.warn("[tripPlanService] บันทึกการแก้ไขแผนไม่สำเร็จ:", e?.message ?? e);
+    return false;
   }
 }

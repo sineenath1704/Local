@@ -31,6 +31,8 @@ export interface CommentReply {
   id: string;
   authorName: string;
   avatarKey?: string;
+  /** รูปจากฐานข้อมูล (คอมเมนต์จริง) — มีค่าเมื่อข้อมูลมาจาก Supabase */
+  avatarUri?: string | null;
   timeAgo: string;
   text: string;
   likes: number;
@@ -40,6 +42,8 @@ export interface CommentItem {
   id: string;
   authorName: string;
   avatarKey?: string;
+  /** รูปจากฐานข้อมูล (คอมเมนต์จริง) — มีค่าเมื่อข้อมูลมาจาก Supabase */
+  avatarUri?: string | null;
   timeAgo: string;
   text: string;
   likes: number;

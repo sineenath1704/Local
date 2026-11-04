@@ -1,6 +1,9 @@
 -- ============================================================
 --  Local app — Storage buckets + policies
 --  Run in Supabase SQL Editor (or create buckets in the dashboard).
+-- ------------------------------------------------------------
+--  ✅ รันซ้ำได้ (idempotent): bucket ใช้ on conflict do nothing
+--     และทุก policy ถูก `drop policy if exists` ก่อน `create policy`
 -- ============================================================
 -- Two public-read buckets. Writes are restricted to the owning user,
 -- enforced by putting the user's id as the first path segment:
@@ -17,33 +20,41 @@ values ('videos', 'videos', true)
 on conflict (id) do nothing;
 
 -- Public read for both buckets
+drop policy if exists "public read avatars" on storage.objects;
 create policy "public read avatars" on storage.objects
   for select using (bucket_id = 'avatars');
+drop policy if exists "public read videos" on storage.objects;
 create policy "public read videos" on storage.objects
   for select using (bucket_id = 'videos');
 
 -- Users can write only inside their own folder (first path segment = their uid)
+drop policy if exists "avatars write own folder" on storage.objects;
 create policy "avatars write own folder" on storage.objects
   for insert with check (
     bucket_id = 'avatars' and (storage.foldername(name))[1] = auth.uid()::text
   );
+drop policy if exists "avatars update own folder" on storage.objects;
 create policy "avatars update own folder" on storage.objects
   for update using (
     bucket_id = 'avatars' and (storage.foldername(name))[1] = auth.uid()::text
   );
+drop policy if exists "avatars delete own folder" on storage.objects;
 create policy "avatars delete own folder" on storage.objects
   for delete using (
     bucket_id = 'avatars' and (storage.foldername(name))[1] = auth.uid()::text
   );
 
+drop policy if exists "videos write own folder" on storage.objects;
 create policy "videos write own folder" on storage.objects
   for insert with check (
     bucket_id = 'videos' and (storage.foldername(name))[1] = auth.uid()::text
   );
+drop policy if exists "videos update own folder" on storage.objects;
 create policy "videos update own folder" on storage.objects
   for update using (
     bucket_id = 'videos' and (storage.foldername(name))[1] = auth.uid()::text
   );
+drop policy if exists "videos delete own folder" on storage.objects;
 create policy "videos delete own folder" on storage.objects
   for delete using (
     bucket_id = 'videos' and (storage.foldername(name))[1] = auth.uid()::text

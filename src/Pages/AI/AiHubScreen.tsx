@@ -16,6 +16,8 @@ import {
   SparklesIcon,
 } from "react-native-heroicons/outline";
 import { useAiPlanner } from "../../state/AiPlannerContext";
+import type { ClipContext } from "../../data/tripsData";
+import type { VideoPost } from "../../data/homeFeedData";
 
 import AiChatScreen from "./AiChatScreen";
 import TripDashboard from "./TripDashboard";
@@ -28,7 +30,17 @@ type HubTab = "chat" | "trips";
 
 type Nav =
   | { view: "hub" }
-  | { view: "chat"; threadId: string; initialMessage?: string }
+  | {
+      view: "chat";
+      threadId: string;
+      initialMessage?: string;
+      /** บริบทคลิปที่ผู้ใช้กูลับมาแชท (ปุ่ม "คุยต่อกับ AI เรื่องนี้") */
+      clipContext?: ClipContext | null;
+      /** คลิปที่ผู้ใช้กูลับมา — แนบเป็นวิดีโอในแชท */
+      video?: VideoPost | null;
+      /** แผนทริปที่กำลังจะให้เอไaiช่วยแก้ (จากหน้าแผนทริป) */
+      planContext?: unknown;
+    }
   | { view: "wizard"; folderId?: string }
   | { view: "itinerary"; tripId: string };
 
@@ -103,6 +115,9 @@ export default function AiHubScreen({
         view: "chat",
         threadId: pendingChatSeed.threadId,
         initialMessage: pendingChatSeed.message,
+        clipContext: pendingChatSeed.clipContext ?? null,
+        video: pendingChatSeed.video ?? null,
+        planContext: pendingChatSeed.planContext ?? null,
       });
       consumePendingChatSeed();
     }
@@ -116,6 +131,9 @@ export default function AiHubScreen({
       <AiChatScreen
         threadId={nav.threadId}
         initialMessage={nav.initialMessage}
+        initialClipContext={nav.clipContext ?? null}
+        initialVideo={nav.video ?? null}
+        initialPlanContext={nav.planContext ?? null}
         onBack={goHub}
         onPlanTrip={(folderId) => setNav({ view: "wizard", folderId })}
         onOpenTrip={(tripId) => setNav({ view: "itinerary", tripId })}

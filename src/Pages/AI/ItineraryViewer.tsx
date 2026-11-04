@@ -120,7 +120,9 @@ export default function ItineraryViewer({ tripId, onBack, onPostCheckin }: Itine
       `ออกจาก: ${trip.startPoint} • ${trip.days} วัน ${trip.nights} คืน\n` +
       `งบต่อคน: ${trip.budgetPerPerson.toLocaleString()} ฿ (ประเมินใช้จริง ${b.perPerson.toLocaleString()} ฿)\n\n` +
       `${dayLines}`;
-    openChatWithSeed(summary);
+    // ส่งทั้งข้อความสรุป (ให้โมเดลเห็นภาพรวม) และโครงสร้างแผน (ให้ backend ใส่ system prompt
+    // → เอไออ้างอิงแผนเดิมได้ตรง ๆ ไม่ต้องเดาจากข้อความแบน)
+    openChatWithSeed(summary, { planContext: trip });
   };
 
   return (

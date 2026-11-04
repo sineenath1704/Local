@@ -143,9 +143,10 @@ export async function addClipToFolder(folderId: string, videoId: string): Promis
   guard(uid);
 
   // Also ensure the video is in video_saves (the "save" action)
-  await supabase
+  const { error: saveError } = await supabase
     .from("video_saves")
     .upsert({ user_id: uid, video_id: videoId }, { onConflict: "user_id,video_id" });
+  if (saveError) throw new Error(`addClipToFolder (บันทึกคลิป): ${saveError.message}`);
 
   const { error } = await supabase
     .from("folder_items")

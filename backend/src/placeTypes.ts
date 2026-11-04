@@ -180,6 +180,12 @@ export interface PlaceCandidate {
   /** 0-4, Google's guess at price band. Context only — never the real price. */
   priceLevel?: number | null;
   /**
+   * รูปสถานที่ — path สัมพัทธ์ของ route ที่ backend ยิงรูปมาให้
+   * (เช่น "/places/photo?ref=…") · API key ของ Google เป็น server-only
+   * แอปจึงต้องเรียกผ่าน backend เสมอ ไม่ยิง Google เอง
+   */
+  photoUrl?: string | null;
+  /**
    * ระดับที่สถานที่นี้อยู่ในชุมชน/ตำบล/อำเภอของ scope ที่ส่งมา
    * มีเฉพาะตอนที่คำขอมี scope — ไม่มี scope = ยังไม่รู้ว่าอยู่ที่ไหน
    */

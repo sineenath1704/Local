@@ -1,6 +1,19 @@
 import { Router, Request, Response } from "express";
 import { callAi, isAiConfigured, AiMessage } from "../aiCore";
-import { buildChatSystemPrompt, FolderContext, HostSelfContext, PlaceContext } from "../tripPrompt";
+import {
+  buildChatSystemPrompt,
+  buildClipContextBlock,
+  buildPlanContextBlock,
+  buildTripDraftBlock,
+  buildTripDraftResult,
+  mergeTripSlots,
+  normalizeTripSlots,
+  parseTripDraftLine,
+  FolderContext,
+  HostSelfContext,
+  PlaceContext,
+  TripSlots,
+} from "../tripPrompt";
 import {
   formatCommunityContext,
   loadCommunityBundle,
@@ -12,6 +25,11 @@ import {
   formatFolderContextBlock,
   FolderAccessError,
 } from "../folderContext";
+import type { FolderPlace } from "../folderContext";
+import { lookupPlace, findNameMatches } from "../placeLookup";
+import type { PlaceChoice } from "../placeLookup";
+import type { LocationScope } from "../placeScope";
+import { detectProvinceInText } from "../communityContext";
 
 import { getSupabaseAdmin } from "../supabaseAdmin";
 import { requestId } from "../middleware/requestContext";
@@ -30,7 +48,15 @@ import { sendError } from "../middleware/errors";
  *   place?: PlaceContext,                                // optional specific place context
  *   mode?:  "tourist" | "host-self",                     // host-self = JWT-gated advisor
  *   communityId?: string,                                // optional community context (D22)
+ *   placeName?: string,                                  // ชื่อสถานที่ที่กำลังถาม (ค้นให้ตรงแห่ง)
+ *   clipContext?: { ... },                               // บริบทจากคลิปที่ผู้ใช้กูลับมาแชท
+ *   tripDraft?: { slots, missing?, planReady? },        // สถานะช่องข้อมูลแผนทริปที่สะสมไว้
+ *   planContext?: { ... },                               // แผนเดิมที่ผู้ใช้กำลังจะแก้
  * }
+ *
+ * Response เพิ่ม `tripDraft: { slots, missing, planReady }`
+ *   → มีเฉพาะตอนที่โมเดลส่งสัญญาณ `TRIP_DRAFT:` มา (คือผู้ใช้กำลังวางแผนทริปจริง ๆ)
+ *   → ไม่มี = แอปไม่ต้องโชว์ปุ่มแผน (กันปุ่มขึ้นทุกครั้งที่เอไอตอบ)
  *
  * `folderId` คือ path ใหม่: ฝั่งแอปส่งแค่รหัสโฟลเดอร์ → backend ไปอ่านคลิปจริง
  * จับคู่กับทะเบียนสถานที่ แล้วเรียบเรียงเป็นบล็อกข้อมูลให้เอง
@@ -102,7 +128,48 @@ router.post("/", async (req: Request, res: Response) => {
       ? body.folderId.trim()
       : null;
   const place: PlaceContext | undefined = body.place;
+  // ผู้ใช้เลือกสถานที่จากรายการ (ตอนชื่อซ้ำหลายแห่ง) → ส่ง place_id กลับมา
+  // เป็นตัวระบุเท่านั้น ไม่ใช่ข้อมูลที่ฝั่งแอปควรส่งมาเอง
+  const chosenPlaceId: string | null =
+    typeof body.placeId === "string" && body.placeId.trim() ? body.placeId.trim() : null;
+  const chosenPlaceName: string | null =
+    typeof body.placeName === "string" && body.placeName.trim() ? body.placeName.trim() : null;
   const mode: "tourist" | "host-self" = body.mode === "host-self" ? "host-self" : "tourist";
+  /**
+   * บริบทจากคลิปที่ผู้ใช้กูลับมาแชท (ปุ่ม "คุยต่อกับ AI เรื่องนี้")
+   * → แทรกเป็นบล็อกแยกใน system prompt ให้โมเดลยึดข้อมูลคลิปเป็นหลัก
+   * (ค่าที่ส่งมาถูก sanitize ใน buildClipContextBlock — ข้อมูลฝั่งแอป = ไม่ใช่คำสั่ง)
+   */
+  const clipBlock = buildClipContextBlock(body.clipContext);
+  /**
+   * สถานะช่องข้อมูลแผนทริปที่แอปส่งกลับมา (สะสมจากรอบก่อน ๆ)
+   * -------------------------------------------------------------
+   * แอปส่งมาได้ 2 รูปแบบ: ทั้งออบเจกต์ `{slots, missing, planReady}` หรือสล็อตตรง ๆ
+   * → รับได้ทั้งสองแบบ แล้ว normalize ให้เป็นรูปแบบเดียวก่อนใช้
+   */
+  const rawDraft = body.tripDraft;
+  const rawSlots =
+    rawDraft && typeof rawDraft === "object" && "slots" in (rawDraft as any)
+      ? (rawDraft as any).slots
+      : rawDraft;
+  const clientSlots: TripSlots = normalizeTripSlots(rawSlots);
+  /**
+   * แผนเดิมที่ผู้ใช้กำลังจะแก้ (ปุ่ม "ส่งกลับให้เอไอแก้" ในหน้าไทม์ไลน์)
+   * → แทรกเป็นบล็อกข้อมูลใน system prompt (sanitize ใน buildPlanContextBlock)
+   */
+  const planBlock = buildPlanContextBlock(body.planContext);
+  /**
+   * ชื่อสถานที่ในคลิป = "สมอ" ของแชทนี้
+   * -------------------------------------------------------------
+   * ข้อความแรกของแชทมีชื่อนี้อยู่แล้ว แต่ข้อความตามมา ("ราคาเท่าไหร่",
+   * "มีที่จอดรถไหม") มักไม่พูดถึงชื่อสถานที่เลย → ให้ยึดชื่อนี้ต่อ แล้วดึง
+   * ข้อมูลจากทะเบียน/Google ให้ครบทุกข้อความในแชท (ไม่ใช่เฉพาะข้อแรก)
+   */
+  const clipCtx = (body.clipContext ?? {}) as { placeName?: unknown };
+  const clipPlaceName =
+    typeof clipCtx.placeName === "string"
+      ? clipCtx.placeName.trim().slice(0, 200) || null
+      : null;
 
   if (messages.length === 0) {
     return res.status(400).json({
@@ -114,6 +181,16 @@ router.post("/", async (req: Request, res: Response) => {
 
   let resolvedPlace: PlaceContext | undefined = place;
   let resolvedHostSelf: HostSelfContext | undefined;
+  // ข้อมูลที่ใช้ต่อในขั้นตอน "เติมข้อมูลสถานที่จาก Google" (ไม่เปลี่ยนพฤติกรรมเดิมของข้างบน)
+  let registryPlaceId: string | null = null;
+  let registryPlaceNames: string[] = [];
+  let folderPlaces: FolderPlace[] = [];
+  let communityArea: {
+    community?: string | null;
+    province?: string | null;
+    district?: string | null;
+    subdistrict?: string | null;
+  } = {};
   // ชุมชนที่จะใช้เป็นบริบท (D22) — host ได้จากบัญชีตัวเอง, tourist มาจาก
   // ที่ผู้ใช้ระบุ / ชื่อที่พิมพ์ / สถานที่ที่เจอ
   let communityId: string | null =
@@ -242,6 +319,8 @@ router.post("/", async (req: Request, res: Response) => {
             "opening_hours", "price_info", "price_level", "website",
             "rating", "user_ratings_total", "business_hours",
             "business_pricing",
+            // Google place id — ใช้ดึงรายละเอียดที่ขาดโดยไม่ต้องค้นชื่อใหม่
+            "place_id",
             // ชุมชนของสถานที่นี้ (D22) — คอลัมน์ของ add_place_matching.sql
             "community_id",
             // The four clip-derived facts — they need their migration.
@@ -252,6 +331,7 @@ router.post("/", async (req: Request, res: Response) => {
             (c) => !["capacity", "house_rules", "areas", "facilities"].includes(c)
           );
           const withoutCommunity = withoutFacts.filter((c) => c !== "community_id");
+          const withoutPlaceId = withoutCommunity.filter((c) => c !== "place_id");
           const widePlaces = (await admin
             .from("community_places")
             .select(placeColumns.join(", "))
@@ -268,23 +348,49 @@ router.post("/", async (req: Request, res: Response) => {
             ((await admin
               .from("community_places")
               .select(withoutCommunity.join(", "))
+              .limit(50)).data as any[] | null) ??
+            ((await admin
+              .from("community_places")
+              .select(withoutPlaceId.join(", "))
               .limit(50)).data as any[] | null);
 
           if (places && places.length > 0) {
+            // ชื่อสถานที่ในทะเบียนทั้งหมด (ไว้หาว่าผู้ใช้ถามถึงชื่อไหน)
+            registryPlaceNames = places
+              .map((p) => p.place_name)
+              .filter((n): n is string => typeof n === "string" && n.length > 0);
             // Rank instead of take-the-first-hit. Querying "บ้านปายเปิดกี่โมง"
             // matches both "บ้านปาย" and "บ้านปายใหม่", and the old `.find()`
             // returned whichever row Postgres happened to order first. The
             // longer name is the more specific one the traveller wrote, so it
             // wins; rating only breaks a genuine tie.
-            const query = lastUser.content.toLowerCase();
-            const matched = places
-              .filter((p) => p.place_name && query.includes(p.place_name.toLowerCase()))
+            //
+            // Matching is done by name similarity, not a raw substring: the
+            // old `query.includes(place_name)` compared the raw text, so
+            // "แม่ยายโฮมสเตย์" never matched the registry row
+            // "แม่ยาย โฮมสเตย์" — the traveller had to type the name
+            // character-for-character. `findNameMatches` ignores spacing and
+            // tolerates typos, using the same threshold as the Google gate.
+            let registryMatches = findNameMatches(
+              lastUser.content ?? "",
+              places,
+              (p) => p.place_name
+            );
+            // ข้อความตามมาในแชทคลิปมักไม่พูดถึงชื่อสถานที่ ("ราคาเท่าไหร่")
+            // → ถ้าไม่เจอในข้อความ ลองชื่อสถานที่ในคลิปแทน
+            if (registryMatches.length === 0 && clipPlaceName) {
+              registryMatches = findNameMatches(clipPlaceName, places, (p) => p.place_name);
+            }
+            const matched = registryMatches
               .sort((a, b) => {
-                const lenDiff = (b.place_name?.length ?? 0) - (a.place_name?.length ?? 0);
+                const lenDiff =
+                  (b.item.place_name?.length ?? 0) - (a.item.place_name?.length ?? 0);
                 if (lenDiff !== 0) return lenDiff;
-                return (Number(b.rating) || 0) - (Number(a.rating) || 0);
-              })[0];
+                return (Number(b.item.rating) || 0) - (Number(a.item.rating) || 0);
+              })[0]?.item;
             if (matched) {
+              // Google place id ของแถวนี้ (ถ้ามี) → ใช้ดึงข้อมูลที่ขาดโดยไม่ต้องค้นชื่อใหม่
+              registryPlaceId = matched.place_id ?? null;
               // owner_id is nullable (ON DELETE SET NULL), so a place whose
               // host deleted their account comes back with no embed at all.
               const host = Array.isArray(matched.users) ? matched.users[0] : matched.users;
@@ -380,6 +486,8 @@ router.post("/", async (req: Request, res: Response) => {
     } else {
       try {
         const ctx = await loadFolderContext(admin, folderId, folderUid);
+        // เก็บสถานที่ในโฟลเดอร์ไว้ (มีข้อมูลที่สรุปไว้แล้ว + registryPlaceId)
+        folderPlaces = ctx.places ?? [];
         resolvedFolder = {
           folderName: ctx.folderName,
           places: ctx.places.map((p) => p.name),
@@ -425,6 +533,12 @@ router.post("/", async (req: Request, res: Response) => {
         const nearby = bundle.community?.province
           ? await loadNearbyCommunities(admin, bundle.community.province, communityId)
           : [];
+        communityArea = {
+          community: bundle.community?.name ?? null,
+          province: bundle.community?.province ?? null,
+          district: bundle.community?.district ?? null,
+          subdistrict: bundle.community?.subdistrict ?? null,
+        };
         communityBlock = formatCommunityContext(bundle, nearby, mode === "host-self" ? "host" : "tourist");
       }
     }
@@ -432,7 +546,69 @@ router.post("/", async (req: Request, res: Response) => {
     // บริบทชุมชนเป็นส่วนเสริม — ล้มเหลวไม่ได้ทำให้แชทใช้ไม่ได้
   }
 
-  const system = buildChatSystemPrompt(resolvedFolder, resolvedPlace, resolvedHostSelf) + communityBlock;
+  // ── เติมข้อมูล "สถานที่เจาะจง" จาก Google Places ────────────────────
+  // เป็นขั้นตอนเสริม: ล้มเหลวก็แชทเดินต่อได้เหมือนเดิมทุกประการ
+  // ลำดับแหล่งข้อมูล: ที่ผู้ใช้เลือก → ทะเบียน → โฟลเดอร์ → ค้นชื่อใหม่
+  let placeCandidates: PlaceChoice[] | undefined;
+  /** หมายเหตุให้โมเดลตอบตรง ๆ เมื่อ "ค้นแล้วไม่เจอ" (แยนจาก "ยังไม่มีข้อมูล") */
+  let placeLookupNote = "";
+  if (mode === "tourist") {
+    try {
+      const lastUser = [...messages].reverse().find((m) => m.role === "user");
+      const text = lastUser?.content ?? "";
+      const detectedProvince = detectProvinceInText(text);
+      const scope: LocationScope = {
+        community: communityArea.community ?? null,
+        province: communityArea.province ?? detectedProvince,
+        district: communityArea.district ?? null,
+        subdistrict: communityArea.subdistrict ?? null,
+      };
+      console.log(
+        `[ai-chat] บริบทที่ใช้ · โหมด=${mode} · โฟลเดอร์=${folderId ? "มี" : "ไม่มี"} · ` +
+          `ชุมชน=${communityArea.community ?? "-"} · จังหวัดจากชุมชน=${communityArea.province ?? "-"} · ` +
+          `จังหวัดที่อ่านจากข้อความ=${detectedProvince ?? "-"} · จังหวัดที่ใช้=${scope.province ?? "-"} · ` +
+          `placeId=${chosenPlaceId ?? "-"} · ข้อความ="${text.slice(0, 80)}"`
+      );
+      const lookup = await lookupPlace({
+        text,
+        base: resolvedPlace,
+        basePlaceId: registryPlaceId,
+        folderPlaces,
+        registryNames: registryPlaceNames,
+        placeId: chosenPlaceId,
+        placeName: chosenPlaceName,
+        // ชื่อสถานที่ของแชท (จากคลิป) → ใช้ต่อเมื่อข้อความไม่ได้พูดถึงที่ไหนเลย
+        anchorPlaceName: clipPlaceName,
+        scope,
+      });
+      if (lookup.context) resolvedPlace = lookup.context;
+      if (lookup.candidates.length > 0) placeCandidates = lookup.candidates;
+      // ค้นชื่อแล้วไม่เจอ → บอกโมเดลให้ตอบตรง ๆ ว่าไม่พบ
+      // (เดิมโมเดลตอบกว้าง ๆ ว่า "ยังไม่มีข้อมูล" → แยกไม่ออกว่าไม่เคยค้นหรือค้นแล้วไม่เจอ)
+      if (!lookup.context && lookup.queriedName && lookup.candidates.length === 0) {
+        placeLookupNote =
+          `\n\n[ข้อมูลสถานที่] ค้นชื่อ "${lookup.queriedName}" ในทะเบียนสถานที่และ Google Maps แล้วไม่พบ — ` +
+          `ตอบผู้ใช้ตรง ๆ ว่าไม่พบสถานที่ชื่อนี้ และขอชื่อที่ตรงกว่านี้ หรือจังหวัด/อำเภอ เพื่อค้นต่อ`;
+      }
+      console.log(
+        `[ai-chat] ผลลัพธ์สถานที่ · มีข้อมูล=${lookup.context ? "มี" : "ไม่มี"} · ` +
+          `ที่มา=${lookup.source ?? "-"} · ผู้มีคัด=${lookup.candidates.length} · ` +
+          `คำขอที่คิดเงิน=${lookup.billableCalls} · ผู้มีคัดในข้อความ=${placeCandidates?.length ?? 0}`
+      );
+    } catch (err: any) {
+      console.warn("[ai-chat] เติมข้อมูลสถานที่จาก Google ไม่สำเร็จ:", err?.message);
+    }
+  } else {
+    console.log("[ai-chat] ข้ามการค้นสถานที่ (โหมด host-self)");
+  }
+
+  const system =
+    buildChatSystemPrompt(resolvedFolder, resolvedPlace, resolvedHostSelf) +
+    communityBlock +
+    clipBlock +
+    planBlock +
+    buildTripDraftBlock(clientSlots) +
+    placeLookupNote;
 
   if (!isAiConfigured()) {
     // Graceful stub so the app works before the token is set.
@@ -447,9 +623,40 @@ router.post("/", async (req: Request, res: Response) => {
   }
 
   try {
+    // ชื่อซ้ำหลายแห่ง → ให้ผู้ใช้เลือกก่อน (ยังไม่ต้องให้โมเดลตอบ)
+    if (placeCandidates && placeCandidates.length > 0) {
+      return res.json({
+        reply:
+          "เจอสถานที่ชื่อเหมือนกันหลายแห่ง — เลือกอันที่ถูกที่สุดได้เลยครับ",
+        placeCandidates,
+      });
+    }
     // งบ 4096: บล็อกข้อมูลโฟลเดอร์ยาวกว่าเดิม (รายชื่อ + ราคา + ที่อยู่ + คลิปย่อ)
     const reply = await callAi({ system, messages, maxTokens: 4096 });
-    return res.json({ reply });
+
+    // ── สัญญาณแผนทริป ───────────────────────────────────────────────
+    // โมเดลเขียนบรรทัด TRIP_DRAFT:{...} ต่อท้ายคำตอบเมื่อผู้ใช้กำลังวางแผนทริป
+    // → ตัดบรรทัดนั้นออก (ผู้ใช้ไม่ต้องเห็นสัญญาณของระบบ) แล้ว merge กับสถานะที่แอปส่งมา
+    //   → คำนวณ "ขาดอะไร" แบบ deterministic ในโค้ด (ไม่ให้โมเดลตัดสิน)
+    // ถ้าโมเดลไม่เขียน TRIP_DRAFT → ไม่มี tripDraft → แอปไม่โชว์ปุ่มแผน
+    const parsed = parseTripDraftLine(reply);
+    const cleanReply = parsed.reply.trim() || "ได้ค่ะ อยากให้ช่วยเรื่องอะไรต่อคะ";
+    if (!parsed.slots) {
+      return res.json({ reply: cleanReply });
+    }
+
+    const merged = mergeTripSlots(clientSlots, parsed.slots);
+    const hasAnySlot = Object.values(merged).some(
+      (v) => v !== undefined && v !== null
+    );
+    if (!hasAnySlot) {
+      return res.json({ reply: cleanReply });
+    }
+
+    return res.json({
+      reply: cleanReply,
+      tripDraft: buildTripDraftResult(merged),
+    });
   } catch (err: any) {
     return sendError(res, err, req);
   }

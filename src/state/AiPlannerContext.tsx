@@ -1,11 +1,38 @@
-import React, { createContext, useContext, useMemo, useState, useCallback, useEffect } from "react";
+import React, {
+  createContext,
+  useContext,
+  useMemo,
+  useState,
+  useCallback,
+  useEffect,
+  useRef,
+} from "react";
 import {
   AiChatThread,
   AiChatMessage,
+  ClipContext,
   Trip,
   TripStatus,
+  TRAVEL_STYLES,
 } from "../data/tripsData";
-import { fetchMyTripPlans } from "../services/tripPlanService";
+import type { VideoPost } from "../data/homeFeedData";
+import { fetchMyTripPlans, updateMyTripPlan } from "../services/tripPlanService";
+
+/**
+ * สิ่งที่แนบมากับข้อความแรกของแชทที่เปิดจากคลิป
+ * -------------------------------------------------------------
+ * · clipContext = ข้อมูลสถานที่จากสรุปของคลิป → backend แทรกใน system prompt
+ * · video       = คลิปเอง → แสดงเป็นการ์ดวิดีโอในแชท (แตะเปิดดูเต็มจอ)
+ */
+export interface ChatSeedExtras {
+  clipContext?: ClipContext | null;
+  video?: VideoPost | null;
+  /**
+   * แผนทริปที่กำลังจะให้เอไaiช่วยแก้ (จากหน้าแผนทริป)
+   * → ส่งเป็นบล็อกข้อมูลใน system prompt ให้เอไaiอ้างอิงแผนเดิมได้
+   */
+  planContext?: unknown;
+}
 
 /**
  * AiPlannerContext — chat threads + trips produced by the AI planner.
@@ -20,9 +47,9 @@ interface AiPlannerState {
    * comment sheet's AI-summary tab → "คุยต่อกับ AI"). Holds the thread that was
    * just created + the first user message to send. AiHubScreen consumes it.
    */
-  pendingChatSeed: { threadId: string; message: string } | null;
+  pendingChatSeed: ({ threadId: string; message: string } & ChatSeedExtras) | null;
   /** Create a fresh general thread seeded with `message`, and request opening it. */
-  openChatWithSeed: (message: string) => void;
+  openChatWithSeed: (message: string, extras?: ChatSeedExtras) => void;
   /** Clear the pending seed once AiHubScreen has opened + sent it. */
   consumePendingChatSeed: () => void;
 
@@ -32,6 +59,15 @@ interface AiPlannerState {
   /** Start (or reuse) the thread tied to a folder. Returns thread id. */
   startFolderThread: (folderId: string, folderName: string) => string;
   appendMessage: (threadId: string, msg: Omit<AiChatMessage, "id" | "at">) => void;
+  /**
+   * แก้ไขข้อความเดิมในเธรด (ไม่ใช่เพิ่มข้อความใหม่)
+   * → ใช้ตอนแนบ/แก้แผนทริปที่วาดไว้กับข้อความนั้น
+   */
+  updateMessage: (
+    threadId: string,
+    messageId: string,
+    patch: Partial<AiChatMessage>
+  ) => void;
 
   addTrip: (trip: Trip) => void;
   updateTrip: (tripId: string, patch: Partial<Trip>) => void;
@@ -50,10 +86,29 @@ export function AiPlannerProvider({ children }: { children: React.ReactNode }) {
   const [threads, setThreads] = useState<AiChatThread[]>([]);
   const [trips, setTrips] = useState<Trip[]>([]);
   const [pendingChatSeed, setPendingChatSeed] = useState<
-    { threadId: string; message: string } | null
+    ({ threadId: string; message: string } & ChatSeedExtras) | null
   >(null);
 
   const getThread = useCallback((id: string) => threads.find((t) => t.id === id), [threads]);
+
+  /**
+   * ทริปณปัจจุบัน (สำหรับตัวจับเวลาหน่วงการบันทึก)
+   * → เก็บใน ref เพื่อให้ callback ไม่ต้องผูกกับ state (ไม่สร้าง callback ใหม่ทุกครั้งที่แก้)
+   */
+  const tripsRef = useRef<Trip[]>(trips);
+  useEffect(() => {
+    tripsRef.current = trips;
+  }, [trips]);
+
+  /** ตัวจับเวลาหน่วงการเขียนลง Supabase (key = planId) */
+  const persistTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  useEffect(() => {
+    // เคลียร์ตัวจับเวลาตอนแอปปิด
+    const timers = persistTimers.current;
+    return () => {
+      Object.values(timers).forEach((t) => clearTimeout(t));
+    };
+  }, []);
 
   /**
    * โหลดแผนทริปที่บันทึกไว้ในระบบ (`trip_plans`) ตอนเปิดแอป
@@ -88,15 +143,29 @@ export function AiPlannerProvider({ children }: { children: React.ReactNode }) {
     return id;
   }, []);
 
-  const openChatWithSeed = useCallback((message: string) => {
+  const openChatWithSeed = useCallback((message: string, extras?: ChatSeedExtras) => {
     const text = message.trim();
     if (!text) return;
     const id = uid("thread");
     setThreads((prev) => [
-      { id, title: "คุยต่อจากสรุป AI", messages: [], createdAt: Date.now() },
+      {
+        id,
+        title: "คุยต่อจากสรุป AI",
+        messages: [],
+        createdAt: Date.now(),
+        // เก็บบริบทคลิปไว้กับเธรด → ทุกข้อความในแชทนี้ยึดข้อมูลชุดเดียวกัน
+        clipContext: extras?.clipContext ?? null,
+        video: extras?.video ?? null,
+      },
       ...prev,
     ]);
-    setPendingChatSeed({ threadId: id, message: text });
+    setPendingChatSeed({
+      threadId: id,
+      message: text,
+      clipContext: extras?.clipContext ?? null,
+      video: extras?.video ?? null,
+      planContext: extras?.planContext ?? null,
+    });
   }, []);
 
   const consumePendingChatSeed = useCallback(() => {
@@ -130,17 +199,73 @@ export function AiPlannerProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
+  const updateMessage = useCallback(
+    (threadId: string, messageId: string, patch: Partial<AiChatMessage>) => {
+      setThreads((prev) =>
+        prev.map((t) =>
+          t.id === threadId
+            ? {
+                ...t,
+                messages: t.messages.map((m) =>
+                  m.id === messageId ? { ...m, ...patch } : m
+                ),
+              }
+            : t
+        )
+      );
+    },
+    []
+  );
+
   const addTrip = useCallback((trip: Trip) => {
     setTrips((prev) => [trip, ...prev]);
   }, []);
 
-  const updateTrip = useCallback((tripId: string, patch: Partial<Trip>) => {
-    setTrips((prev) => prev.map((t) => (t.id === tripId ? { ...t, ...patch } : t)));
-  }, []);
+  /**
+   * แก้ไขทริป → อัปเดตในเครื่อง + บันทึกกลับ Supabase (ถ้าเป็นแผนที่มี planId)
+   * -----------------------------------------------------------------
+   * เดิมแก้แล้วหายเมื่อปิดแอป เพราะเก็บแค่ใน state
+   * → ตอนนี้เขียนกลับ `trip_plans` (RLS อนุญาตให้แก้แถวของตัวเอง)
+   */
+  const updateTrip = useCallback(
+    (tripId: string, patch: Partial<Trip>) => {
+      setTrips((prev) => prev.map((t) => (t.id === tripId ? { ...t, ...patch } : t)));
 
-  const setTripStatus = useCallback((tripId: string, status: TripStatus) => {
-    setTrips((prev) => prev.map((t) => (t.id === tripId ? { ...t, status } : t)));
-  }, []);
+      const planId = tripsRef.current.find((t) => t.id === tripId)?.planId;
+      if (!planId) return;
+
+      // หน่วงการเขียนลง DB — พิมพ์ชื่อจุดทีละตัวอักษรไม่ควรยิง Supabase ทุกตัว
+      const existing = persistTimers.current[planId];
+      if (existing) clearTimeout(existing);
+      persistTimers.current[planId] = setTimeout(() => {
+        delete persistTimers.current[planId];
+        const latest = tripsRef.current.find((t) => t.id === tripId);
+        if (!latest) return;
+        void updateMyTripPlan(planId, {
+          itinerary: latest.itinerary,
+          appStatus: latest.status,
+          planName: latest.title,
+          startLocation: latest.startPoint,
+          returnLocation: latest.endPoint ?? null,
+          budgetLimit: latest.budgetPerPerson,
+          travelStyle:
+            TRAVEL_STYLES.find((s) => s.key === latest.style)?.label ?? latest.style,
+        });
+      }, 800);
+    },
+    []
+  );
+
+  const setTripStatus = useCallback(
+    (tripId: string, status: TripStatus) => {
+      const current = tripsRef.current.find((t) => t.id === tripId);
+      setTrips((prev) => prev.map((t) => (t.id === tripId ? { ...t, status } : t)));
+      if (!current?.planId) return;
+      // สถานะของแอปเก็บใน `itinerary_data.__meta.appStatus` (คอลัมน์ status ของ DB เป็นคนละชุด)
+      void updateMyTripPlan(current.planId, { appStatus: status });
+    },
+    []
+  );
 
   const tripsByStatus = useCallback(
     (status: TripStatus) => trips.filter((t) => t.status === status),
@@ -202,6 +327,20 @@ export function AiPlannerProvider({ children }: { children: React.ReactNode }) {
         sourceFolderId: data.sourceFolderId,
         // สถานที่ของโฟลเดอร์พร้อมที่มา (ยืนยันแล้ว / ยังไม่ยืนยัน)
         folderPlaces: data.folderPlaces,
+        // ── ข้อมูลของแพลนที่คำนวณจริง ──
+        // (ต้องเก็บตั้งแต่ตอน "สร้างใหม่" ไม่ใช่ตอน "แก้ของเดิม"
+        //  ไม่งั้นแผนที่สร้างครั้งแรกจะไม่มีจุดสิ้นสุด/เส้นทาง/ราคาน้ำมัน)
+        travelers: data.travelers,
+        returnMode: data.returnMode,
+        endPoint: data.endPoint,
+        endPointCoords: data.endPointCoords,
+        vehicle: data.vehicle,
+        fuel: data.fuel,
+        lodging: data.lodging,
+        warnings: data.warnings,
+        assumptions: data.assumptions,
+        routeSource: data.routeSource,
+        routeCredit: data.routeCredit,
         createdAt: Date.now(),
       };
 
@@ -222,6 +361,7 @@ export function AiPlannerProvider({ children }: { children: React.ReactNode }) {
       startGeneralThread,
       startFolderThread,
       appendMessage,
+      updateMessage,
       addTrip,
       updateTrip,
       setTripStatus,
@@ -239,6 +379,7 @@ export function AiPlannerProvider({ children }: { children: React.ReactNode }) {
       startGeneralThread,
       startFolderThread,
       appendMessage,
+      updateMessage,
       addTrip,
       updateTrip,
       setTripStatus,

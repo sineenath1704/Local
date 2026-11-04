@@ -33,9 +33,12 @@ interface SaveToFolderSheetProps {
  */
 export default function SaveToFolderSheet({ visible, videoId, onClose }: SaveToFolderSheetProps) {
   const insets = useSafeAreaInsets();
-  const { folders, saveVideo, createFolder } = useInteractions();
+  const { folders, saveVideo, unsaveVideo, createFolder, isSaved } = useInteractions();
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
+
+  // คลิปนี้ถูกบันทึกไว้แล้วหรือยัง (จาก video_saves ใน DB)
+  const alreadySaved = !!videoId && isSaved(videoId);
 
   const handleSaveNoFolder = () => {
     if (videoId) saveVideo(videoId);
@@ -52,6 +55,12 @@ export default function SaveToFolderSheet({ visible, videoId, onClose }: SaveToF
     if (!name) return;
     const id = createFolder(name);
     if (videoId) saveVideo(videoId, id);
+    close();
+  };
+
+  /** เอาคลิปออกจากที่บันทึก (ทั้งแบบลอย และออกจากทุกโฟลเดอร์) */
+  const handleUnsave = () => {
+    if (videoId) unsaveVideo(videoId);
     close();
   };
 
@@ -78,15 +87,40 @@ export default function SaveToFolderSheet({ visible, videoId, onClose }: SaveToF
 
         {/* Header */}
         <View className="flex-row items-center justify-between px-5 pt-1 pb-3 border-b border-gray-100">
-          <Text className="text-lg font-black text-gray-900">บันทึกคลิป</Text>
+          <Text className="text-lg font-black text-gray-900">
+            {alreadySaved ? "คลิปที่บันทึกไว้" : "บันทึกคลิป"}
+          </Text>
           <TouchableOpacity onPress={close} className="p-1">
             <XMarkIcon size={22} color="#6B7280" />
           </TouchableOpacity>
         </View>
 
         <Text className="text-gray-500 text-[12px] px-5 pt-3 pb-1 leading-5">
-          เก็บคลิปไว้ในโฟลเดอร์ เพื่อให้ AI ช่วยวางแผนทริปจากคลิปที่คุณสนใจได้
+          {alreadySaved
+            ? "คลิปนี้อยู่ในรายการที่บันทึกไว้แล้ว — เก็บลงโฟลเดอร์เพิ่ม หรือเอาออกได้"
+            : "เก็บคลิปไว้ในโฟลเดอร์ เพื่อให้ AI ช่วยวางแผนทริปจากคลิปที่คุณสนใจได้"}
         </Text>
+
+        {/* เอาคลิปออกจากที่บันทึก (เฉพาะตอนที่คลิปถูกบันทึกไว้แล้ว) */}
+        {alreadySaved && (
+          <TouchableOpacity
+            onPress={handleUnsave}
+            activeOpacity={0.7}
+            className="flex-row items-center px-5 py-3.5 border-b border-gray-50"
+          >
+            <View className="w-10 h-10 rounded-xl bg-red-50 items-center justify-center mr-3">
+              <BookmarkIcon size={20} color="#DC2626" />
+            </View>
+            <View className="flex-1">
+              <Text className="text-gray-900 font-semibold text-[14px]">
+                เอาคลิปออกจากที่บันทึก
+              </Text>
+              <Text className="text-gray-400 text-[11px] mt-0.5">
+                เอาออกจากทุกโฟลเดอร์และจากรายการที่บันทึกไว้
+              </Text>
+            </View>
+          </TouchableOpacity>
+        )}
 
         {/* Save without folder */}
         <TouchableOpacity
@@ -95,9 +129,18 @@ export default function SaveToFolderSheet({ visible, videoId, onClose }: SaveToF
           className="flex-row items-center px-5 py-3.5 border-b border-gray-50"
         >
           <View className="w-10 h-10 rounded-xl bg-emerald-50 items-center justify-center mr-3">
-            <BookmarkIcon size={20} color="#2D6A4F" />
+            {alreadySaved ? (
+              <CheckSolid size={20} color="#2D6A4F" />
+            ) : (
+              <BookmarkIcon size={20} color="#2D6A4F" />
+            )}
           </View>
-          <Text className="text-gray-900 font-semibold text-[14px]">บันทึกแบบไม่จัดโฟลเดอร์</Text>
+          <View className="flex-1">
+            <Text className="text-gray-900 font-semibold text-[14px]">บันทึกแบบไม่จัดโฟลเดอร์</Text>
+            {alreadySaved && (
+              <Text className="text-gray-400 text-[11px] mt-0.5">บันทึกไว้แล้ว</Text>
+            )}
+          </View>
         </TouchableOpacity>
 
         {/* Create new folder */}

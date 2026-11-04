@@ -55,11 +55,13 @@ create index if not exists idx_video_ai_analyses_province on public.video_ai_ana
 alter table public.video_ai_analyses enable row level security;
 
 -- นโยบาย: ทุกคนสามารถอ่านผลวิเคราะห์ได้ (เพื่อแสดงผลในแอปและค้นหา)
+drop policy if exists "Anyone can read video_ai_analyses" on public.video_ai_analyses;
 create policy "Anyone can read video_ai_analyses"
   on public.video_ai_analyses for select
   using (true);
 
 -- นโยบาย: ผู้ใช้ที่ล็อกอินสามารถเพิ่มหรืออัปเดตผลวิเคราะห์ของโพสต์ตัวเองได้
+drop policy if exists "Owners can insert their video_ai_analyses" on public.video_ai_analyses;
 create policy "Owners can insert their video_ai_analyses"
   on public.video_ai_analyses for insert
   with check (
@@ -70,6 +72,7 @@ create policy "Owners can insert their video_ai_analyses"
     )
   );
 
+drop policy if exists "Owners can update their video_ai_analyses" on public.video_ai_analyses;
 create policy "Owners can update their video_ai_analyses"
   on public.video_ai_analyses for update
   using (

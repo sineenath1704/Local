@@ -218,7 +218,23 @@ const DETAILS_FIELD_MASK = [
   "places.rating",
   "places.userRatingCount",
   "places.priceLevel",
+  "places.photos",
 ].join(",");
+
+/**
+ * รูปสถานที่ → path ของ route ที่ยิงรูปมาให้แอป
+ *
+ * Google ไม่ให้ URL รูปตรง ๆ (Legacy ต้องใช้ `photo_reference` + key,
+ * New ต้องใช้ photo `name`) และ key เป็น server-only → แอปต้องผ่าน
+ * `/places/photo` ของเราแทน ค่า path ที่คืนเป็น relative เพราะ backend
+ * ไม่รู้ public URL ของตัวเอง (บน Vercel ขึ้นกับ deployment)
+ */
+function photoPathFor(ref?: string | null, name?: string | null): string | null {
+  if (ref) return `/places/photo?ref=${encodeURIComponent(ref)}&w=400`;
+  if (name) return `/places/photo?name=${encodeURIComponent(name)}&w=400`;
+  return null;
+}
+
 
 /** Map a Places API (New) payload → our candidate shape. */
 function mapNewPlace(p: any): PlaceCandidate {
@@ -251,6 +267,7 @@ function mapNewPlace(p: any): PlaceCandidate {
     primaryType: p.primaryType ?? null,
     primaryTypeDisplayName: p.primaryTypeDisplayName?.text ?? null,
     priceLevel: p.priceLevel ?? null,
+    photoUrl: photoPathFor(null, p.photos?.[0]?.name ?? null),
   };
 }
 
@@ -520,7 +537,7 @@ export async function getPlaceDetails(placeId: string): Promise<PlaceCandidate |
   try {
     const detUrl = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${encodeURIComponent(
       placeId
-    )}&fields=name,formatted_address,address_component,geometry,type,formatted_phone_number,opening_hours,rating,user_ratings_total,website,url,business_status,price_level&language=th&key=${config.places.googleKey}`;
+    )}&fields=name,formatted_address,address_component,geometry,type,formatted_phone_number,opening_hours,rating,user_ratings_total,website,url,business_status,price_level,photos&language=th&key=${config.places.googleKey}`;
     const detResp = await fetch(detUrl);
     if (detResp.ok) {
       const detData: any = await detResp.json();
@@ -553,6 +570,7 @@ export async function getPlaceDetails(placeId: string): Promise<PlaceCandidate |
           primaryType: r.type ?? null,
           primaryTypeDisplayName: null,
           priceLevel: r.price_level ?? null,
+          photoUrl: photoPathFor(r.photos?.[0]?.photo_reference ?? null, null),
         } as PlaceCandidate;
       }
     }
@@ -1829,6 +1847,64 @@ router.post("/details", async (req: Request, res: Response) => {
     const message =
       err?.name === "AbortError" ? "หมดเวลาเชื่อมต่อ Google" : err?.message || "ดึงข้อมูลสถานที่ไม่สำเร็จ";
     return res.status(502).json({ error: message });
+  }
+});
+
+/**
+ * GET /places/photo?ref=… | ?name=…&w=400
+ *
+ * ยิงรูปสถานที่จาก Google แล้วส่งไบต์กลับให้แอป
+ *
+ * ทำไมต้องมี route นี้: รูปของ Google ต้องใช้ API key ซึ่งเป็น server-only
+ * (ถ้าให้แอปยิงเอง key จะหลุดออกไปกับไบนารีของแอป) → backend ต้องเป็นคนยิง
+ * แล้วส่งรูปกลับเป็นไบต์ แอปเอา URL ของ route นี้ไปใช้ได้เลย
+ *
+ * - `ref`  = photo_reference ของ Places Legacy
+ * - `name` = photo name ของ Places (New) เช่น "places/ID/photos/PHOTO"
+ * - `w`    = ความกว้างที่ขอ (80–1200)
+ */
+router.get("/photo", async (req: Request, res: Response) => {
+  const ref = String(req.query.ref ?? "").trim();
+  const name = String(req.query.name ?? "").trim();
+  const rawWidth = Number.parseInt(String(req.query.w ?? "400"), 10);
+  const width = Number.isFinite(rawWidth) ? Math.min(Math.max(rawWidth, 80), 1200) : 400;
+
+  if (!isPlacesConfigured()) {
+    return res.status(503).json({ error: "Google Places ยังไม่ได้ตั้งค่า" });
+  }
+
+  // ตรวจรูปแบบก่อน — ค่านี้จะไปอยู่ใน query string ของ Google
+  // (host ของปลายทางถูกกำหนดไว้แล้ว และค่าถูก encodeURIComponent ก่อนใช้
+  //  → ผู้เรียกใช้ route นี้เป็นพร็อกซียิงที่อื่นไม่ได้)
+  const refOk = ref.length > 0 && ref.length <= 500 && /^[A-Za-z0-9_=.-]+$/.test(ref);
+  const nameOk = name.length > 0 && name.length <= 300 && /^[A-Za-z0-9_/-]+$/.test(name);
+
+  let upstreamUrl: string;
+  if (refOk) {
+    upstreamUrl =
+      `https://maps.googleapis.com/maps/api/place/photo` +
+      `?maxwidth=${width}&photoreference=${encodeURIComponent(ref)}&key=${config.places.googleKey}`;
+  } else if (nameOk) {
+    upstreamUrl =
+      `https://places.googleapis.com/v1/${encodeURIComponent(name)}/media` +
+      `?maxWidthPx=${width}&key=${config.places.googleKey}`;
+  } else {
+    return res.status(400).json({ error: "ต้องระบุ ref หรือ name ที่ถูกต้อง" });
+  }
+
+  try {
+    // Google ตอบ 302 ไป CDN — fetch ตาม redirect ให้เอง
+    const upstream = await fetch(upstreamUrl, { redirect: "follow" });
+    if (!upstream.ok) {
+      return res.status(404).json({ error: "ไม่พบรูปภาพของสถานที่นี้" });
+    }
+    const bytes = Buffer.from(await upstream.arrayBuffer());
+    res.setHeader("Content-Type", upstream.headers.get("content-type") ?? "image/jpeg");
+    res.setHeader("Cache-Control", "public, max-age=604800");
+    return res.send(bytes);
+  } catch (err: any) {
+    console.warn("[places] photo error:", err?.message);
+    return res.status(502).json({ error: "ดึงรูปจาก Google ไม่สำเร็จ" });
   }
 });
 

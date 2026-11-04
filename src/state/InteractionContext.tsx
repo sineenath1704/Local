@@ -90,6 +90,22 @@ export function InteractionProvider({ children }: { children: React.ReactNode })
   const [folders, setFolders] = useState<SaveFolder[]>([]);
   const [chatShares, setChatShares] = useState<ChatShare[]>([]);
 
+  // เก็บสถานะ like/save ไว้ใน ref ด้วย เพื่อให้:
+  //   1) กดซ้ำเร็ว ๆ ได้ผลถูกต้อง (อ่านค่าล่าสุด ไม่ใช่ค่าที่ปิด callback)
+  //   2) rollback ได้ถูกต้องตอน query ล้มเหลว
+  const likedRef = useRef<Set<string>>(new Set());
+  const savedRef = useRef<Set<string>>(new Set());
+
+  const applyLiked = useCallback((ids: string[]) => {
+    likedRef.current = new Set(ids);
+    setLiked(ids);
+  }, []);
+
+  const applySaved = useCallback((ids: string[]) => {
+    savedRef.current = new Set(ids);
+    setSaved(ids);
+  }, []);
+
   // ──────────────────────────────────────────────
   //  Load likes + saves + folders from Supabase
   // ──────────────────────────────────────────────
@@ -116,8 +132,8 @@ export function InteractionProvider({ children }: { children: React.ReactNode })
   useEffect(() => {
     console.log("[interaction] effect user =", user?.id ?? "null");
     if (!user) {
-      setLiked([]);
-      setSaved([]);
+      applyLiked([]);
+      applySaved([]);
       setFolders([]);
       return;
     }
@@ -127,8 +143,8 @@ export function InteractionProvider({ children }: { children: React.ReactNode })
     loadMyInteractions().then(({ likedIds, savedIds }) => {
       if (!active) return;
       console.log("[interaction] loaded likes =", likedIds.length, "saves =", savedIds.length);
-      setLiked(likedIds);
-      setSaved(savedIds);
+      applyLiked(likedIds);
+      applySaved(savedIds);
     });
 
     // Load folders from DB
@@ -137,7 +153,7 @@ export function InteractionProvider({ children }: { children: React.ReactNode })
     return () => {
       active = false;
     };
-  }, [user, loadFoldersFromDb]);
+  }, [user, loadFoldersFromDb, applyLiked, applySaved]);
 
   // ──────────────────────────────────────────────
   //  Queries
@@ -160,11 +176,19 @@ export function InteractionProvider({ children }: { children: React.ReactNode })
 
   const toggleLike = useCallback((videoId: string) => {
     // Optimistic update + persist to Supabase.
-    setLiked((prev) => {
-      const has = prev.includes(videoId);
-      if (has) void unlikeVideo(videoId);
-      else void likeVideo(videoId);
-      return has ? prev.filter((x) => x !== videoId) : [...prev, videoId];
+    const wasLiked = likedRef.current.has(videoId);
+    if (wasLiked) likedRef.current.delete(videoId);
+    else likedRef.current.add(videoId);
+    setLiked(Array.from(likedRef.current));
+
+    const request = wasLiked ? unlikeVideo(videoId) : likeVideo(videoId);
+    void request.catch((err: any) => {
+      console.warn("[interaction] toggleLike FAIL", videoId, err?.message ?? err);
+      // คืนสถานะเดิม — หน้าจอต้องไม่โชว์ "ถูกใจ" ทั้งที่บันทึกไม่ได้
+      if (wasLiked) likedRef.current.add(videoId);
+      else likedRef.current.delete(videoId);
+      setLiked(Array.from(likedRef.current));
+      Alert.alert("กดไลก์ไม่สำเร็จ", err?.message ?? String(err));
     });
   }, []);
 
@@ -173,18 +197,21 @@ export function InteractionProvider({ children }: { children: React.ReactNode })
 
   const saveVideo = useCallback((videoId: string, folderId?: string) => {
     // 1. Persist to video_saves (floating save)
-    setSaved((prev) => {
-      if (!prev.includes(videoId)) {
-        console.log("[save] saveVideoRow", videoId);
-        saveVideoRow(videoId).then(() => {
+    if (!savedRef.current.has(videoId)) {
+      console.log("[save] saveVideoRow", videoId);
+      savedRef.current.add(videoId);
+      setSaved(Array.from(savedRef.current));
+      saveVideoRow(videoId)
+        .then(() => {
           console.log("[save] saveVideoRow OK", videoId);
-        }).catch((e) => {
+        })
+        .catch((e: any) => {
           console.warn("[save] saveVideoRow FAIL", videoId, e?.message);
+          savedRef.current.delete(videoId);
+          setSaved(Array.from(savedRef.current));
           Alert.alert("บันทึกคลิปไม่สำเร็จ", e?.message ?? String(e));
         });
-      }
-      return prev.includes(videoId) ? prev : [...prev, videoId];
-    });
+    }
 
     // 2. If a folder is specified, also add to folder_items in DB
     if (folderId) {
@@ -197,41 +224,76 @@ export function InteractionProvider({ children }: { children: React.ReactNode })
         )
       );
 
+      const rollbackFolder = () =>
+        setFolders((prev) =>
+          prev.map((f) =>
+            f.id === folderId
+              ? { ...f, videoIds: f.videoIds.filter((v) => v !== videoId) }
+              : f
+          )
+        );
+
       // Check if this folderId is currently being created (in-flight optimistic ID)
       const pendingCreation = pendingCreationsRef.current.get(folderId);
       if (pendingCreation) {
+        // สร้างโฟลเดอร์ไม่สำเร็จ → createFolder แจ้งผู้ใช้ไปแล้ว
         pendingCreation
           .then((realFolder: Folder) => dbAddClipToFolder(realFolder.id, videoId))
-          .catch((err: unknown) => console.warn("[interaction] addClipToFolder after creation error:", err));
+          .catch((err: unknown) => {
+            console.warn("[interaction] addClipToFolder after creation error:", err);
+            rollbackFolder();
+          });
       } else {
         // Persist to Supabase directly
-        dbAddClipToFolder(folderId, videoId).catch((err: unknown) =>
-          console.warn("[interaction] addClipToFolder error:", err)
-        );
+        dbAddClipToFolder(folderId, videoId).catch((err: any) => {
+          console.warn("[interaction] addClipToFolder error:", err);
+          rollbackFolder();
+          Alert.alert("บันทึกลงโฟลเดอร์ไม่สำเร็จ", err?.message ?? String(err));
+        });
       }
     }
   }, []);
 
-  const unsaveVideo = useCallback((videoId: string) => {
-    setSaved((prev) => {
-      if (prev.includes(videoId)) void unsaveVideoRow(videoId);
-      return prev.filter((x) => x !== videoId);
-    });
-    // Remove from all local folders + DB
-    setFolders((prev) => {
-      prev.forEach((f) => {
-        if (f.videoIds.includes(videoId)) {
-          dbRemoveClipFromFolder(f.id, videoId).catch((err) =>
-            console.warn("[interaction] removeClipFromFolder error:", err)
-          );
+  const unsaveVideo = useCallback(
+    (videoId: string) => {
+      // ── Optimistic: เอาออกจากรายการที่บันทึกไว้ ──────────────────
+      const wasSaved = savedRef.current.has(videoId);
+      savedRef.current.delete(videoId);
+      setSaved(Array.from(savedRef.current));
+
+      // ── Optimistic: เอาออกจากทุกโฟลเดอร์ ─────────────────────────
+      //    คำนวณรายชื่อโฟลเดอร์ที่ได้รับผลกระทบจาก state ปัจจุบัน
+      //    (ห้ามเรียก DB ในตัว updater ของ setState — React อาจเรียกซ้ำ)
+      const affected = folders.filter((f) => f.videoIds.includes(videoId));
+      if (affected.length > 0) {
+        setFolders((prev) =>
+          prev.map((f) => ({ ...f, videoIds: f.videoIds.filter((v) => v !== videoId) }))
+        );
+      }
+
+      // ── DB: ลบออกจาก video_saves ─────────────────────────────────
+      //    ทำเสมอแม้ state ไม่รู้ว่าเคยบันทึก (delete ของแถวที่ไม่มี
+      //    ไม่ error — idempotent) → ไม่เหลือแถวค้างใน DB
+      unsaveVideoRow(videoId).catch((err: any) => {
+        console.warn("[interaction] unsaveVideo FAIL", videoId, err?.message);
+        // คืนสถานะเดิม — หน้าจอต้องไม่โชว์ "บันทึกแล้ว" ทั้งที่ลบไม่ได้
+        if (wasSaved) {
+          savedRef.current.add(videoId);
+          setSaved(Array.from(savedRef.current));
         }
+        Alert.alert("เอาคลิปออกจากที่บันทึกไม่สำเร็จ", err?.message ?? String(err));
       });
-      return prev.map((f) => ({
-        ...f,
-        videoIds: f.videoIds.filter((v) => v !== videoId),
-      }));
-    });
-  }, []);
+
+      // ── DB: ลบออกจากทุกโฟลเดอร์ที่มีคลิปนี้อยู่ ────────────────
+      affected.forEach((f) => {
+        dbRemoveClipFromFolder(f.id, videoId).catch((err: any) => {
+          console.warn("[interaction] removeClipFromFolder error:", err?.message);
+          Alert.alert("เอาคลิปออกจากโฟลเดอร์ไม่สำเร็จ", err?.message ?? String(err));
+        });
+      });
+    },
+    [folders]
+  );
 
   const createFolder = useCallback((name: string) => {
     // Optimistic ID so callers get an immediate response

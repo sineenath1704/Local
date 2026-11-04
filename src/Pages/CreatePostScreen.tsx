@@ -76,6 +76,25 @@ export interface InitialPostLocation {
   coords?: { lat: number; lng: number };
 }
 
+/**
+ * บีบคลิปให้เล็กตั้งแต่ตอนเลือก (iOS เท่านั้น — picker ของ Android ไม่บีบวิดีโอ)
+ * -------------------------------------------------------------
+ * 1280×720 + H.264: ขนาดไฟล์ลดราว 70–90% จากต้นฉบับ (เช่น 4K ยาว 2 นาที
+ * ~300 MB → ~20 MB) ทำให้ค่า bandwidth ของ Supabase ลดลงทั้ง 3 จุด:
+ *   1) ตอน backend ดึงคลิปไปให้ Gemini วิเคราะห์ (ดึงจาก Supabase = egress)
+ *   2) ตอนคนเล่นคลิปในฟีด (โหลดจาก Supabase = egress)
+ *   3) ขนาดไฟล์ที่เก็บใน Storage
+ * บีบตอนเลือก = ฟรี ไม่กินเวลาอัปโหลดและไม่ต้องพึ่งเซิร์ฟเวอร์
+ */
+const VIDEO_EXPORT_PRESET = ImagePicker.VideoExportPreset.H264_1280x720;
+
+/** ตัวเลือกของ picker (เหมือนกันทุกครั้ง — เปลี่ยนที่จุดเดียว) */
+const VIDEO_PICKER_OPTIONS: ImagePicker.ImagePickerOptions = {
+  mediaTypes: ["videos"],
+  quality: 1,
+  videoMaxDuration: 120,
+};
+
 interface CreatePostScreenProps {
   /** Called after a successful upload (host refreshes feed / switches tab). */
   onPosted?: () => void;
@@ -251,6 +270,10 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
   const isCommunityHost = user?.role === "host";
 
   const [videoUri, setVideoUri] = useState<string | null>(null);
+  // กำลังบีบคลิปในเครื่อง (iOS เท่านั้น) — picker ยังเปิดอยู่ตอนนี้
+  const [compressing, setCompressing] = useState(false);
+  // ข้อความเตือนสั้นๆ ใต้ตัวคลิป (เช่น บีบไม่ได้ → ใช้ไฟล์ต้นฉบับ)
+  const [clipNote, setClipNote] = useState<string | null>(null);
   const [caption, setCaption] = useState("");
   const [hashtags, setHashtags] = useState("");
   const [hashtagInput, setHashtagInput] = useState("");
@@ -1120,13 +1143,40 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
       Alert.alert("ต้องการสิทธิ์เข้าถึงคลังวิดีโอ", "โปรดอนุญาตให้แอปเข้าถึงคลังสื่อเพื่อเลือกวิดีโอ");
       return;
     }
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ["videos"],
-      quality: 1,
-      videoMaxDuration: 120,
-    });
+    // iOS: picker บีบให้ 720p/H.264 เอง (ทำในเครื่อง)
+    // Android: picker ไม่บีบ → ได้ไฟล์ต้นฉบับ (ยังไม่มีวิธีบีบใน Expo Go)
+    const canCompress = Platform.OS === "ios";
+    // Android ไม่บีบ → ไม่ต้องขึ้น "กำลังบีบ" (จะหลอกผู้ใช้ว่ากำลังย่อไฟล์)
+    setCompressing(canCompress);
+    setClipNote(null);
+    let result: ImagePicker.ImagePickerResult;
+    try {
+      result = await ImagePicker.launchImageLibraryAsync({
+        ...VIDEO_PICKER_OPTIONS,
+        ...(canCompress ? { videoExportPreset: VIDEO_EXPORT_PRESET } : null),
+      });
+    } catch (e: any) {
+      // บางเครื่องบีบไม่ได้ (เช่น คลิป HEVC/HDR ของ iPhone บางรุ่น) → เปิด picker ใหม่แบบไม่บีบ
+      console.warn("[pick] บีบคลิปไม่สำเร็จ ใช้ไฟล์ต้นฉบับแทน:", e?.message);
+      try {
+        result = await ImagePicker.launchImageLibraryAsync(VIDEO_PICKER_OPTIONS);
+        setClipNote("เครื่องนี้บีบคลิปไม่ได้ — ใช้ไฟล์ต้นฉบับ (อาจมีขนาดใหญ่)");
+      } catch (e2: any) {
+        setCompressing(false);
+        Alert.alert("เลือกวิดีโอไม่สำเร็จ", e2?.message ?? "ลองใหม่อีกครั้ง");
+        return;
+      }
+    }
+    setCompressing(false);
     if (!result.canceled && result.assets[0]?.uri) {
       const uri = result.assets[0].uri;
+      const asset = result.assets[0];
+      console.log(
+        "[pick] คลิปที่เลือก",
+        asset.fileSize ? `${(asset.fileSize / 1024 / 1024).toFixed(1)} MB` : "ขนาดไม่ทราบ",
+        `${asset.width ?? "?"}x${asset.height ?? "?"}`,
+        canCompress ? "(บีบ 720p แล้ว)" : "(ไฟล์ต้นฉบับ — Android picker ไม่บีบ)"
+      );
       const generation = ++videoGeneration.current;
       setVideoUri(uri);
       // Upload a draft copy to Storage → get a public URL → let the backend
@@ -1157,6 +1207,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
     setVideoUri(null);
     setDraftVideoUrl(null);
     setDraftVideoPath(null);
+    setClipNote(null);
     setSummary(null);
     setSummaryDraft("");
     setSummaryEditing(false);
@@ -1449,7 +1500,16 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
         contentContainerStyle={{ padding: 18, paddingBottom: 40 }}
       >
         {/* Video picker / preview */}
-        {videoUri ? (
+        {compressing ? (
+          <View
+            className="rounded-2xl border-2 border-dashed border-amber-200 bg-amber-50 items-center justify-center mb-4"
+            style={{ height: 200 }}
+          >
+            <ActivityIndicator color="#D97706" />
+            <Text className="text-amber-700 font-semibold mt-2 text-[13px]">กำลังบีบคลิปให้เล็กลง...</Text>
+            <Text className="text-amber-600/80 text-[11px] mt-1">ทำในเครื่อง ไม่กินเวลาอัปโหลด</Text>
+          </View>
+        ) : videoUri ? (
           <View className="rounded-2xl overflow-hidden bg-black mb-4" style={{ height: 300 }}>
             <VideoView player={player} style={{ flex: 1 }} contentFit="contain" nativeControls={true} fullscreenOptions={{ enable: true }} />
             <TouchableOpacity
@@ -1470,6 +1530,10 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
             <Text className="text-gray-500 font-semibold mt-2">แตะเพื่อเลือกวิดีโอจากคลัง</Text>
             <Text className="text-gray-400 text-[12px] mt-1">ความยาวไม่เกิน 2 นาที</Text>
           </TouchableOpacity>
+        )}
+
+        {clipNote && (
+          <Text className="text-amber-700/90 text-[11.5px] mb-3 -mt-2">{clipNote}</Text>
         )}
 
         {/* AI Summary card — generated right after a clip is picked */}

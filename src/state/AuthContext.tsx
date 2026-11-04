@@ -1,11 +1,10 @@
 import React, { createContext, useContext, useEffect, useMemo, useState, useCallback } from "react";
 import { Session } from "@supabase/supabase-js";
 import { makeRedirectUri } from "expo-auth-session";
-import * as QueryParams from "expo-auth-session/build/QueryParams";
 import * as WebBrowser from "expo-web-browser";
 import * as Linking from "expo-linking";
 import { supabase, isSupabaseConfigured } from "../lib/supabase";
-import { API_BASE_URL, API_TIMEOUT_MS } from "../services/apiConfig";
+import { API_BASE_URL } from "../services/apiConfig";
 
 /**
  * AuthContext — Supabase Google OAuth (via Expo deep linking).
@@ -18,6 +17,119 @@ import { API_BASE_URL, API_TIMEOUT_MS } from "../services/apiConfig";
  */
 
 WebBrowser.maybeCompleteAuthSession(); // required for web
+
+/**
+ * ลบบัญชีถาวรเป็นงานหนัก (cascade ใน DB หลายสิบตาราง) → ต้องรอนานกว่า
+ * API ปกติมาก แต่ iOS ตัดการเชื่อมต่อที่ราว 60 วินาที ("The request timed out.")
+ * เซิร์ฟเวอร์จึงตอบกลับเร็วที่สุดเท่าที่ทำได้ (ลบแถวใน DB แล้วตอบเลย
+ * ส่วนล้างไฟล์ใน Storage ทำต่อในเบื้องหลัง)
+ */
+const DELETE_TIMEOUT_MS = 120_000;
+
+/**
+ * หลัง request ถูกตัด (timeout/cancel) เซิร์ฟเวอร์อาจยังลบบัญชีเสร็จ
+ * ในอีกไม่กี่วินาที → รอแล้วเช็คซ้ำก่อนบอกผู้ใช้ว่าลบไม่สำเร็จ
+ */
+const GONE_POLL_TIMEOUT_MS = 30_000;
+const GONE_POLL_INTERVAL_MS = 2_000;
+
+/**
+ * Expo fetch (expo/src/winter/fetch) โยน FetchError เมื่อ request ถูกยกเลิกหรือ
+ * หมดเวลา — message เป็น "fetch failed: fetch request has been canceled" (ยกเลิก)
+ * หรือ "fetch failed: The request timed out." (iOS ตัดเองราว 60 วินาที)
+ * และ `name` ยังเป็น "Error" (ไม่ใช่ "AbortError") → ต้องเช็คทั้ง name และข้อความ
+ */
+function isRequestCancelled(e: any): boolean {
+  const msg = String(e?.message ?? "").toLowerCase();
+  return (
+    e?.name === "AbortError" ||
+    msg.includes("has been canceled") ||
+    msg.includes("aborted") ||
+    msg.includes("canceled") ||
+    msg.includes("timed out")
+  );
+}
+
+/**
+ * เช็คว่าเซิร์ฟเวอร์ตอบก่อนกดลบจริง
+ * -------------------------------------------------------------
+ * ถ้าเครื่องอยู่คนละเครือข่าย (เช่นสลับไปใช้เน็ตมือถือ) request จะค้าง
+ * จน iOS ตัดการเชื่อมต่อเองที่ ~60 วินาที แล้วผู้ใช้เห็นแค่ "หมดเวลา"
+ * โดยไม่รู้ว่าปัญหาคือคุยกับเซิร์ฟเวอร์ไม่ถึง → เช็ก /health ก่อน
+ * (6 วินาที) แล้วบอกตรง ๆ ว่ายังเข้าไม่ถึง
+ */
+async function isBackendReachable(baseUrl: string): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
+  try {
+    const res = await fetch(`${baseUrl}/health`, { signal: controller.signal });
+    return res.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * สัญญาณว่า "บัญชีไม่มีอยู่แล้ว" จากข้อความ error ของ Supabase Auth
+ * -------------------------------------------------------------
+ * - ลบผู้ใช้แล้ว → GET /user ตอบ 422 "User from sub claim in JWT does not exist"
+ * - refresh token หายไปพร้อมแถว auth.users → "Refresh Token Not Found"
+ * - error_code จาก API คือ user_not_found
+ *
+ * เจาะจงเฉพาะข้อความเหล่านี้ — ข้อความกว้าง ๆ แบบ "invalid jwt" หรือ
+ * "not found" ใช้ไม่ได้ เพราะ token หมดอายุก็ให้ผลลัพธ์คล้ายกัน
+ * (แต่บัญชียังอยู่) → ถ้าจับผิดจะทำให้ผู้ใช้โดนดีออกโดยไม่ได้ลบ
+ */
+function errorLooksLikeAccountGone(e: any): boolean {
+  if (!e) return false;
+  const msg = String(e?.message ?? "").toLowerCase();
+  const code = String(e?.code ?? "").toLowerCase();
+  const status = typeof e?.status === "number" ? e.status : undefined;
+  if (status === 404) return true;
+  if (code === "user_not_found" || code === "refresh_token_not_found") return true;
+  return (
+    msg.includes("does not exist") ||
+    msg.includes("user from sub claim") ||
+    msg.includes("user_not_found") ||
+    msg.includes("refresh token not found") ||
+    msg.includes("refresh_token_not_found")
+  );
+}
+
+/**
+ * บัญชีถูกลบไปแล้วหรือยัง — เช็คด้วย JWT ที่มีอยู่
+ * (ใช้ getUser(token) แบบระบุ token เพราะตอนบัญชีหาย auth-js
+ *  จะล้าง session ท้องถิ่นออก → getUser() แบบไม่ระบุ token จะได้
+ *  "Auth session missing!" ซึ่งมองไม่ออกว่าบัญชีหายจริงหรือเปล่า)
+ * true = หายไปแล้ว · false = ยังอยู่ (หรือเช็คไม่ได้ → ปลอดภัย)
+ */
+async function isAccountAlreadyGone(token?: string): Promise<boolean> {
+  try {
+    const { data, error } = token
+      ? await supabase.auth.getUser(token)
+      : await supabase.auth.getUser();
+    if (!error && data?.user) return false;
+    return errorLooksLikeAccountGone(error);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * รอจนกว่าบัญชีจะหายไปจริง (หรือหมดเวลารอ) — ใช้หลัง request ถูกตัด
+ * เพราะเซิร์ฟเวอร์อาจกำลังลบแถวใน DB อยู่ ตอนที่แอปเลิกรอแล้ว
+ * true = หายไปแล้ว (ถือว่าสำเร็จ) · false = ยังอยู่จริง
+ */
+async function waitUntilAccountGone(token?: string): Promise<boolean> {
+  const deadline = Date.now() + GONE_POLL_TIMEOUT_MS;
+  for (;;) {
+    if (await isAccountAlreadyGone(token)) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, GONE_POLL_INTERVAL_MS));
+  }
+}
 
 // URL ที่ Google/Supabase จะ redirect กลับหลังล็อกอิน
 // ใช้ custom scheme ที่ลงทะเบียนไว้ (app.json → "scheme": "locallocal")
@@ -167,24 +279,90 @@ interface AuthState {
 
 const AuthContext = createContext<AuthState | null>(null);
 
-/** Parse tokens from the OAuth redirect URL and create a Supabase session. */
+/**
+ * log URL ที่กลับมาจาก OAuth แบบไม่เผย token (ปิดค่าไว้ก่อน)
+ * ใช้ตอน debug เท่านั้น — ห้าม log access_token/refresh_token/code จริง
+ * (error_code / error_description ไม่ใช่ความลับ → ให้เห็นได้ เพราะช่วยหาสาเหตุ)
+ */
+function redactUrl(url?: string | null): string {
+  if (!url) return "(ไม่มี URL)";
+  return url.replace(
+    /(^|[?&#\s])((?:access_token|refresh_token|code_verifier|code)=)([^&\s#]+)/gi,
+    "$1$2***"
+  );
+}
+
+/**
+ * ดึง query params ออกจาก URL ที่ OAuth ส่งกลับมา
+ * -----------------------------------------------------------------
+ * เดิมใช้ `QueryParams` ของ expo-auth-session แต่แพ็กเกจไม่ได้ export
+ * path นั้นไว้ใน "exports" map → Metro ขึ้น warning ทุกครั้งที่ bundle
+ * ("not listed in the exports") และ tsc ขึ้น TS2307 → เขียน parser เองสั้นๆ แทน
+ *
+ * รองรับทั้ง query string (?a=1) และ fragment (#a=1)
+ * (โหมด implicit ของ Supabase วาง token ไว้ใน fragment)
+ */
+function parseAuthParams(url: string): Record<string, string> {
+  const params: Record<string, string> = {};
+
+  const put = (chunk: string) => {
+    for (const pair of chunk.split("&")) {
+      if (!pair) continue;
+      const eq = pair.indexOf("=");
+      const rawKey = eq < 0 ? pair : pair.slice(0, eq);
+      const rawVal = eq < 0 ? "" : pair.slice(eq + 1);
+      const decode = (s: string) => {
+        try {
+          return decodeURIComponent(s.replace(/\+/g, " "));
+        } catch {
+          return s;
+        }
+      };
+      params[decode(rawKey)] = decode(rawVal);
+    }
+  };
+
+  // fragment ก่อน → แล้วค่อยให้ query string ทับ
+  // (GoTrue ส่ง error มาทั้ง 2 ที่ แต่ฝั่ง query เข้ารหัสถูกต้องกว่า
+  //  ฝั่ง fragment ถูกเข้ารหัสซ้ำ → ถ้าให้ fragment ทับ ข้อความจะเพี้ยน)
+  const hashAt = url.indexOf("#");
+  const beforeHash = hashAt >= 0 ? url.slice(0, hashAt) : url;
+  const queryAt = beforeHash.indexOf("?");
+  if (hashAt >= 0) put(url.slice(hashAt + 1));
+  if (queryAt >= 0) put(beforeHash.slice(queryAt + 1));
+
+  return params;
+}
+
+/**
+ * แปลง URL ที่ OAuth ส่งกลับมา → session
+ * -------------------------------------------------------------
+ * รองรับ 2 แบบ:
+ *   • implicit — token อยู่ใน fragment (#access_token=...&refresh_token=...)
+ *   • PKCE     — Supabase ส่ง ?code=... กลับมา (code_verifier เก็บไว้ใน
+ *                storage ของ supabase-js แล้ว → เอาไปแลกเป็น session ได้)
+ * ถ้า Supabase ส่ง error กลับมา (เช่น redirect_to ไม่ได้อยู่ใน whitelist)
+ * → โยน error พร้อมข้อความจริง ไม่กลืนทิ้ง (เดิมกลืน → ผู้ใช้เห็นแค่หน้าเข้าสู่ระบบ)
+ */
 async function createSessionFromUrl(url: string): Promise<Session | null> {
-  // Supabase/Google return the tokens in the URL fragment (#access_token=...),
-  // but can also use query (?access_token=...). Read both.
-  const { params, errorCode } = QueryParams.getQueryParams(url);
-  if (errorCode) throw new Error(errorCode);
+  const params = parseAuthParams(url);
 
-  let access_token: string | undefined = params.access_token;
-  let refresh_token: string | undefined = params.refresh_token;
-
-  // Fallback: parse the hash fragment manually when tokens aren't in the query.
-  if (!access_token && url.includes("#")) {
-    const hash = url.slice(url.indexOf("#") + 1);
-    const hp = new URLSearchParams(hash);
-    access_token = hp.get("access_token") ?? undefined;
-    refresh_token = hp.get("refresh_token") ?? undefined;
+  const errCode = params.error_code || params.errorCode || params.error;
+  if (errCode) {
+    const desc = params.error_description;
+    throw new Error(desc ? `${errCode}: ${desc}` : String(errCode));
   }
 
+  // PKCE — ต้องแลก code เป็น session (ไม่ใช่อ่าน token จาก URL)
+  const code = params.code;
+  if (code) {
+    const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+    if (error) throw error;
+    return data.session;
+  }
+
+  const access_token: string | undefined = params.access_token;
+  const refresh_token: string | undefined = params.refresh_token;
   if (!access_token) return null;
 
   const { data, error } = await supabase.auth.setSession({
@@ -254,8 +432,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         options: { redirectTo, skipBrowserRedirect: true },
       });
       if (error) return { error: error.message };
+      if (!data?.url) return { error: "Supabase ไม่ได้ส่ง URL สำหรับเข้าสู่ระบบ" };
 
-      const res = await WebBrowser.openAuthSessionAsync(data?.url ?? "", redirectTo);
+      const res = await WebBrowser.openAuthSessionAsync(data.url, redirectTo);
+
+      // log แบบไม่เผย token — ต้องรู้ว่า redirect กลับมาจริงไหม/มีอะไรใน URL
+      console.log("[auth] redirectTo =", redirectTo);
+      console.log("[auth] เบราว์เซอร์ตอบ =", res.type, redactUrl((res as any).url));
 
       // On Expo Go / web the redirect scheme (exp:// or locallocal://) may not
       // be registered, so the browser returns type "cancel" even though the
@@ -265,22 +448,60 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           ? res.url
           : (res as any).url ?? "";   // some versions put url on cancel too
 
-      if (resultUrl && (resultUrl.includes("access_token") || resultUrl.includes("#"))) {
-        await createSessionFromUrl(resultUrl);
-        return { error: null };
+      if (resultUrl) {
+        const s = await createSessionFromUrl(resultUrl);
+        if (s) return { error: null };
       }
 
-      if (res.type === "success") {
-        return { error: null };
+      // บางครั้งเบราว์เซอร์ไม่คืน URL มา แต่ deep link กลับเข้าแอปตรงๆ ผ่าน Linking
+      // (handler ฝั่งแอปจะตั้ง session ให้เอง) → รอสักครู่แล้วเช็คซ้ำก่อนสรุปว่าพัง
+      for (let i = 0; i < 4; i++) {
+        const { data: sess } = await supabase.auth.getSession();
+        if (sess?.session) return { error: null };
+        await new Promise((r) => setTimeout(r, 500));
       }
 
-      // Last resort: on web Supabase may have stored the session in localStorage
-      // during the redirect even if we couldn't parse the URL. Poll once.
-      const { data: sess } = await supabase.auth.getSession();
-      if (sess?.session) return { error: null };
-
-      return { error: null };
+      // เบราว์เซอร์ไม่ได้ส่งกลับมาที่แอป (หรือส่งมาแต่ไม่มี token)
+      // → สาเหตุที่พบบ่อยที่สุด: Redirect URL ของแอปไม่ได้อยู่ใน whitelist
+      //   ของ Supabase → Authentication → URL Configuration
+      return {
+        error:
+          "เข้าสู่ระบบไม่สำเร็จ — เบราว์เซอร์ไม่ได้ส่งกลับมาที่แอป\n\n" +
+          `ผลจากเบราว์เซอร์: ${res.type}\n` +
+          `redirect ที่แอปขอ: ${redirectTo}\n\n` +
+          "ดูข้อความในหน้าเบราว์เซอร์แล้วแก้ตามข้อนี้:\n" +
+          "• 'The OAuth client was not found' (401 invalid_client)\n" +
+          "  → Supabase → Authentication → Providers → Google\n" +
+          "    ใส่ Client ID + Client Secret ของ OAuth client ประเภท 'Web application'\n" +
+          "    (client ของ iOS/Android ใช้กับ Supabase ไม่ได้)\n" +
+          "• redirect ไม่ถูกต้อง\n" +
+          "  → Supabase → Authentication → URL Configuration → Redirect URLs ต้องมี:\n" +
+          "    • exp://**\n" +
+          "    • locallocal://**\n\n" +
+          "แล้วลองกดเข้าสู่ระบบอีกครั้ง",
+      };
     } catch (e: any) {
+      console.warn("[auth] เข้าสู่ระบบไม่สำเร็จ:", e?.message ?? e);
+      const msg = String(e?.message ?? "");
+
+      // GoTrue แลก authorization code กับ Google ไม่สำเร็จ
+      // → จุดที่พังอยู่ฝั่งเซิร์ฟเวอร์ (ไม่ใช่เรื่อง redirect ของแอป)
+      //   ข้อความ "Unable to exchange external code: xxxx" ที่ GoTrue ส่งมา
+      //   ไม่บอกสาเหตุจริง — xxxx คือ 4 ตัวแรกของ authorization code
+      //   (supabase/auth → internal/api/external_oauth.go)
+      //   error จริงจาก Google ถูกซ่อนใน internal log → ต้อง probe ฝั่ง credential
+      if (msg.includes("exchange external code")) {
+        const supabaseUrl = (process.env.EXPO_PUBLIC_SUPABASE_URL ?? "").replace(/\/+$/, "");
+        return {
+          error:
+            "เข้าสู่ระบบไม่สำเร็จ — Google ให้สิทธิ์แล้ว แต่ Supabase เอา code ไปแลก token ไม่ได้\n\n" +
+            "สาเหตุที่เป็นไปได้ (ฝั่ง credential ใน Supabase → Authentication → Providers → Google):\n" +
+            "• Client ID + Client Secret ไม่ตรงกัน (หรือ secret พิมพ์ผิด / มีช่องว่างท้าย / ว่าง)\n" +
+            "• OAuth client ไม่ได้ลงทะเบียน redirect URI นี้ไว้\n" +
+            `  (ต้องมี ${supabaseUrl}/auth/v1/callback)\n\n` +
+            "แก้ที่ Google Cloud Console → Credentials → OAuth client ประเภท 'Web application' ตัวเดียวกัน",
+        };
+      }
       return { error: e?.message ?? "เข้าสู่ระบบด้วย Google ไม่สำเร็จ" };
     }
   }, []);
@@ -374,10 +595,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (input.businessProvince?.trim()) patch.business_province = input.businessProvince.trim();
       }
 
-      const { error } = await supabase.from("users").update(patch).eq("id", uid);
+      // .select("id") → ให้ PostgREST ส่งแถวที่อัปเดตกลับมา
+      // (default ของ update() คือ return=minimal → body ว่าง → ถ้าอัปเดตได้ 0 แถว
+      //  ก็ไม่มี error → หน้าจอบอกว่าบันทึกสำเร็จทั้งที่ข้อมูลไม่ถูกบันทึกจริง)
+      const { data, error } = await supabase.from("users").update(patch).eq("id", uid).select("id");
       if (error) {
         if (error.code === "23505") return { error: "ชื่อผู้ใช้นี้ถูกใช้แล้ว กรุณาเลือกชื่ออื่น" };
         return { error: error.message };
+      }
+      // ไม่มีแถว = ไม่มี users row ของผู้ใช้นี้ (หรือ RLS มองไม่เห็น)
+      if (!data || data.length === 0) {
+        return { error: "ไม่พบข้อมูลผู้ใช้ของคุณ — ลองออกจากระบบแล้วเข้าสู่ระบบใหม่ แล้วบันทึกอีกครั้ง" };
       }
 
       await loadUserRow(uid);
@@ -528,26 +756,56 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
    * with an opaque 401 right at the destructive moment.
    */
   const deleteAccount = useCallback(async (): Promise<{ error: string | null }> => {
+    // token ไว้นอก try เพื่อให้ catch ใช้เช็คว่าบัญชีหายจริงหรือยัง
+    let token = session?.access_token ?? "";
     try {
       const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession();
       if (refreshErr) {
+        // ถ้าบัญชีถูกลบไปแล้ว refresh จะ fail → ถือว่าสำเร็จ (ลบซ้ำไม่ต้องทำ)
+        if (errorLooksLikeAccountGone(refreshErr) || (await waitUntilAccountGone(token))) {
+          await signOut();
+          return { error: null };
+        }
         return { error: "เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่แล้วลองอีกครั้ง" };
       }
-      const token = refreshed?.session?.access_token ?? session?.access_token;
+      token = refreshed?.session?.access_token ?? token;
       if (!token) {
         return { error: "ยังไม่ได้เข้าสู่ระบบ" };
       }
 
+      // เช็คก่อนว่าเซิร์ฟเวอร์ตอบ — ถ้าเข้าไม่ถึง ให้บอกตรง ๆ พร้อม URL
+      // แทนที่จะรอจน iOS ตัดการเชื่อมต่อ (~60 วินาที) แล้วขึ้นว่า "หมดเวลา"
+      const reachable = await isBackendReachable(API_BASE_URL);
+      if (!reachable) {
+        console.warn(`[delete] เข้าไม่ถึงเซิร์ฟเวอร์ที่ ${API_BASE_URL}`);
+        return {
+          error: `เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ (${API_BASE_URL}) — เช็คว่า backend กำลังรันอยู่ และเครื่องอยู่ในเครือข่ายเดียวกัน แล้วลองอีกครั้ง`,
+        };
+      }
+
+      const startedAt = Date.now();
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS * 3);
+      const timer = setTimeout(() => controller.abort(), DELETE_TIMEOUT_MS);
+      console.log(`[delete] ยิงไปที่ ${API_BASE_URL}/account/delete`);
       try {
         const res = await fetch(`${API_BASE_URL}/account/delete`, {
           method: "POST",
           headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
           signal: controller.signal,
         });
+        console.log(
+          `[delete] เซิร์ฟเวอร์ตอบ ${res.status} · ${Date.now() - startedAt}ms · requestId ${
+            res.headers.get("x-request-id") ?? "-"
+          }`
+        );
         if (!res.ok) {
           if (res.status === 401) {
+            // เซิร์ฟเวอร์ตอบ 401 เพราะ token ใช้ไม่ได้แล้ว — ถ้าบัญชีถูก
+            // ลบไปแล้ว (รอบก่อนลบสำเร็จแต่ตอบไม่ทัน) ให้ถือว่าสำเร็จ
+            if (await isAccountAlreadyGone(token)) {
+              await signOut();
+              return { error: null };
+            }
             return { error: "เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่แล้วลองอีกครั้ง" };
           }
           const body = await res.json().catch(() => ({} as any));
@@ -561,8 +819,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await signOut();
       return { error: null };
     } catch (e: any) {
-      if (e?.name === "AbortError") {
-        return { error: "เซิร์ฟเวอร์ตอบช้า กรุณาลองอีกครั้ง" };
+      if (isRequestCancelled(e)) {
+        // ถูกตัดเพราะรอนานเกิน → เซิร์ฟเวอร์อาจลบเสร็จแล้วแต่ตอบไม่ทัน
+        // รอแล้วเช็คว่าบัญชีหายจริงหรือยัง ก่อนบอกผู้ใช้ว่าลบไม่สำเร็จ
+        if (await waitUntilAccountGone(token)) {
+          await signOut();
+          return { error: null };
+        }
+        return {
+          error: `การลบบัญชีใช้เวลานานกว่าที่คาด หรือเชื่อมต่อเซิร์ฟเวอร์ไม่ได้ (${API_BASE_URL}) กรุณาลองอีกครั้ง`,
+        };
       }
       return { error: e?.message ?? "ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์" };
     }

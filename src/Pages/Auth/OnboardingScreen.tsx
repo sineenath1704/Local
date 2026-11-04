@@ -23,7 +23,7 @@ import {
 } from "react-native-heroicons/outline";
 import { useAuth } from "../../state/AuthContext";
 import { verifyOtop, type OtopProfile } from "../../services/otopService";
-import { verifyPlaceOnGoogle, type PlaceCandidate } from "../../services/placesService";
+import { verifyPlaceOnGoogle, fetchPlaceDetails, placePhotoUrl, type PlaceCandidate } from "../../services/placesService";
 import {
   BIZ_TYPE_OPTIONS,
   PRICE_UNITS,
@@ -104,8 +104,17 @@ export default function OnboardingScreen() {
     closed: false,
     price: false,
   });
+  /**
+   * สำเนาล่าสุดของ `editing` — ใช้ตอนรายละเอียดจาก Google มาถึงช้า
+   * (state ใน closure จะเป็นค่าเก่า ถ้า host เปิด "เปลี่ยน" ระหว่างรอ)
+   */
+  const editingRef = React.useRef(editing);
   const toggleEditing = (key: keyof typeof editing) =>
-    setEditing((prev) => ({ ...prev, [key]: !prev[key] }));
+    setEditing((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      editingRef.current = next;
+      return next;
+    });
 
   /**
    * Seed the TimeRangeSheet from whatever hours string we have. If the value
@@ -132,6 +141,17 @@ export default function OnboardingScreen() {
 
   const [businessPlaceName, setBusinessPlaceName] = useState("");
   const [businessPhone, setBusinessPhone] = useState("");
+  // ค่าล่าสุดของเบอร์โทร — ใช้ตัดสินว่า host พิมพ์เองหรือยัง
+  const businessPhoneRef = React.useRef("");
+  const setBusinessPhoneBoth = (v: string) => {
+    businessPhoneRef.current = v;
+    setBusinessPhone(v);
+  };
+  /** host พิมพ์เอง → ป้าย "ตั้งจากข้อมูล Google" ต้องหายไป */
+  const onChangeBusinessPhone = (v: string) => {
+    setPhoneFromGoogle(false);
+    setBusinessPhoneBoth(v);
+  };
   const [searchingPin, setSearchingPin] = useState(false);
   const [pinCandidates, setPinCandidates] = useState<PlaceCandidate[]>([]);
   const [confirmedPlace, setConfirmedPlace] = useState<PlaceCandidate | null>(null);
@@ -145,6 +165,24 @@ export default function OnboardingScreen() {
   // What Google actually said, kept separate from the editable fields so the
   // registrant can compare the two instead of guessing what was prefilled.
   const [googleHours, setGoogleHours] = useState<ParsedGoogleHours | null>(null);
+  // กำลังดึงรายละเอียดสถานที่จาก Google (เบอร์โทร / เวลาเปิด / รูป)
+  const [loadingPlace, setLoadingPlace] = useState(false);
+  // รูปสถานที่ที่ได้จาก Google — ใช้เป็นรูปโปรไฟล์เริ่มต้น (host แก้ได้)
+  const [placePhoto, setPlacePhoto] = useState<string | null>(null);
+  // รูปโหลดไม่ขึ้น (เช่น backend ยังไม่ deploy) → กลับไปโชว์ช่องว่าง
+  const [photoBroken, setPhotoBroken] = useState(false);
+  // เบอร์โทรที่มาจาก Google (ไม่ใช่ที่ host พิมพ์เอง) → ไว้บอกที่มา
+  const [phoneFromGoogle, setPhoneFromGoogle] = useState(false);
+  /**
+   * placeId ของสถานที่ที่เลือกอยู่ตอนนี้ — ใช้กันไม่ให้รายละเอียดที่มาช้า
+   * ไปทับสถานที่ที่ host เพิ่งเปลี่ยน
+   */
+  const confirmedIdRef = React.useRef<string | null>(null);
+  /**
+   * ชื่อที่แสดงถูกล็อกไว้ไหม — ล็อกเฉพาะฝั่ง host ที่สถานที่มาจาก Google
+   * (หมุด OTOP ไม่มีข้อมูลจาก Google → แก้ชื่อได้ตามปกติ)
+   */
+  const nameLocked = role === "host" && !!googlePlaceId;
   const [daySheetOpen, setDaySheetOpen] = useState(false);
   // Three pickers used by the weekday / weekend / closed sections. Each is its
   // own state so opening one doesn't accidentally close another, and so the
@@ -165,6 +203,11 @@ export default function OnboardingScreen() {
   const [phone, setPhone] = useState("");
   const [avatarUri, setAvatarUri] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  /**
+   * ภาพที่ใช้แสดงในวงรูปโปรไฟล์ — ถ้าผู้ใช้ยังไม่เลือกรูปเอง
+   * ให้ใช้รูปของสถานที่จาก Google (เขาแตะที่รูปเพื่อเปลี่ยนได้)
+   */
+  const avatarSource = photoBroken ? null : (avatarUri ?? placePhoto);
 
   const checkOtop = async () => {
     if (!villageId.trim()) {
@@ -231,15 +274,36 @@ export default function OnboardingScreen() {
     // silently rewrite something they typed.
     if (!weekdayHoursText.trim()) setWeekdayHoursText(p.defaultWeekdayHours);
     if (!weekendHoursText.trim()) setWeekendHoursText(p.defaultWeekendHours);
-    setEditing((prev) => ({ ...prev, type: false }));
+    setEditing((prev) => {
+      const next = { ...prev, type: false };
+      editingRef.current = next;
+      return next;
+    });
   };
 
-  const selectCandidate = (c: PlaceCandidate) => {
+  /**
+   * เอาค่าจากผลค้นของ Google ไปลงฟอร์ม
+   *
+   * ผลค้น (`POST /places/verify`) มีแค่ชื่อ/ที่อยู่/พิกัด — **ไม่มีเบอร์โทร
+   * และไม่มีเวลาเปิด** (backend คืน null ให้โดยเจตนา เพราะการดึงสองอย่าง
+   * นี้ต้องเสียค่า Place Details) → ส่วนที่เหลือมาจาก `selectCandidate`
+   */
+  const applyCandidate = (c: PlaceCandidate) => {
     setConfirmedPlace(c);
+    confirmedIdRef.current = c.placeId || null;
     setGooglePlaceId(c.placeId || null);
     if (c.name) setBusinessPlaceName(c.name);
+    // เบอร์ที่มาจาก Google ของหมุดเดิมไม่เกี่ยวกับหมุดใหม่ → ล้างก่อน
+    // เพื่อให้เบอร์ของหมุดใหม่เข้ามาแทนได้ (ถ้า host พิมพ์เอง คงไว้)
+    if (phoneFromGoogle) {
+      setBusinessPhoneBoth("");
+      setPhoneFromGoogle(false);
+    }
     // Don't stomp a number the host already typed — Google often has none.
-    if (c.phone && !businessPhone.trim()) setBusinessPhone(c.phone);
+    if (c.phone && !businessPhoneRef.current.trim()) setBusinessPhoneBoth(c.phone);
+    // รูปของสถานที่เดิมไม่เกี่ยวกับสถานที่ใหม่
+    setPlacePhoto(null);
+    setPhotoBroken(false);
 
     // Category + day labels come from Google's own classification.
     const detected = detectBusinessProfile(c.types, c.name, c.primaryType);
@@ -251,7 +315,12 @@ export default function OnboardingScreen() {
     setPriceUnit(detected.priceUnit);
 
     // Real Google hours beat our defaults; the host then corrects what's wrong.
-    const parsed = parseOpeningHours(c.openingHours);
+    // กลุ่มวันต้องเป็นกลุ่มของฟอร์มนี้ (โฮมสเตย์ = อา.-พฤ. / ศ.-ส.)
+    // ไม่ใช่ จ.-ศ. / ส.-อา. ตามค่า default ของ parser
+    const parsed = parseOpeningHours(c.openingHours, {
+      weekdayKeys: wdParsed?.days,
+      weekendKeys: weParsed?.days,
+    });
     setGoogleHours(parsed);
     if (parsed) {
       setWeekdayHoursText(parsed.weekdayHours);
@@ -264,6 +333,65 @@ export default function OnboardingScreen() {
     }
 
     setPinCandidates([]);
+  };
+
+  /**
+   * เลือกสถานที่ → ดึงรายละเอียดจาก Google มาเติมฟอร์ม
+   *
+   * ผลค้นไม่มีเบอร์โทร/เวลาเปิด/รูป จึงต้องเสียค่า Place Details อีก 1 ครั้ง
+   * หลัง host เลือกสถานที่แล้ว (แบบเดียวกับที่ CreatePostScreen ทำ) ถึงจะได้
+   * ข้อมูลมาเติมช่อง "เบอร์โทร" / "เวลาเปิดวันธรรมดา" / "วันหยุดสุดสัปดาห์" /
+   * "วันที่ปิดทำการ" และรูปสถานที่
+   */
+  const selectCandidate = async (c: PlaceCandidate) => {
+    if (loadingPlace) return;
+    applyCandidate(c);
+    if (!c.placeId) return;
+
+    setLoadingPlace(true);
+    try {
+      const res = await fetchPlaceDetails(c.placeId);
+      const details = res.place;
+      if (!details) return;
+      // host เปลี่ยนสถานที่ไปแล้วระหว่างที่รอ → ทิ้งผลลัพธ์ที่มาช้า
+      if (confirmedIdRef.current !== c.placeId) return;
+
+      setConfirmedPlace((prev) =>
+        prev && prev.placeId === c.placeId ? { ...prev, ...details } : prev
+      );
+
+      // เบอร์โทร — เติมให้เฉพาะตอน host ยังไม่ได้พิมพ์เอง
+      // (อ่านค่าล่าสุดผ่าน ref เพราะ state ใน closure เป็นค่าเก่า)
+      if (details.phone && !businessPhoneRef.current.trim()) {
+        businessPhoneRef.current = details.phone;
+        setBusinessPhone(details.phone);
+        setPhoneFromGoogle(true);
+      }
+
+      // เวลาเปิด/วันที่ปิด — เขียนทับเฉพาะส่วนที่ host ยังไม่ได้กด "เปลี่ยน"
+      // (ถ้าเขาเปิดแก้ไว้อยู่ ของที่เขาพิมพ์ต้องไม่หาย)
+      const detected = detectBusinessProfile(c.types, c.name, c.primaryType);
+      const wdParsed = parseDayGroupFromLabel(detected.weekdayLabel);
+      const weParsed = parseDayGroupFromLabel(detected.weekendLabel);
+      const parsed = parseOpeningHours(details.openingHours, {
+        weekdayKeys: wdParsed?.days,
+        weekendKeys: weParsed?.days,
+      });
+      if (parsed) {
+        setGoogleHours(parsed);
+        // อ่านจาก ref ไม่ใช่ state ใน closure — ถ้า host เปิด "เปลี่ยน"
+        // ระหว่างที่รอ ของที่เขาพิมพ์ต้องไม่ถูกทับ
+        const nowEditing = editingRef.current;
+        if (!nowEditing.weekday) setWeekdayHoursText(parsed.weekdayHours);
+        if (!nowEditing.weekend) setWeekendHoursText(parsed.weekendHours);
+        if (!nowEditing.closed) setClosedDayKeys(parsed.closedDayKeys);
+      }
+
+      // รูปสถานที่ (ผ่าน backend เท่านั้น — API key ของ Google เป็น server-only)
+      setPlacePhoto(placePhotoUrl(details.photoUrl));
+    } finally {
+      setLoadingPlace(false);
+    }
   };
 
   const applyOtopFallbackPin = () => {
@@ -294,6 +422,15 @@ export default function OnboardingScreen() {
     });
     // หมุดนี้ไม่ได้มาจาก Google → ยังไม่มี Google id ให้ผูก (D2)
     setGooglePlaceId(null);
+    // ยกเลิก/ทิ้งผลลัพธ์ของหมุด Google หมุดเดิม
+    confirmedIdRef.current = null;
+    setPlacePhoto(null);
+    setPhotoBroken(false);
+    // เบอร์ที่มาจาก Google ของหมุดเดิมไม่เกี่ยวกับพิกัด OTOP
+    if (phoneFromGoogle) {
+      setBusinessPhoneBoth("");
+      setPhoneFromGoogle(false);
+    }
     // No Google pin means no Google data to show — clear it so the card
     // doesn't imply anything was fetched.
     setGoogleHours(null);
@@ -329,6 +466,8 @@ export default function OnboardingScreen() {
     });
     if (!result.canceled && result.assets[0]?.uri) {
       setAvatarUri(result.assets[0].uri);
+      // เลือกรูปเองแล้ว → รูปจาก Google ที่โหลดไม่ขึ้นไม่ต้องกวนอีก
+      setPhotoBroken(false);
     }
   };
 
@@ -349,6 +488,11 @@ export default function OnboardingScreen() {
     // Prefill phone from host business phone if applicable
     if (role === "host" && businessPhone && !phone) {
       setPhone(businessPhone);
+    }
+    // ชื่อที่แสดงของ host มาจากชื่อสถานที่ที่ยืนยันไว้ในหน้าสถานประกอบการ
+    // (ชื่อถูกล็อกในหน้านี้ จึงเติมให้อัตโนมัติ)
+    if (nameLocked && businessPlaceName.trim()) {
+      setDisplayName(businessPlaceName.trim());
     }
     setStep("details");
   };
@@ -379,7 +523,9 @@ export default function OnboardingScreen() {
       username: normalized,
       displayName: displayName.trim(),
       phone: (role === "host" ? businessPhone.trim() : phone.trim()) || undefined,
-      avatarUri,
+      // ถ้าผู้ใช้ยังไม่ได้เลือกรูปเอง → ใช้รูปของสถานที่จาก Google
+      // (completeOnboarding ดึงไฟล์จาก URL แล้วอัปโหลดเข้า bucket เอง)
+      avatarUri: avatarSource,
       role: role ?? "tourist",
       otop: role === "host" ? otop : null,
       businessPlaceName: role === "host" ? businessPlaceName.trim() : undefined,
@@ -664,9 +810,12 @@ export default function OnboardingScreen() {
                       <TouchableOpacity
                         onPress={() => selectCandidate(c)}
                         activeOpacity={0.85}
-                        className="bg-[#2D6A4F] py-1.5 px-3.5 rounded-lg"
+                        disabled={loadingPlace}
+                        className={`py-1.5 px-3.5 rounded-lg ${loadingPlace ? "bg-gray-300" : "bg-[#2D6A4F]"}`}
                       >
-                        <Text className="text-white font-bold text-[12.5px]">✓ เลือกสถานที่นี้</Text>
+                        <Text className="text-white font-bold text-[12.5px]">
+                          {loadingPlace ? "กำลังดึงข้อมูล..." : "✓ เลือกสถานที่นี้"}
+                        </Text>
                       </TouchableOpacity>
                     </View>
                   </View>
@@ -714,6 +863,10 @@ export default function OnboardingScreen() {
                       onPress={() => {
                         setConfirmedPlace(null);
                         setGoogleHours(null);
+                        // ยกเลิกการดึงรายละเอียดของหมุดเดิมที่ยังค้างอยู่
+                        confirmedIdRef.current = null;
+                        setPlacePhoto(null);
+                        setPhotoBroken(false);
                       }}
                       activeOpacity={0.7}
                       className="px-2 py-0.5 bg-white border border-emerald-200 rounded-lg"
@@ -723,6 +876,16 @@ export default function OnboardingScreen() {
                   </View>
                   <Text className="text-gray-800 font-bold text-[15px] mt-0.5">{confirmedPlace.name}</Text>
                   <Text className="text-gray-500 text-[13px] mt-0.5">{confirmedPlace.address}</Text>
+
+                  {/* กำลังดึงเบอร์โทร/เวลาเปิด/รูป จาก Place Details ของ Google */}
+                  {loadingPlace && (
+                    <View className="flex-row items-center mt-2">
+                      <ActivityIndicator size="small" color="#2D6A4F" />
+                      <Text className="text-emerald-800 text-[12.5px] ml-2">
+                        กำลังดึงเบอร์โทรและเวลาเปิดจาก Google…
+                      </Text>
+                    </View>
+                  )}
 
                   <View className="flex-row items-center mt-2">
                     {confirmedPlace.googleMapsUri ? (
@@ -829,6 +992,18 @@ export default function OnboardingScreen() {
                     </Text>
                     <ChevronDownIcon size={20} color="#2D6A4F" />
                   </TouchableOpacity>
+
+                  {/* วันในกลุ่มนี้เวลาไม่เหมือนกัน — บอกให้ host เช็ค */}
+                  {googleHours?.weekdayMixed ? (
+                    <Text className="text-[12.5px] text-amber-700 mt-2">
+                      แต่ละวันในกลุ่มนี้เปิดไม่พร้อมกัน — ตรวจสอบให้ตรงกับที่จริง
+                    </Text>
+                  ) : null}
+                  {googleHours?.weekdayHours ? (
+                    <Text className="text-[12.5px] text-gray-500 mt-2">
+                      ตั้งจากข้อมูล Google — ตรวจสอบให้ตรงกับที่จริง
+                    </Text>
+                  ) : null}
                 </EditableValueRow>
 
                 {/* 3. Weekend: day list + time — same pickers */}
@@ -877,6 +1052,18 @@ export default function OnboardingScreen() {
                     </Text>
                     <ChevronDownIcon size={20} color="#2D6A4F" />
                   </TouchableOpacity>
+
+                  {/* วันในกลุ่มนี้เวลาไม่เหมือนกัน — บอกให้ host เช็ค */}
+                  {googleHours?.weekendMixed ? (
+                    <Text className="text-[12.5px] text-amber-700 mt-2">
+                      แต่ละวันในกลุ่มนี้เปิดไม่พร้อมกัน — ตรวจสอบให้ตรงกับที่จริง
+                    </Text>
+                  ) : null}
+                  {googleHours?.weekendHours ? (
+                    <Text className="text-[12.5px] text-gray-500 mt-2">
+                      ตั้งจากข้อมูล Google — ตรวจสอบให้ตรงกับที่จริง
+                    </Text>
+                  ) : null}
                 </EditableValueRow>
 
                 {/* 4. Closed days — pick from a checklist, not seven 42px chips */}
@@ -992,12 +1179,17 @@ export default function OnboardingScreen() {
                 </Text>
                 <TextInput
                   value={businessPhone}
-                  onChangeText={setBusinessPhone}
+                  onChangeText={onChangeBusinessPhone}
                   placeholder="เช่น 0812345678"
                   placeholderTextColor="#9CA3AF"
                   keyboardType="phone-pad"
                   className="bg-gray-100 rounded-xl px-3.5 py-3 text-[14px] text-gray-900 mb-4"
                 />
+                {phoneFromGoogle ? (
+                  <Text className="text-[12.5px] text-gray-500 -mt-2 mb-4">
+                    ตั้งจากข้อมูล Google — ตรวจสอบให้ตรงกับที่จริง
+                  </Text>
+                ) : null}
               </View>
             )}
 
@@ -1103,25 +1295,47 @@ export default function OnboardingScreen() {
             {/* Avatar */}
             <View className="items-center mb-6">
               <TouchableOpacity onPress={pickAvatar} activeOpacity={0.8}>
-                {avatarUri ? (
-                  <Image source={{ uri: avatarUri }} style={{ width: 96, height: 96, borderRadius: 48 }} />
+                {avatarSource ? (
+                  <Image
+                    source={{ uri: avatarSource }}
+                    style={{ width: 96, height: 96, borderRadius: 48 }}
+                    // รูปจาก Google โหลดไม่ขึ้น (เช่น backend ยังไม่ deploy)
+                    // → กลับไปโชว์ช่องว่างให้เลือกรูปเอง (รูปที่ผู้ใช้เลือกเองไม่เกี่ยว)
+                    onError={() => {
+                      if (!avatarUri) setPhotoBroken(true);
+                    }}
+                  />
                 ) : (
                   <View className="w-24 h-24 rounded-full bg-gray-100 items-center justify-center border-2 border-dashed border-gray-300">
                     <CameraIcon size={28} color="#9CA3AF" />
                   </View>
                 )}
               </TouchableOpacity>
-              <Text className="text-gray-400 text-[12px] mt-2">แตะเพื่อเลือกรูปโปรไฟล์</Text>
+              <Text className="text-gray-400 text-[12px] mt-2">
+                {avatarSource && !avatarUri
+                  ? "รูปนี้มาจาก Google — แตะเพื่อเปลี่ยน"
+                  : "แตะเพื่อเลือกรูปโปรไฟล์"}
+              </Text>
             </View>
 
             <Text className="text-gray-700 font-bold text-[13px] mb-1.5">ชื่อที่แสดง</Text>
             <TextInput
               value={displayName}
               onChangeText={setDisplayName}
+              editable={!nameLocked}
               placeholder="เช่น ป้าสมศรี ชุมชนห้วยห้อม"
               placeholderTextColor="#9CA3AF"
-              className="bg-gray-100 rounded-xl px-3.5 py-3 text-[15px] text-gray-900 mb-4"
+              className={`bg-gray-100 rounded-xl px-3.5 py-3 text-[15px] mb-1 ${
+                nameLocked ? "text-gray-600" : "text-gray-900"
+              }`}
             />
+            {nameLocked ? (
+              <Text className="text-gray-500 text-[12px] mb-4">
+                ชื่อนี้มาจากสถานที่ที่ยืนยันไว้ — แก้ไขไม่ได้
+              </Text>
+            ) : (
+              <View className="h-3" />
+            )}
 
             <Text className="text-gray-700 font-bold text-[13px] mb-1.5">
               เบอร์โทร <Text className="text-gray-400 font-normal">(ไม่บังคับ)</Text>

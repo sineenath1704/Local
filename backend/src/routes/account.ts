@@ -9,13 +9,8 @@ import { sendError } from "../middleware/errors";
  *   1) JWT verify (admin.auth.getUser reads JWT signature directly
  *      via the project's JWT secret — no anon-key import needed).
  *   2) Pre-collect every storage path this user owns while the rows
- *      still exist (videos / thumbnails / avatar / drafts).
- *   3) Storage remove (best-effort — DB cascade is authoritative).
- *      Supabase also cascades `storage.objects.owner → auth.users`
- *      so manual cleanup is defense-in-depth — it lets us surface
- *      a Thai error when a binary sits stuck, instead of waiting
- *      for an opaque storage auth row to fail.
- *   4) Delete `auth.users` via the project's
+ *      still exist (videos / thumbnails / avatar) — DB query only.
+ *   3) Delete `auth.users` via the project's
  *      `account_hard_delete(target_uid uuid)` RPC instead of GoTrue's
  *      admin.auth.admin.deleteUser(). GoTrue's path returns
  *      "database error deleting user" in some environments and the
@@ -23,10 +18,21 @@ import { sendError } from "../middleware/errors";
  *      supabase/migrations/add_account_hard_delete.sql performs the
  *      same delete directly, so when a constraint fails we see the
  *      real Postgres error instead of an opaque one.
+ *   4) ตอบกลับผู้ใช้ทันที แล้วค่อยล้างไฟล์ใน Storage แบบเบื้องหลัง
+ *      (Storage cleanup เดิมอยู่กลาง request → ผู้ใช้รอนานจน iOS
+ *      ตัดการเชื่อมต่อที่ ~60 วินาที: "The request timed out.")
  *
- * Community_places.owner_id and chats.created_by are ON DELETE SET
- * NULL in the schema, so the rows survive with a null pointer rather
- * than vanishing — that's the documented behaviour the user agreed to.
+ * Scope rule: this route removes ONLY the calling user's own rows.
+ * Other people's data is never deleted — e.g. a like the user gave on
+ * someone else's video disappears (that row is the user's), while the
+ * video itself survives and its likes_count drops by exactly one
+ * (the bump_video_likes trigger fires on the cascade delete).
+ *
+ * Rows that live in shared context (community_places.owner_id,
+ * chats.created_by, chat_messages.sender_id, folder_items.added_by)
+ * are ON DELETE SET NULL — they survive with a null pointer rather
+ * than vanishing, because deleting them would delete other people's
+ * data (a message in a shared room, an item in someone else's folder).
  *
  * Counter triggers (bump_video_likes etc.) are AFTER DELETE on each
  * child table, so they fire automatically when the cascade hits them.
@@ -62,6 +68,44 @@ function chunk<T>(arr: T[], size: number): T[][] {
   }
   return out;
 }
+
+/**
+ * Promise ที่มีเวลาติดตั้ง
+ * -------------------------------------------------------------
+ * ทุกขั้นที่คุยกับ Supabase ต้องมีเพดานเวลา ไม่งั้น request จะค้าง
+ * ตลอดไปจน client ตัดการเชื่อมต่อ (iOS ตัดเองที่ ~60 วินาที) แล้วผู้ใช้
+ * เห็นแค่ "หมดเวลา" โดยไม่รู้ว่าค้างที่ตรวจ token หรือที่ลบในฐานข้อมูล
+ *
+ * ฝั่ง express จะโพรต log ตอน "ตอบกลับแล้ว" เท่านั้น → request ที่ค้าง
+ * จะไม่มี log เลย พอเกิดขึ้นจะดูไม่ออกว่าปัญหาอยู่ฝั่งเน็ตหรือฝั่ง DB
+ */
+function withTimeout<T>(
+  p: PromiseLike<T>,
+  ms: number,
+  label: string
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label} (เกิน ${Math.round(ms / 1000)} วินาที)`)),
+      ms
+    );
+    Promise.resolve(p).then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      }
+    );
+  });
+}
+
+/** เพดานเวลาตรวจ token (เรียก auth server ครั้งเดียว) */
+const VERIFY_TIMEOUT_MS = 15_000;
+/** เพดานเวลาลบในฐานข้อมูล (cascade หลายตาราง) */
+const DELETE_TIMEOUT_MS = 45_000;
 
 /**
  * Recursively list every object path under `${prefix}` in the named
@@ -104,7 +148,88 @@ async function listAllPathsUnder(
   return out;
 }
 
+/**
+ * ล้างไฟล์ใน Storage แบบ "เบื้องหลัง" — ทำหลังตอบกลับผู้ใช้แล้ว
+ * -------------------------------------------------------------
+ * เดิมขั้นตอนนี้อยู่ระหว่าง request → ผู้ใช้รอกวาดโฟลเดอร์ + ลบไฟล์
+ * ทั้งหมดก่อนถึงจะได้ response และบน iOS ตัดการเชื่อมต่อที่ ~60 วินาที
+ * ("The request timed out.") แม้การลบบัญชีใน DB จะทำงานปกติ
+ *
+ * ย้ายมาทำหลังตอบกลับแล้ว เพราะ:
+ *   • DB cascade เป็นตัวที่ลบ "ข้อมูล" จริง (หน้าตาของระบบ)
+ *   • Supabase ก็ cascade `storage.objects.owner → auth.users` อยู่แล้ว
+ *     → ไฟล์ที่ค้างเป็นแค่ขยะ ลบทีหลังได้ ล้มเหลวก็ไม่กระทบผู้ใช้
+ */
+async function cleanupStorageInBackground(
+  uid: string,
+  trackedVideoPaths: string[],
+  trackedAvatarPaths: string[]
+): Promise<void> {
+  const admin = getSupabaseAdmin();
+  if (!admin) return;
+  const startedAt = Date.now();
+  const mark = (label: string) =>
+    console.log(
+      `[account ${uid}] (เบื้องหลัง) ${label} · ${Date.now() - startedAt}ms`
+    );
+
+  try {
+    // Sweep the user's full folder in the `videos` bucket — covers
+    // draft objects that never became a videos row. Same for `avatars`
+    // (old avatars replaced via updateProfile).
+    const videoPaths = [...trackedVideoPaths];
+    const avatarPaths = [...trackedAvatarPaths];
+
+    try {
+      const orphanVideoPaths = await listAllPathsUnder("videos", uid);
+      for (const path of orphanVideoPaths) videoPaths.push(path);
+    } catch (e: any) {
+      console.warn(`[account ${uid}] orphan video sweep failed:`, e?.message ?? e);
+    }
+    try {
+      const orphanAvatarPaths = await listAllPathsUnder("avatars", uid);
+      for (const path of orphanAvatarPaths) avatarPaths.push(path);
+    } catch (e: any) {
+      console.warn(`[account ${uid}] orphan avatar sweep failed:`, e?.message ?? e);
+    }
+
+    const uniqueVideoPaths = Array.from(new Set(videoPaths));
+    const uniqueAvatarPaths = Array.from(new Set(avatarPaths));
+
+    for (const group of chunk(uniqueVideoPaths, 1000)) {
+      const { error: rmErr } = await admin.storage.from("videos").remove(group);
+      if (rmErr) {
+        console.warn(
+          `[account] storage.remove videos failed (${group.length} items):`,
+          rmErr.message
+        );
+      }
+    }
+    if (uniqueAvatarPaths.length > 0) {
+      // Supabase รับได้ไม่เกิน 1000 path ต่อครั้ง — แบ่งเหมือนฝั่งวิดีโอ
+      for (const group of chunk(uniqueAvatarPaths, 1000)) {
+        const { error: rmErr } = await admin.storage.from("avatars").remove(group);
+        if (rmErr) {
+          console.warn(
+            `[account] storage.remove avatars failed (${group.length} items):`,
+            rmErr.message
+          );
+        }
+      }
+    }
+    mark(
+      `ลบไฟล์ใน Storage แล้ว · วิดีโอ ${uniqueVideoPaths.length} · รูป ${uniqueAvatarPaths.length}`
+    );
+  } catch (e: any) {
+    console.warn(
+      `[account ${uid}] ล้างไฟล์เบื้องหลังไม่สำเร็จ:`,
+      e?.message ?? e
+    );
+  }
+}
+
 router.post("/delete", async (req: Request, res: Response) => {
+  const startedAt = Date.now();
   const admin = getSupabaseAdmin();
   if (!admin) {
     return res.status(503).json({
@@ -113,6 +238,18 @@ router.post("/delete", async (req: Request, res: Response) => {
       requestId: (req as any).requestId,
     });
   }
+
+  // เวลาแต่ละช่วง — ลบบัญชีเป็นงานหนัก (Storage + cascade หลายตาราง) ต้องเห็นว่า
+  // ช้าที่ช่วงไหน ไม่ใช่แค่ "ไม่สำเร็จ"
+  // (uid ยังไม่รู้ตอน request แรกมาถึง → ใช้ "-" แล้วเติมทีหลัง)
+  let uidForLog = "-";
+  const mark = (label: string) =>
+    console.log(`[account ${uidForLog}] ${label} · ${Date.now() - startedAt}ms`);
+
+  // พิมพ์ตอน "request มาถึงแล้ว" — log ปกติของ express พิมพ์หลังตอบกลับเสร็จ
+  // เท่านั้น ถ้าค้างกลางคันจะไม่มี log เลย → เดาไม่ออกว่าปัญหาอยู่ฝั่งเน็ต
+  // (ไม่ถึงเซิร์ฟเวอร์) หรือฝั่ง DB
+  mark("ได้รับ request · เริ่มตรวจ token");
 
   // ---- 1) JWT verify ------------------------------------------------
   const authHeader = req.header("authorization") ?? "";
@@ -128,7 +265,11 @@ router.post("/delete", async (req: Request, res: Response) => {
 
   let uid: string;
   try {
-    const { data: verified, error: verifyErr } = await admin.auth.getUser(token);
+    const { data: verified, error: verifyErr } = await withTimeout(
+      admin.auth.getUser(token),
+      VERIFY_TIMEOUT_MS,
+      "ตรวจสอบ token ไม่ทัน"
+    );
     if (verifyErr || !verified?.user?.id) {
       return res.status(401).json({
         error: "โทเค็นไม่ถูกต้องหรือหมดอายุ กรุณาเข้าสู่ระบบใหม่แล้วลองอีกครั้ง",
@@ -138,17 +279,25 @@ router.post("/delete", async (req: Request, res: Response) => {
     }
     uid = verified.user.id;
   } catch (e: any) {
-    return sendError(res, e, req, 401);
+    const timedOut = String(e?.message ?? "").includes("ไม่ทัน");
+    mark(timedOut ? "ตรวจ token ไม่ทัน" : "ตรวจ token ล้มเหลว");
+    return sendError(res, e, req, timedOut ? 504 : 401);
   }
+  mark(`ยืนยัน token แล้ว · uid ${uid}`);
+  uidForLog = uid;
 
   try {
-    // ---- 2) Collect every storage path this user owns --------------
+    // ---- 2) Collect DB-tracked storage paths ------------------------
+    //
+    // เก็บเฉพาะ path ที่ "ชี้" มาจากแถวใน DB (คิวรีเร็ว) — ไม่กวาดโฟลเดอร์
+    // Storage ตอนนี้ เพราะการกวาด/ลบไฟล์คือส่วนที่ช้าที่สุด และไม่จำเป็น
+    // ต่อผลลัพธ์ของผู้ใช้ (DB cascade ลบข้อมูลจริงอยู่แล้ว)
     //
     // Reads here are best-effort: we only need them to clean up
-    // Storage before the cascade wipes the DB rows. If a query
+    // Storage after the cascade wipes the DB rows. If a query
     // fails (transient PostgREST hiccup, schema drift, RLS surprise)
-    // we log it and keep going — admin.auth.deleteUser() does the
-    // authoritative work and the user still disappears.
+    // we log it and keep going — the hard delete is authoritative
+    // and the user still disappears.
     const videosByLocation = new Map<string, true>();
     const avatarsByLocation = new Map<string, true>();
 
@@ -194,66 +343,29 @@ router.post("/delete", async (req: Request, res: Response) => {
       }
     }
 
-    const videoPaths = Array.from(videosByLocation.keys());
-    const avatarPaths = Array.from(avatarsByLocation.keys());
+    const trackedVideoPaths = Array.from(videosByLocation.keys());
+    const trackedAvatarPaths = Array.from(avatarsByLocation.keys());
+    mark(
+      `เก็บรายการไฟล์แล้ว · วิดีโอ ${trackedVideoPaths.length} · รูป ${trackedAvatarPaths.length}`
+    );
 
-    // Sweep the user's full folder in the `videos` bucket — covers
-    // draft objects that never became a videos row.
-    try {
-      const orphanVideoPaths = await listAllPathsUnder("videos", uid);
-      for (const path of orphanVideoPaths) {
-        videoPaths.push(path);
-      }
-    } catch (e: any) {
-      console.warn(`[account ${uid}] orphan video sweep failed:`, e?.message ?? e);
-    }
-
-    // Same for the `avatars` bucket — old avatars that the user
-    // replaced via updateProfile get uploaded under `${uid}/...`
-    // but only the most recent path is stored in users.avatar_url.
-    try {
-      const orphanAvatarPaths = await listAllPathsUnder("avatars", uid);
-      for (const path of orphanAvatarPaths) {
-        avatarPaths.push(path);
-      }
-    } catch (e: any) {
-      console.warn(`[account ${uid}] orphan avatar sweep failed:`, e?.message ?? e);
-    }
-
-    // Dedupe — `videos/` and `avatars/` share no namespaces but be safe.
-    const uniqueVideoPaths = Array.from(new Set(videoPaths));
-    const uniqueAvatarPaths = Array.from(new Set(avatarPaths));
-
-    // ---- 3) Storage remove (best-effort) ---------------------------
-    for (const group of chunk(uniqueVideoPaths, 1000)) {
-      const { error: rmErr } = await admin.storage.from("videos").remove(group);
-      if (rmErr) {
-        console.warn(
-          `[account] storage.remove videos failed (${group.length} items):`,
-          rmErr.message
-        );
-      }
-    }
-    if (uniqueAvatarPaths.length > 0) {
-      const { error: rmErr } = await admin.storage.from("avatars").remove(uniqueAvatarPaths);
-      if (rmErr) {
-        console.warn(
-          `[account] storage.remove avatars failed (${uniqueAvatarPaths.length} items):`,
-          rmErr.message
-        );
-      }
-    }
-
-    // ---- 4) Cascade-delete via raw SQL RPC ----------------------------
+    // ---- 3) Cascade-delete via raw SQL RPC ----------------------------
     //
     // GoTrue's admin.auth.admin.deleteUser() returns a generic
     // "database error deleting user" in some Supabase environments
     // before the cascade ever runs. We call our own SECURITY DEFINER
     // RPC (supabase/migrations/add_account_hard_delete.sql) so the
     // real Postgres error surfaces when something is wrong.
-    const { error: delErr } = await admin.rpc("account_hard_delete", {
-      target_uid: uid,
-    });
+    //
+    // ทำก่อนตอบกลับ — นี่คือส่วนที่ "ลบบัญชี" จริง · เสร็จในไม่กี่วินาที
+    //
+    // มีเพดานเวลา: ถ้า DB ค้าง (เช่น รอล็อกจาก transaction อื่น) ให้ล้มเหลว
+    // พร้อมข้อความชัด ๆ แทนที่จะค้างจน client ตัดการเชื่อมต่อ
+    const { error: delErr } = await withTimeout(
+      admin.rpc("account_hard_delete", { target_uid: uid }),
+      DELETE_TIMEOUT_MS,
+      "ลบในฐานข้อมูลไม่ทัน"
+    );
     if (delErr) {
       console.error(`[account ${uid}] hard delete RPC failed:`, delErr);
       const msg = (delErr.message ?? "").toLowerCase();
@@ -273,11 +385,36 @@ router.post("/delete", async (req: Request, res: Response) => {
         );
       }
       // Already gone — treat as success (idempotent retry path).
-      return res.json({ ok: true, alreadyDeleted: true });
+      mark("ลบบัญชีสำเร็จ (บัญชีหายไปอยู่แล้ว)");
+      res.json({ ok: true, alreadyDeleted: true });
+      // รอบก่อนอาจถูกตัดกลางทางหลัง DB ลบเสร็จแต่ Storage ยังไม่ว่าง
+      // → กวาดทิ้งให้ครบ (เบื้องหลัง)
+      void cleanupStorageInBackground(uid, trackedVideoPaths, trackedAvatarPaths);
+      return;
     }
 
-    return res.json({ ok: true });
+    mark("ลบบัญชีสำเร็จ");
+
+    // ตอบผู้ใช้ก่อน — iOS ตัดการเชื่อมต่อที่ ~60 วินาที ถ้ารอล้าง
+    // Storage ก่อนตอบ ผู้ใช้จะเจอ "The request timed out." ทั้งที่
+    // บัญชีถูกลบสำเร็จไปแล้ว
+    res.json({ ok: true });
+
+    // ค่อยล้างไฟล์ใน Storage ทีหลัง (ไม่รอผล) — ล้มเหลวได้โดยไม่กระทบ
+    // เพราะ DB cascade เป็นตัวลบข้อมูลจริง และ Supabase ก็ cascade
+    // storage.objects.owner → auth.users อยู่แล้ว
+    //
+    // หมายเหตุ (Vercel): serverless อาจหยุดงานหลังตอบ response → งานล้าง
+    // ไฟล์อาจไม่ได้ทำต่อ แต่ไม่กระทบผลลัพธ์ เพราะข้อมูลใน DB ถูกลบ
+    // เรียบร้อยแล้ว และไฟล์ค้างเป็นแค่ขยะ (เก็บกวาดทีหลังได้)
+    void cleanupStorageInBackground(
+      uid,
+      trackedVideoPaths,
+      trackedAvatarPaths
+    );
+    return;
   } catch (e: any) {
+    mark(`ล้มเหลว: ${e?.message ?? e}`);
     return sendError(res, e, req, 500);
   }
 });

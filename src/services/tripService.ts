@@ -3,6 +3,10 @@ import {
   ItineraryDay,
   TripBudget,
   TripRequestInput,
+  TripSlots,
+  TripPlan,
+  TripPlanLodging,
+  TripPlanPoint,
   TRAVEL_STYLES,
 } from "../data/tripsData";
 import { aiFetch, AiError, toastAiError } from "./aiHttp";
@@ -58,6 +62,8 @@ export function normalizeItineraryDays(days: unknown): ItineraryDay[] {
       activity: String(s?.activity ?? ""),
       stayHours: Number(s?.stayHours) || 0,
       driveToNextMins: Number(s?.driveToNextMins) || 0,
+      ...(s?.arriveTime ? { arriveTime: String(s.arriveTime) } : {}),
+      ...(s?.leaveTime ? { leaveTime: String(s.leaveTime) } : {}),
     })),
   }));
 }
@@ -208,4 +214,277 @@ function safeParse<T>(text: string): T | null {
   } catch {
     return null;
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  ระบบวางแผนทริปจริง (POST /trips/plan)
+// ─────────────────────────────────────────────────────────────────────────
+
+/** คำขอวางแผน — ต้องตรงกับ body ที่ backend อ่าน */
+export interface PlanTripRequest {
+  folderId?: string | null;
+  days: number;
+  date?: string | null;
+  startTime?: string | null;
+  /** จุดเริ่มต้น (ต้องมีพิกัด) */
+  startPoint: TripPlanPoint;
+  returnMode: "same_as_start" | "custom";
+  /** จุดสิ้นสุดตอนกลับ (บังคับเมื่อ returnMode = "custom") */
+  endPoint?: TripPlanPoint | null;
+  /** จุดสิ้นสุดของแต่ละวัน (หลายวัน) */
+  dayEndPoints?: (TripPlanPoint | null)[];
+  vehicle: string;
+  fuelType?: string | null;
+  travelers: number;
+  budgetPerPerson: number;
+  style: string;
+  /** จุดที่ผู้ใช้เพิ่มเองจากแผนที่ */
+  extraStops?: {
+    label: string;
+    address?: string | null;
+    coords: { lat: number; lng: number };
+    price?: string | null;
+    openingHours?: string | null;
+    phone?: string | null;
+    website?: string | null;
+  }[];
+  /**
+   * รายการจุดที่ผู้ใช้แก้เอง (ลบ · สลับลำดับ · เพิ่ม) พร้อมวันที่
+   * → เมื่อส่งมา ระบบจะยึดรายการนี้เป็นจริง ไม่ให้ AI เลือกซ้ำ
+   * (ถ้าไม่ส่ง = ให้ AI เลือกตามปกติ)
+   */
+  selectedStops?: { id?: string; name: string; day: number }[];
+  /** ราคาน้ำมันที่ผู้ใช้พิมพ์เองจากที่ปั๊ม → ชนะราคาสดเสมอ */
+  fuelPriceOverride?: number | null;
+  /** true = ให้ backend บันทึกลง trip_plans ด้วย */
+  save?: boolean;
+  /**
+   * รหัสแผนเดิมที่ต้องการอัปเดตทับ (แก้แผนที่บันทึกไว้แล้ว → ยืนยันอีกครั้ง)
+   * → backend จะอัปเดตแถวเดิมของผู้ใช้คนนี้ ไม่สร้างแผนซ้ำ
+   */
+  planId?: string | null;
+}
+
+export interface PlanTripResult {
+  plan: TripPlan;
+  planId: string | null;
+  persisted?: boolean;
+  persistReason?: string;
+  source: string;
+  aiUsed?: boolean;
+  aiWarnings?: string[];
+  droppedByAi?: string[];
+  notSelected?: { id: string; name: string; type: string }[];
+  folderResolved?: boolean;
+  folderWarning?: string | null;
+}
+
+/**
+ * วางแผนทริปจริง — คำนวณเส้นทาง/เวลา/ค่าน้ำมันทั้งหมดที่ backend
+ * (ไม่แต่งตัวเลขปลอมในแอป)
+ */
+export async function generateTripPlan(
+  req: PlanTripRequest,
+  opts?: { token?: string | null }
+): Promise<PlanTripResult> {
+  const headers: Record<string, string> = {};
+  if (opts?.token) headers.Authorization = `Bearer ${opts.token}`;
+
+  const data = await aiFetch<any>({
+    label: "trips/plan",
+    path: "/trips/plan",
+    method: "POST",
+    headers,
+    body: {
+      folderId: req.folderId ?? undefined,
+      days: req.days,
+      date: req.date ?? undefined,
+      startTime: req.startTime ?? undefined,
+      startPoint: req.startPoint,
+      returnMode: req.returnMode,
+      endPoint: req.endPoint ?? undefined,
+      dayEndPoints: req.dayEndPoints ?? undefined,
+      vehicle: req.vehicle,
+      fuelType: req.fuelType ?? undefined,
+      travelers: req.travelers,
+      budgetPerPerson: req.budgetPerPerson,
+      style: req.style,
+      extraStops: req.extraStops ?? undefined,
+      selectedStops: req.selectedStops ?? undefined,
+      fuelPriceOverride: req.fuelPriceOverride ?? undefined,
+      save: req.save ?? false,
+      planId: req.planId ?? undefined,
+    },
+    timeoutMs: API_TIMEOUT_MS * 6,
+    onSettled: (ok, error) => {
+      if (!ok && error) toastAiError(error);
+    },
+  });
+
+  const plan = (data?.plan ?? data) as TripPlan;
+  return {
+    plan,
+    planId: data?.planId ?? null,
+    persisted: data?.persisted,
+    persistReason: data?.persistReason,
+    source: data?.source ?? "planner",
+    aiUsed: data?.aiUsed,
+    aiWarnings: data?.aiWarnings,
+    droppedByAi: data?.droppedByAi,
+    notSelected: data?.notSelected,
+    folderResolved: data?.folderResolved,
+    folderWarning: data?.folderWarning ?? null,
+  };
+}
+
+/**
+ * แปลงช่องข้อมูลที่เอไaiสกัดมา → คำขอวางแผน
+ * ค่าที่ยังไม่ครบจะถูกเติมด้วยค่าเริ่มต้นของระบบ (ผู้ใช้เปลี่ยนได้ในการ์ด)
+ */
+export function planRequestFromSlots(
+  slots: TripSlots,
+  folderId?: string | null
+): PlanTripRequest {
+  const returnMode: "same_as_start" | "custom" =
+    slots.returnMode === "custom" ? "custom" : "same_as_start";
+  const startPoint: TripPlanPoint = slots.startPoint ?? {
+    label: "จุดเริ่มต้น",
+    coords: null,
+  };
+  const endPoint: TripPlanPoint | null =
+    returnMode === "custom"
+      ? slots.endPoint ?? null
+      : { label: startPoint.label, address: startPoint.address, coords: startPoint.coords };
+
+  return {
+    folderId: folderId ?? null,
+    days: Math.min(7, Math.max(1, Number(slots.days) || 1)),
+    date: slots.date ?? null,
+    startTime: slots.startTime ?? "08:00",
+    startPoint,
+    returnMode,
+    endPoint,
+    dayEndPoints: slots.dayEndPoints ?? undefined,
+    vehicle: slots.vehicle ?? "private_car",
+    fuelType: slots.fuelType ?? null,
+    travelers: Math.max(1, Number(slots.travelers) || 1),
+    budgetPerPerson: Number(slots.budgetPerPerson) || 3000,
+    style: slots.style || "ท่องเที่ยวธรรมชาติและชุมชนท้องถิ่น",
+    save: false,
+  };
+}
+
+/** จุดใกล้เคียงที่ระบบเสนอ (ผู้ใช้ต้องกดเพิ่มเอง — ระบบไม่เพิ่มให้เงียบ ๆ) */
+export interface NearbyPlace {
+  id: string;
+  name: string;
+  address?: string | null;
+  province?: string | null;
+  district?: string | null;
+  coordinates: { lat: number; lng: number };
+  price?: string | null;
+  priceUnit?: string | null;
+  openingHours?: string | null;
+  phone?: string | null;
+  website?: string | null;
+  rating?: number | null;
+  distanceKm?: number | null;
+  source: string;
+}
+
+export async function fetchNearbySuggestions(params: {
+  near: TripPlanPoint;
+  radiusKm?: number;
+  limit?: number;
+  type?: string | null;
+  /** จุดบนเส้นทาง → วัดระยะจากเส้นทางจริงแทนระยะเป็นเส้นตรง */
+  routePoints?: { lat: number; lng: number }[];
+  excludeIds?: string[];
+}): Promise<NearbyPlace[]> {
+  const data = await aiFetch<{ places?: any[] }>({
+    label: "trips/nearby",
+    path: "/trips/nearby",
+    method: "POST",
+    body: {
+      near: params.near,
+      radiusKm: params.radiusKm ?? 10,
+      limit: params.limit ?? 8,
+      type: params.type ?? null,
+      routePoints: params.routePoints ?? [],
+      excludeIds: params.excludeIds ?? [],
+    },
+    timeoutMs: API_TIMEOUT_MS * 4,
+    onSettled: (ok, error) => {
+      if (!ok && error) toastAiError(error);
+    },
+  });
+  const list = Array.isArray(data?.places) ? data.places : [];
+  return list
+    .filter((p: any) => p && typeof p.name === "string" && p?.coordinates)
+    .map((p: any) => ({
+      id: String(p.id ?? p.name),
+      name: String(p.name),
+      address: p.address ?? null,
+      province: p.province ?? null,
+      district: p.district ?? null,
+      coordinates: {
+        lat: Number(p.coordinates.lat),
+        lng: Number(p.coordinates.lng),
+      },
+      price: p.price ?? null,
+      priceUnit: p.priceUnit ?? null,
+      openingHours: p.openingHours ?? null,
+      phone: p.phone ?? null,
+      website: p.website ?? null,
+      rating: typeof p.rating === "number" ? p.rating : null,
+      distanceKm: typeof p.distanceKm === "number" ? p.distanceKm : null,
+      source: String(p.source ?? "unknown"),
+    }));
+}
+
+/** ราคาน้ำมันล่าสุดที่ backend ดึงสดจากเว็บ */
+export interface FuelPriceSnapshot {
+  prices: Record<string, number>;
+  labels: Record<string, string>;
+  fetchedAt: string;
+  effectiveDate: string | null;
+  effectiveDateAlt: string | null;
+  source: string;
+  origin: string;
+  isEstimate: boolean;
+  url: string | null;
+}
+
+export async function fetchFuelPrices(): Promise<FuelPriceSnapshot | null> {
+  try {
+    const data = await aiFetch<any>({
+      label: "trips/fuel-price",
+      path: "/trips/fuel-price",
+      method: "GET",
+      timeoutMs: API_TIMEOUT_MS * 2,
+      onSettled: (ok, error) => {
+        if (!ok && error) toastAiError(error);
+      },
+    });
+    if (!data || typeof data !== "object" || !data.prices) return null;
+    return {
+      prices: data.prices ?? {},
+      labels: data.labels ?? {},
+      fetchedAt: String(data.fetchedAt ?? ""),
+      effectiveDate: data.effectiveDate ?? null,
+      effectiveDateAlt: data.effectiveDateAlt ?? null,
+      source: String(data.source ?? "unknown"),
+      origin: String(data.origin ?? ""),
+      isEstimate: data.isEstimate === true,
+      url: data.url ?? null,
+    };
+  } catch {
+    // ราคาน้ำมันเป็นข้อมูลเสริม — ล้มเหลวไม่ทำให้ทั้งระบบล้ม
+    return null;
+  }
+}
+
+/** ที่พักที่ระบบเสนอ (หลายวัน) — แปลงเป็นรูปแบบที่แอปเก็บไว้กับทริป */
+export function lodgingToTripLodging(l: TripPlanLodging): TripPlanLodging {
+  return l;
 }
