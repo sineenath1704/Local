@@ -15,7 +15,7 @@
 import http from "http";
 import type { Request, Response } from "express";
 import router from "../src/routes/places";
-import { pickCoordCandidate } from "../src/routes/places";
+import { pickCoordCandidate, resolveCoordsBySearch } from "../src/routes/places";
 import { expandMapsUrl, parseMapsUrlCoords } from "../src/mapsUrl";
 import type { PlaceCandidate } from "../src/placeTypes";
 
@@ -220,6 +220,95 @@ async function main() {
       "วัดพระแก้ว"
     );
     ok("คำค้นไม่มีจังหวัด → ได้ผลลัพธ์ที่ชื่อตรง", picked?.name === "วัดพระแก้ว");
+  }
+
+  {
+    // ผลลัพธ์อยู่คนละจังหวัดอย่างชัดเจน → ต้องไม่ตอบพิกัดมั่ว
+    // (ผิดจังหวัด = เส้นทาง/ค่าน้ำมันผิดทั้งแผน แย่กว่าบอกว่าไม่เจอ)
+    const picked = pickCoordCandidate(
+      [WAT_CHIANG_RAI],
+      "วัดพระแก้ว เชียงใหม่"
+    );
+    eq("มีแต่ผลลัพธ์คนละจังหวัด → null (ไม่ตอบพิกัดผิด)", picked, null);
+  }
+
+  {
+    // "กรุงเทพ" กับ "กรุงเทพมหานคร" คือจังหวัดเดียวกัน
+    const bangkok = fakeCandidate({
+      name: "ห้างสรรพสินค้าเซ็นทรัลเวิลด์",
+      address: "ถนนเจริญกรุง แขวงสี่พระยา เขตบางรัก กรุงเทพมหานคร 10100",
+      latitude: 13.746,
+      longitude: 100.539,
+      province: "กรุงเทพ",
+      district: "บางรัก",
+      subdistrict: "สี่พระยา",
+    });
+    const picked = pickCoordCandidate([bangkok], "ห้างเซ็นทรัลเวิลด์ กรุงเทพ");
+    ok(
+      'คำค้น "กรุงเทพ" ต้องจับคู่กับที่อยู่ "กรุงเทพมหานคร"',
+      picked?.latitude === 13.746
+    );
+  }
+
+  // ── 3.1 จำลองสถานการณ์จริงที่เจอใน production ──────────────────────────
+  console.log("\n[จำลองผลลัพธ์จาก Google]");
+
+  {
+    // ของจริง: ค้น "วัดพระแก้ว เชียงใหม่" ได้วัดในเชียงรายมาก่อน
+    // และวัดในเชียงใหม่อยู่อันดับที่ 6 → ถ้าตัดที่ 5 รายการ จะเลือกผิดจังหวัด
+    const search = async (query: string, opts?: { maxResults?: number }) => {
+      const all = [WAT_CHIANG_RAI, WAT_CHIANG_RAI, WAT_CHIANG_RAI, WAT_CHIANG_RAI, WAT_CHIANG_RAI, WAT_CHIANG_MAI];
+      return all.slice(0, opts?.maxResults ?? 5);
+    };
+    const picked = await resolveCoordsBySearch(
+      "วัดพระแก้ว เชียงใหม่",
+      search
+    );
+    eq(
+      "ของจริงอยู่อันดับที่ 6 → ต้องดึงมาให้ครบ 20 รายการ แล้วเลือกตัวที่อยู่ในจังหวัดที่ถาม",
+      picked?.province,
+      "เชียงใหม่"
+    );
+  }
+
+  {
+    // ถ้าค้นแล้วไม่มีตัวที่อยู่ในจังหวัดที่ถามเลย → ไม่ตอบพิกัด
+    const search = async () => [WAT_CHIANG_RAI];
+    const picked = await resolveCoordsBySearch("วัดพระแก้ว เชียงใหม่", search);
+    eq("ไม่มีตัวไหนอยู่ในจังหวัดที่ถาม → null", picked, null);
+  }
+
+  {
+    // ค้นรอบแรกได้ผิดจังหวัด → ต้องค้นใหม่แบบเจาะจงจังหวัด
+    const queries: string[] = [];
+    const search = async (query: string) => {
+      queries.push(query);
+      if (query.includes("จังหวัด")) return [WAT_CHIANG_MAI];
+      return [WAT_CHIANG_RAI];
+    };
+    const picked = await resolveCoordsBySearch("วัดพระแก้ว เชียงใหม่", search);
+    eq("ค้นรอบสองแบบเจาะจงจังหวัด → ได้วัดในเชียงใหม่", picked?.province, "เชียงใหม่");
+    ok(
+      'คำค้นรอบสองต้องเป็น "วัดพระแก้ว จังหวัดเชียงใหม่"',
+      queries[1] === "วัดพระแก้ว จังหวัดเชียงใหม่",
+      `ได้ "${queries[1]}"`
+    );
+  }
+
+  {
+    // ชื่อที่มีจังหวัดอยู่ในตัวชื่อเอง (โรงแรมเชียงใหม่) → คำค้นรอบสองต้องไม่ตัดชื่อทิ้ง
+    const queries: string[] = [];
+    const search = async (query: string) => {
+      queries.push(query);
+      // รอบแรกได้ผล (ผิดจังหวัด) → จึงไปค้นรอบสองแบบเจาะจงจังหวัด
+      return query.includes("จังหวัด") ? [] : [WAT_CHIANG_RAI];
+    };
+    await resolveCoordsBySearch("โรงแรมเชียงใหม่", search);
+    ok(
+      'คำค้นรอบสองต้องยังมีชื่อสถานที่ ("โรงแรมเชียงใหม่ จังหวัดเชียงใหม่")',
+      queries[queries.length - 1] === "โรงแรมเชียงใหม่ จังหวัดเชียงใหม่",
+      `ได้ "${queries[queries.length - 1]}"`
+    );
   }
 
   // ── 4. ส่วนที่ยิง Google จริง (ต้องเปิดด้วย LIVE=1) ─────────────────────

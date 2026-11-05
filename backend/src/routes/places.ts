@@ -292,8 +292,17 @@ function mapNewPlace(p: any): PlaceCandidate {
  * (เช่น REQUEST_DENIED ตอนบิลลิ่มปิด) ต้อง **throw** — ไม่ใช่คืน [] เงียบ ๆ
  * เพราะ [] แปลว่า "ค้นแล้วไม่เจอ" ซึ่งไม่ใช่ความจริง
  */
-export async function searchPlaceCandidates(query: string): Promise<PlaceCandidate[]> {
+export async function searchPlaceCandidates(
+  query: string,
+  opts?: { maxResults?: number }
+): Promise<PlaceCandidate[]> {
   if (!isPlacesConfigured()) return [];
+
+  // จำนวนผลลัพธ์ที่เก็บไว้ให้ตัวเลือกพิกัดพิจารณา
+  //   · ค่าเริ่มต้น 5 = เหมือนเดิม (ผู้ใช้ติ๊กเอง → แค่หน้าแรกก็พอ)
+  //   · งานหาพิกัดจากลิงก์ใช้ 20 เพราะชื่อสถานที่ซ้ำข้ามจังหวัด
+  //     และของจริงอาจอยู่อันดับที่ 6-20 (Google เรียงตามความเกี่ยวข้องของมันเอง)
+  const maxResults = Math.max(1, Math.min(opts?.maxResults ?? 5, 20));
 
   // 1) Places API (New) — preferred (cheaper per call).
   //    ถ้าล้มเหลว → ลอง Legacy ต่อ (จะ throw ถ้าตัวนั้นก็ล้มเหลว)
@@ -309,7 +318,7 @@ export async function searchPlaceCandidates(query: string): Promise<PlaceCandida
         textQuery: query,
         languageCode: "th",
         regionCode: "TH",
-        maxResultCount: 5,
+        maxResultCount: Math.min(maxResults, 10),
       }),
     });
 
@@ -367,7 +376,7 @@ export async function searchPlaceCandidates(query: string): Promise<PlaceCandida
   }
 
   const results: any[] = Array.isArray(legData?.results) ? legData.results : [];
-  return results.slice(0, 5).map((p: any) => {
+  return results.slice(0, maxResults).map((p: any) => {
     const admin = extractAdminFromAddress(p.formatted_address ?? "");
     const lat = p.geometry?.location?.lat ?? null;
     const lng = p.geometry?.location?.lng ?? null;
@@ -1947,7 +1956,7 @@ router.get("/photo", async (req: Request, res: Response) => {
  * ย่อข้อความให้เทียบกันได้ (เหมือน `foldPlaceName` ใน googleMaps.ts)
  * ─ ตัดช่องว่าง/เครื่องหมายทิ้ง ("บ้าน สวน ริมน้ำ" = "บ้านสวนริมน้ำ")
  */
-function foldText(value: string): string {
+function foldText(value: string | null | undefined): string {
   return String(value ?? "")
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, "");
@@ -1973,18 +1982,50 @@ function provinceInQuery(query: string): string | null {
 }
 
 /**
+ * ทำให้ชื่อจังหวัดอยู่ในรูปเดียวกัน
+ * ─ Google เขียน "กรุงเทพมหานคร" แต่คนพิมพ์ "กรุงเทพ" → ต้องเท่ากัน
+ */
+function normalizeProvinceName(value: string | null | undefined): string {
+  const v = foldText(value);
+  if (!v) return "";
+  if (v.startsWith("กรุงเทพ")) return "กรุงเทพมหานคร";
+  return v;
+}
+
+/**
  * ผลลัพธ์นี้อยู่ในจังหวัดที่ถามไหม
- * ─ เทียบได้ทั้งชื่อที่ Google เขียนและชื่อที่อยู่ในที่อยู่
+ * ─ เทียบกับ "จังหวัดที่ Google ระบุในที่อยู่" เป็นหลัก
+ *   (ชื่อสถานที่ห้ามใช้ตัดสินจังหวัด — "โรงแรมเชียงใหม่" อาจอยู่ที่ไหนก็ได้)
  */
 function candidateInProvince(c: PlaceCandidate, province: string): boolean {
-  const fp = foldText(province);
-  if (fp.length < 4) return false;
+  const wanted = normalizeProvinceName(province);
+  if (wanted.length < 4) return false;
+  // จังหวัดที่ Google ระบุมาเอง → เชื่อได้ที่สุด
+  const own = normalizeProvinceName(c.province);
+  if (own) return own === wanted;
+  // ไม่ระบุจังหวัด → ดูในที่อยู่
   const haystack = foldText(
-    [c.name, c.address, c.province, c.district, c.subdistrict]
-      .filter(Boolean)
-      .join(" ")
+    [c.address, c.district, c.subdistrict].filter(Boolean).join(" ")
   );
-  return haystack.includes(fp);
+  if (haystack.includes(wanted)) return true;
+  // "กรุงเทพ" ในที่อยู่ = "กรุงเทพมหานคร"
+  if (wanted === "กรุงเทพมหานคร" && haystack.includes("กรุงเทพ")) return true;
+  return false;
+}
+
+/**
+ * คำค้นสำหรับ "ค้นเจาะจงจังหวัด"
+ * ─ ตัดชื่อจังหวัดเดิมออก (ถ้ามี) แล้วเติม "จังหวัด…" ให้ชัด
+ *   "วัดพระแก้ว เชียงใหม่" → "วัดพระแก้ว จังหวัดเชียงใหม่"
+ */
+function scopedQueryForProvince(query: string, province: string): string {
+  const q = String(query ?? "").trim();
+  const wanted = normalizeProvinceName(province);
+  const alias = wanted === "กรุงเทพมหานคร" ? "กรุงเทพ" : wanted;
+  const tokens = q
+    .split(/[\s,]+/)
+    .filter((t) => t.trim() && foldText(t) !== alias);
+  return `${tokens.join(" ")} จังหวัด${province}`.trim();
 }
 
 /**
@@ -2021,11 +2062,27 @@ export function pickCoordCandidate(
 
   const province = provinceInQuery(query);
 
+  // คำค้นระบุจังหวัด → ตัวที่อยู่คนละจังหวัด "ผิดแน่" (เช่น "วัดพระแก้ว" มีทั้งเชียงใหม่และเชียงราย)
+  // → ตัดทิ้ง ไม่ตอบพิกัดผิด (พาไปผิดจังหวัดแย่กว่าบอกว่าไม่เจอ)
+  let pool = withCoords;
+  if (province) {
+    const inProvince = withCoords.filter((c) => candidateInProvince(c, province));
+    if (inProvince.length) {
+      pool = inProvince;
+    } else {
+      // ทุกตัวระบุจังหวัดชัดเจนว่าคนละจังหวัด → ไม่ตอบเลย
+      const allKnown = withCoords.every((c) => !!foldText(c.province));
+      if (allKnown) return null;
+      // บางตัวระบุจังหวัดไม่ได้ (ที่อยู่ไม่ครบ) → ให้ตัวเหล่านั้นเป็นตัวเลือก
+      pool = withCoords.filter((c) => !foldText(c.province));
+    }
+  }
+
   let best: PlaceCandidate | null = null;
   let bestCoverage = -1;
   let bestNameMatch = -1;
 
-  for (const c of withCoords) {
+  for (const c of pool) {
     const tokenCoverage = candidateCoverage(query, c);
     // ตรงจังหวัดที่ถาม = หลักฐานแรงที่สุด (ชื่อเดียวกันมีได้หลายจังหวัด)
     const coverage =
@@ -2046,6 +2103,62 @@ export function pickCoordCandidate(
   // ไม่มีอะไรตรงกับคำค้นเลย → ไม่ตอบพิกัดมั่ว (ดีกว่าพาไปผิดที่)
   if (bestNameMatch === 0 && bestCoverage <= 0) return null;
   return best;
+}
+
+/** รูปแบบฟังก์ชันค้นหาที่ `resolveCoordsBySearch` ใช้ (แทนไว้เพื่อเทสต์ได้) */
+export type PlaceSearchFn = (
+  query: string,
+  opts?: { maxResults?: number }
+) => Promise<PlaceCandidate[]>;
+
+/**
+ * หาพิกัดจาก "ชื่อสถานที่" โดยเลือกผลให้ตรงกับที่ถาม
+ * -------------------------------------------------------------
+ * แยกออกมาเป็นฟังก์ชันเพื่อให้เทสต์เขียนผลลัพธ์ปลอมมาเช็คได้
+ * (โดยไม่ต้องยิง Google จริง)
+ *
+ * 3 ขั้น
+ *   1) ค้นด้วยคำที่ถาม (เก็บผลลัพธ์ถึง 20 รายการ ไม่ใช่แค่ 5
+ *      เพราะชื่อสถานที่ซ้ำข้ามจังหวัด และของจริงอาจอยู่อันดับที่ 6-20)
+ *   2) ถ้าคำค้นมีชื่อจังหวัด แต่ที่ได้ไม่อยู่ในจังหวัดนั้น
+ *      → ค้นใหม่แบบเจาะจงจังหวัด ("วัดพระแก้ว เชียงใหม่" → "วัดพระแก้ว จังหวัดเชียงใหม่")
+ *   3) ถ้ายังไม่มีตัวที่อยู่ในจังหวัดนั้น → ไม่ตอบพิกัดเลย
+ *      (พาไปผิดจังหวัดแย่กว่าบอกว่าไม่เจอ — ผิดจังหวัดแล้วเส้นทาง/ค่าน้ำมันผิดทั้งแผน)
+ */
+export async function resolveCoordsBySearch(
+  query: string,
+  search: PlaceSearchFn,
+  opts?: { isFromLink?: boolean }
+): Promise<PlaceCandidate | null> {
+  const SEARCH_LIMIT = 20;
+
+  let candidates = await search(query, { maxResults: SEARCH_LIMIT });
+  // คำที่ผู้ใช้พิมพ์เอง → ถ้าไม่เจอ ลองเติม "ประเทศไทย" อีกครั้ง
+  // (ชื่อจากลิงก์ไม่ต้องเติม — ลิงก์นั้นระบุประเทศมาแล้ว)
+  if (!candidates.length && !opts?.isFromLink) {
+    candidates = await search(`${query} ประเทศไทย`, {
+      maxResults: SEARCH_LIMIT,
+    });
+  }
+
+  let picked = pickCoordCandidate(candidates, query);
+
+  // คำค้นมีชื่อจังหวัด แต่ผลที่ได้ไม่ได้อยู่ในจังหวัดนั้น (หรือไม่มีผลเลย)
+  // (ชื่อสถานที่ซ้ำกันข้ามจังหวัด — เช่น "วัดพระแก้ว") → ค้นใหม่แบบเจาะจงจังหวัด
+  const province = provinceInQuery(query);
+  if (province && (!picked || !candidateInProvince(picked, province))) {
+    const scoped = await search(scopedQueryForProvince(query, province), {
+      maxResults: SEARCH_LIMIT,
+    });
+    // รวมผลเดิมด้วย — ถ้ามีตัวที่อยู่ในจังหวัดถูกต้องอยู่แล้ว ไม่ต้องเสียงบูรณะ
+    const scopedPick = pickCoordCandidate([...candidates, ...scoped], query);
+    if (scopedPick && candidateInProvince(scopedPick, province)) {
+      picked = scopedPick;
+    }
+  }
+
+  if (!picked || picked.latitude == null || picked.longitude == null) return null;
+  return picked;
 }
 
 router.post("/resolve-coords", async (req: Request, res: Response) => {
@@ -2106,27 +2219,11 @@ router.post("/resolve-coords", async (req: Request, res: Response) => {
   }
 
   try {
-    let candidates = await searchPlaceCandidates(query);
-    // คำที่ผู้ใช้พิมพ์เอง → ถ้าไม่เจอ ลองเติม "ประเทศไทย" อีกครั้ง
-    // (ชื่อจากลิงก์ไม่ต้องเติม — ลิงก์นั้นระบุประเทศมาแล้ว)
-    if (!candidates.length && !name) {
-      candidates = await searchPlaceCandidates(`${query} ประเทศไทย`);
-    }
+    const picked = await resolveCoordsBySearch(query, searchPlaceCandidates, {
+      isFromLink: !!name,
+    });
 
-    let picked = pickCoordCandidate(candidates, query);
-
-    // คำค้นมีชื่อจังหวัด แต่ผลที่ได้ไม่ได้อยู่ในจังหวัดนั้น (หรือไม่มีผลเลย)
-    // (ชื่อสถานที่ซ้ำกันข้ามจังหวัด — เช่น "วัดพระแก้ว") → ค้นใหม่แบบเจาะจงจังหวัด
-    const province = provinceInQuery(query);
-    if (province && (!picked || !candidateInProvince(picked, province))) {
-      const scoped = await searchPlaceCandidates(`${query} จังหวัด${province}`);
-      const scopedPick = pickCoordCandidate(scoped, query);
-      if (scopedPick && candidateInProvince(scopedPick, province)) {
-        picked = scopedPick;
-      }
-    }
-
-    if (picked && picked.latitude != null && picked.longitude != null) {
+    if (picked) {
       return res.json({
         ok: true,
         lat: picked.latitude,
