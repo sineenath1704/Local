@@ -104,3 +104,65 @@ export function placePhotoUrl(photoUrl?: string | null): string | null {
   if (raw.startsWith("/")) return `${API_BASE_URL}${raw}`;
   return null;
 }
+
+/**
+ * พิกัดที่หาได้จากลิงก์/ชื่อสถานที่
+ */
+export interface ResolvedCoords {
+  lat: number;
+  lng: number;
+  /** ชื่อที่ backend หามาให้ (ถ้ามี) */
+  label?: string;
+  /** ที่มาของพิกัด: ในลิงก์ / ลิงก์ที่กางแล้ว / Google Places */
+  source?: "url" | "redirect" | "places";
+}
+
+/**
+ * หาพิกัดจากลิงก์ Google Maps (หรือชื่อ/ที่อยู่ที่พิมพ์เอง)
+ * -------------------------------------------------------------
+ * เรียก backend เพราะสองอย่างที่แอปทำเองไม่ได้
+ *   · ลิงก์สั้น `maps.app.goo.gl/…` — React Native ตาม redirect แล้วไม่เห็น
+ *     URL ปลายทาง → ต้องให้เซิร์ฟเวอร์กางให้
+ *   · ลิงก์ที่มีแต่ชื่อสถานที่ — ต้องค้น Google Places
+ *     (คีย์ของ Google เป็น server-only → แอปยิงเองไม่ได้)
+ *
+ * คืน null เมื่อหาไม่ได้ (ไม่ throw — ผู้เรียกต้องแยกได้ว่า "ไม่มีพิกัด")
+ */
+export async function resolvePlaceCoords(input: {
+  url?: string | null;
+  text?: string | null;
+}): Promise<ResolvedCoords | null> {
+  const url = (input.url ?? "").trim();
+  const text = (input.text ?? "").trim();
+  if (!url && !text) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS * 3);
+  try {
+    const res = await fetch(`${API_BASE_URL}/places/resolve-coords`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        url: url || undefined,
+        text: text || undefined,
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data?.ok) return null;
+    const lat = Number(data.lat);
+    const lng = Number(data.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return {
+      lat,
+      lng,
+      label: typeof data.label === "string" ? data.label : undefined,
+      source: data.source,
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}

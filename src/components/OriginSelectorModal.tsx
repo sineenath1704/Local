@@ -23,8 +23,10 @@ import {
   getSavedPlaces,
   saveUserPlace,
   resolveGoogleMapsUrl,
+  updateSavedPlaceCoords,
   UserSavedPlace,
 } from "../services/savedPlacesService";
+import { resolvePlaceCoords } from "../services/placesService";
 
 interface OriginSelectorModalProps {
   visible: boolean;
@@ -41,6 +43,8 @@ export default function OriginSelectorModal({
 }: OriginSelectorModalProps) {
   const [savedList, setSavedList] = useState<UserSavedPlace[]>([]);
   const [loading, setLoading] = useState(false);
+  /** กำลังหาพิกัดให้ที่อยู่ที่บันทึกไว้ตัวไหน (ตัวที่กำลังรอ) */
+  const [resolvingId, setResolvingId] = useState<string | null>(null);
 
   // Manual input state
   const [placeLabel, setPlaceLabel] = useState("บ้าน");
@@ -62,52 +66,152 @@ export default function OriginSelectorModal({
     setLoading(false);
   };
 
+  /**
+   * บันทึกเป็นที่อยู่ประจำ (ถ้าผู้ใช้ติ๊กไว้) แล้วส่งจุดที่เลือกกลับไป
+   */
+  const applySelection = async (opts: {
+    placeTitle: string;
+    displayAddress: string;
+    url?: string;
+    coords?: { lat: number; lng: number };
+  }) => {
+    if (saveAsFav) {
+      await saveUserPlace({
+        label: opts.placeTitle,
+        address_text: opts.displayAddress,
+        google_maps_url: opts.url || undefined,
+        lat: opts.coords?.lat,
+        lng: opts.coords?.lng,
+      });
+    }
+
+    onSelectOrigin({
+      label: opts.placeTitle,
+      address: opts.displayAddress,
+      url: opts.url || undefined,
+      coords: opts.coords,
+    });
+    onClose();
+  };
+
   const handleConfirmInput = async () => {
     const addr = inputAddress.trim();
     const url = mapsUrl.trim();
 
     if (!addr && !url) {
-      Alert.alert("โปรดระบุข้อมูล", "กรุณาระบุที่อยู่หรือวางลิงก์ Google Maps");
+      Alert.alert("โปรดระบุข้อมูล", "กรุณาระบุที่อยู่หรือวางลิงก์ Google Maps เพื่อให้หาพิกัดให้อัตโนมัติ");
       return;
     }
 
     setSavingFav(true);
     const parsed = await resolveGoogleMapsUrl(url);
-    const placeTitle = parsed.placeName || placeLabel || "จุดเริ่มต้น";
-    const displayAddress = addr
-      ? addr
-      : parsed.placeName
-      ? `${parsed.placeName} (พิกัด: ${parsed.lat?.toFixed(4)}, ${parsed.lng?.toFixed(4)})`
-      : parsed.lat && parsed.lng
-      ? `พิกัด (${parsed.lat.toFixed(4)}, ${parsed.lng.toFixed(4)})`
-      : url;
 
-    if (saveAsFav) {
-      await saveUserPlace({
-        label: placeTitle,
-        address_text: displayAddress,
-        google_maps_url: url || undefined,
-        lat: parsed.lat,
-        lng: parsed.lng,
+    // ยังไม่มีพิกัดในตัวลิงก์ → ให้ backend ช่วย (กางลิงก์สั้น / ค้นชื่อสถานที่)
+    let lat = parsed.lat;
+    let lng = parsed.lng;
+    let placeName = parsed.placeName;
+    if ((lat == null || lng == null) && (url || addr)) {
+      const resolved = await resolvePlaceCoords({
+        url: url || null,
+        text: addr || null,
       });
+      if (resolved) {
+        lat = resolved.lat;
+        lng = resolved.lng;
+        placeName = resolved.label || placeName;
+      }
     }
     setSavingFav(false);
 
-    onSelectOrigin({
-      label: placeTitle,
-      address: displayAddress,
-      url: url || undefined,
-      coords: parsed.lat && parsed.lng ? { lat: parsed.lat, lng: parsed.lng } : undefined,
-    });
-    onClose();
+    const coords = lat != null && lng != null ? { lat, lng } : undefined;
+    // ผู้ใช้พิมพ์ที่อยู่เอง → ใช้แท็กที่เลือก (บ้าน/หอพัก/…) เป็นชื่อที่บันทึก
+    // ถ้าไม่ได้พิมพ์ (วางลิงก์อย่างเดียว) → ใช้ชื่อสถานที่ที่หาพิกัดได้
+    const placeTitle = addr
+      ? placeLabel
+      : placeName || placeLabel || "จุดเริ่มต้น";
+    const displayAddress = addr
+      ? addr
+      : placeName
+      ? coords
+        ? `${placeName} (พิกัด: ${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)})`
+        : placeName
+      : coords
+      ? `พิกัด (${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)})`
+      : url;
+
+    // หาพิกัดไม่ได้ → บอกผู้ใช้ก่อน (แผนทริปต้องใช้พิกัดถึงจะคำนวณเส้นทางได้)
+    if (!coords) {
+      Alert.alert(
+        "หาพิกัดไม่ได้",
+        "ลิงก์นี้ไม่มีพิกัด และค้นชื่อสถานที่ไม่สำเร็จ\n\n" +
+          "แผนทริปต้องใช้พิกัด จึงยังใช้จุดนี้เป็นจุดเริ่มต้นไม่ได้\n" +
+          "ลองเลือกจากแผนที่ในแอป หรือพิมพ์ชื่อสถานที่ให้ละเอียดกว่านี้",
+        [
+          { text: "ยกเลิก", style: "cancel" },
+          {
+            text: "บันทึกไว้ก่อน (ยังไม่มีพิกัด)",
+            onPress: () => {
+              void applySelection({ placeTitle, displayAddress, url, coords: undefined });
+            },
+          },
+        ]
+      );
+      return;
+    }
+
+    await applySelection({ placeTitle, displayAddress, url, coords });
   };
 
-  const handlePickSaved = (item: UserSavedPlace) => {
+  const handlePickSaved = async (item: UserSavedPlace) => {
+    let coords =
+      item.lat && item.lng ? { lat: item.lat, lng: item.lng } : undefined;
+
+    // ที่อยู่ที่บันทึกไว้ก่อนหน้านี้อาจไม่มีพิกัด (ตอนที่ยังหาไม่ได้)
+    // → หาใหม่แล้วเขียนกลับลงฐานข้อมูล จะได้ไม่ต้องรอทุกครั้ง
+    if (!coords) {
+      setResolvingId(item.id);
+      const resolved = await resolvePlaceCoords({
+        url: item.google_maps_url ?? null,
+        text: item.address_text ?? null,
+      });
+      setResolvingId(null);
+      if (resolved) {
+        coords = { lat: resolved.lat, lng: resolved.lng };
+        void updateSavedPlaceCoords(item.id, resolved.lat, resolved.lng);
+      }
+    }
+
+    // ยังหาพิกัดไม่ได้ → บอกผู้ใช้ก่อน (แผนทริปต้องใช้พิกัดถึงจะคำนวณเส้นทางได้)
+    if (!coords) {
+      Alert.alert(
+        "หาพิกัดไม่ได้",
+        `ที่อยู่ "${item.label}" ยังไม่มีพิกัด และค้นจาก Google ก็ไม่สำเร็จ\n\n` +
+          "แผนทริปต้องใช้พิกัด จึงคำนวณเส้นทางไม่ได้\n" +
+          "เลือกจากแผนที่ในแอปแทน หรือกลับไปกำหนดจุดใหม่",
+        [
+          { text: "ยกเลิก", style: "cancel" },
+          {
+            text: "ใช้จุดนี้ต่อ (ยังไม่มีพิกัด)",
+            onPress: () => {
+              onSelectOrigin({
+                label: item.label,
+                address: item.address_text,
+                url: item.google_maps_url,
+                coords: undefined,
+              });
+              onClose();
+            },
+          },
+        ]
+      );
+      return;
+    }
+
     onSelectOrigin({
       label: item.label,
       address: item.address_text,
       url: item.google_maps_url,
-      coords: item.lat && item.lng ? { lat: item.lat, lng: item.lng } : undefined,
+      coords,
     });
     onClose();
   };
@@ -148,10 +252,15 @@ export default function OriginSelectorModal({
                     ) : (
                       <MapPinIcon size={16} color="#7C3AED" />
                     )}
-                    <View className="ml-2">
+                    <View className="ml-2 flex-1">
                       <Text className="text-[13px] font-bold text-violet-900">{item.label}</Text>
                       <Text className="text-[11px] text-violet-600" numberOfLines={1}>{item.address_text}</Text>
                     </View>
+                    {resolvingId === item.id ? (
+                      <ActivityIndicator size="small" color="#7C3AED" className="ml-2" />
+                    ) : item.lat && item.lng ? null : (
+                      <Text className="text-[10px] text-amber-600 ml-2">ยังไม่มีพิกัด</Text>
+                    )}
                   </TouchableOpacity>
                 ))}
               </View>

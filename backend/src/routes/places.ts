@@ -13,6 +13,13 @@ import {
 import { getSupabaseAdmin } from "../supabaseAdmin";
 import { sendError } from "../middleware/errors";
 import { DiagLog, errorDetail } from "../summaryDiag";
+import { placeNameLooksRight } from "../googleMaps";
+import {
+  parseMapsUrlCoords,
+  mapsUrlPlaceName,
+  isShortMapsLink,
+  expandMapsUrl,
+} from "../mapsUrl";
 
 export type { PlaceCandidate, CommunityMatchLevel, LocationScope, ScopeLevel };
 // ผู้เรียกเดิมอาจดึงฟังก์ชันเทียบจากที่นี่ — คงไว้ให้ใช้ต่อได้
@@ -68,6 +75,9 @@ export class PlacesApiError extends Error {
  *     community profile page (PLAN §5.7).
  *  7) searchPlaceCandidatesMulti() — internal: ค้นหลายคำแล้วรวมผล ตอนที่รอบ
  *     "หาสถานที่" ให้คำค้นที่มีหลักฐานรองรับมาหลายคำ
+ *  8) POST /places/resolve-coords — ลิงก์ Google Maps (หรือชื่อ/ที่อยู่) → พิกัด
+ *     ใช้ตอนผู้ใช้วางลิงก์แผนที่ที่ไม่มีพิกัดในตัว (ลิงก์สั้น/ลิงก์ที่มีแต่ชื่อ)
+ *     → ต้องกางลิงก์และ/หรือถาม Google Places ที่ฝั่งเซิร์ฟเวอร์ (คีย์เป็น server-only)
  *
  * Cost note: a search used to cost 6 billable calls (1 text search + 5 Place
  * Details). It is now 1 call to search, and 1 more for details — but only for
@@ -1906,6 +1916,235 @@ router.get("/photo", async (req: Request, res: Response) => {
     console.warn("[places] photo error:", err?.message);
     return res.status(502).json({ error: "ดึงรูปจาก Google ไม่สำเร็จ" });
   }
+});
+
+// ─────────────────────────────────────────────
+//  8) POST /places/resolve-coords — ลิงก์/ชื่อสถานที่ → พิกัด
+// ─────────────────────────────────────────────
+
+/**
+ * แปลง "ลิงก์ Google Maps" หรือ "ชื่อ/ที่อยู่" ให้เป็นพิกัด
+ * -------------------------------------------------------------
+ * ทำไมต้องมี
+ *   ลิงก์ที่ผู้ใช้วางมีหลายรูปแบบ และหลายรูปแบบไม่มีพิกัดอยู่ในตัวข้อความ
+ *     · ลิงก์สั้น `https://maps.app.goo.gl/XXXX`   → ต้องกาง redirect
+ *     · ลิงก์ชื่อ `.../maps/place/ชื่อสถานที่/...` → มีแต่ชื่อ
+ *     · `?q=ชื่อสถานที่`                            → มีแต่ชื่อ
+ *   ถ้าปล่อยไว้ → จุดที่ผู้ใช้บันทึกไว้จะไม่มีพิกัด → แผนทริปบอกว่า "หาพิกัดไม่ได้"
+ *
+ * ทำไมต้องอยู่ฝั่งเซิร์ฟเวอร์
+ *   · React Native ตาม redirect ให้แล้วแต่ไม่เห็น URL ปลายทาง
+ *     (`response.url` ว่างเปล่า) → ฝั่งแอปกางลิงก์สั้นไม่ได้
+ *   · คีย์ของ Google เป็น server-only → ค้นชื่อสถานที่ต้องยิงจากที่นี่
+ *
+ * ขั้นตอน
+ *   1) พิกัดในตัวลิงก์เอง (เร็ว + แม่นที่สุด)
+ *   2) ลิงก์สั้น → กาง redirect ที่นี่ → อ่านพิกัดจาก URL ที่กางแล้ว
+ *   3) ชื่อสถานที่ → Google Places (TextSearch)
+ */
+
+/**
+ * ย่อข้อความให้เทียบกันได้ (เหมือน `foldPlaceName` ใน googleMaps.ts)
+ * ─ ตัดช่องว่าง/เครื่องหมายทิ้ง ("บ้าน สวน ริมน้ำ" = "บ้านสวนริมน้ำ")
+ */
+function foldText(value: string): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+/** คำในคำค้นที่ใช้เทียบได้ (ยาวพอสมควร) */
+function queryTokens(query: string): string[] {
+  return String(query ?? "")
+    .split(/[\s,]+/)
+    .map((t) => foldText(t))
+    .filter((t) => t.length >= 2);
+}
+
+/**
+ * จังหวัดที่คำค้นพูดถึง (ถ้ามี)
+ * ─ รองรับชื่อที่คนเขียนสั้น ๆ เช่น "กรุงเทพ" → "กรุงเทพมหานคร"
+ */
+function provinceInQuery(query: string): string | null {
+  const q = foldText(query);
+  if (!q) return null;
+  if (q.includes("กรุงเทพ") || q.includes("บางกอก")) return "กรุงเทพมหานคร";
+  return detectProvinceFromText(query);
+}
+
+/**
+ * ผลลัพธ์นี้อยู่ในจังหวัดที่ถามไหม
+ * ─ เทียบได้ทั้งชื่อที่ Google เขียนและชื่อที่อยู่ในที่อยู่
+ */
+function candidateInProvince(c: PlaceCandidate, province: string): boolean {
+  const fp = foldText(province);
+  if (fp.length < 4) return false;
+  const haystack = foldText(
+    [c.name, c.address, c.province, c.district, c.subdistrict]
+      .filter(Boolean)
+      .join(" ")
+  );
+  return haystack.includes(fp);
+}
+
+/**
+ * สัดส่วนคำในคำค้นที่ "มีอยู่" ในผลลัพธ์ (ชื่อ + ที่อยู่ + จังหวัด/อำเภอ/ตำบล)
+ * ─ ช่วยแยก "วัดพระแก้ว เชียงใหม่" วัดในเชียงใหม่ ออกจากวัดพระแก้วในอีกจังหวัด
+ */
+function candidateCoverage(query: string, c: PlaceCandidate): number {
+  const tokens = queryTokens(query);
+  if (!tokens.length) return 0;
+  const haystack = foldText(
+    [c.name, c.address, c.province, c.district, c.subdistrict]
+      .filter(Boolean)
+      .join(" ")
+  );
+  let hit = 0;
+  for (const t of tokens) if (haystack.includes(t)) hit++;
+  return hit / tokens.length;
+}
+
+/**
+ * เลือกผลที่ "ตรงกับที่ถาม" ที่สุด
+ * ─ ไม่ใช่แค่เอาผลแรก (Google เรียงลำดับตามความเกี่ยวข้องของมันเอง)
+ *
+ * export ไว้เพื่อให้เทสต์เขียนผลลัพธ์ปลอมมาเช็คได้ โดยไม่ต้องยิง Google จริง
+ */
+export function pickCoordCandidate(
+  candidates: PlaceCandidate[],
+  query: string
+): PlaceCandidate | null {
+  const withCoords = (candidates ?? []).filter(
+    (c) => c.latitude != null && c.longitude != null
+  );
+  if (!withCoords.length) return null;
+
+  const province = provinceInQuery(query);
+
+  let best: PlaceCandidate | null = null;
+  let bestCoverage = -1;
+  let bestNameMatch = -1;
+
+  for (const c of withCoords) {
+    const tokenCoverage = candidateCoverage(query, c);
+    // ตรงจังหวัดที่ถาม = หลักฐานแรงที่สุด (ชื่อเดียวกันมีได้หลายจังหวัด)
+    const coverage =
+      province && candidateInProvince(c, province) ? 1 : tokenCoverage;
+    const nameMatch = placeNameLooksRight(query, String(c.name ?? "")) ? 1 : 0;
+    // เรียง: หลักฐานเรื่องที่อยู่มากกว่า → ชื่อตรง → ผลแรก
+    const better =
+      coverage > bestCoverage ||
+      (coverage === bestCoverage && nameMatch > bestNameMatch);
+    if (better) {
+      best = c;
+      bestCoverage = coverage;
+      bestNameMatch = nameMatch;
+    }
+  }
+
+  if (!best) return null;
+  // ไม่มีอะไรตรงกับคำค้นเลย → ไม่ตอบพิกัดมั่ว (ดีกว่าพาไปผิดที่)
+  if (bestNameMatch === 0 && bestCoverage <= 0) return null;
+  return best;
+}
+
+router.post("/resolve-coords", async (req: Request, res: Response) => {
+  const body = req.body ?? {};
+  const url = String(body.url ?? "").trim();
+  const text = String(body.text ?? "").trim();
+
+  if (!url && !text) {
+    return res.status(400).json({
+      ok: false,
+      reason: "empty_input",
+      error: "ต้องระบุ url หรือชื่อสถานที่",
+    });
+  }
+
+  // 1) พิกัดที่อยู่ในตัวลิงก์เอง
+  const direct = parseMapsUrlCoords(url);
+  if (direct) {
+    return res.json({
+      ok: true,
+      lat: direct.lat,
+      lng: direct.lng,
+      label: direct.name ?? "",
+      source: "url",
+    });
+  }
+
+  // 2) ลิงก์สั้น → กางที่ฝั่งเซิร์ฟเวอร์
+  let name = mapsUrlPlaceName(url);
+  if (url && isShortMapsLink(url)) {
+    const expanded = await expandMapsUrl(url);
+    if (expanded) {
+      const parsed = parseMapsUrlCoords(expanded);
+      if (parsed) {
+        return res.json({
+          ok: true,
+          lat: parsed.lat,
+          lng: parsed.lng,
+          label: parsed.name ?? "",
+          source: "redirect",
+        });
+      }
+      name = mapsUrlPlaceName(expanded) ?? name;
+    }
+  }
+
+  // 3) ชื่อสถานที่ → Google Places
+  const query = (name ?? text).trim();
+  if (!query) {
+    return res.json({ ok: false, reason: "no_place_name" });
+  }
+  if (!isPlacesConfigured()) {
+    return res.status(503).json({
+      ok: false,
+      reason: "places_not_configured",
+      error: "Google Places ยังไม่ได้ตั้งค่า",
+    });
+  }
+
+  try {
+    let candidates = await searchPlaceCandidates(query);
+    // คำที่ผู้ใช้พิมพ์เอง → ถ้าไม่เจอ ลองเติม "ประเทศไทย" อีกครั้ง
+    // (ชื่อจากลิงก์ไม่ต้องเติม — ลิงก์นั้นระบุประเทศมาแล้ว)
+    if (!candidates.length && !name) {
+      candidates = await searchPlaceCandidates(`${query} ประเทศไทย`);
+    }
+
+    let picked = pickCoordCandidate(candidates, query);
+
+    // คำค้นมีชื่อจังหวัด แต่ผลที่ได้ไม่ได้อยู่ในจังหวัดนั้น (หรือไม่มีผลเลย)
+    // (ชื่อสถานที่ซ้ำกันข้ามจังหวัด — เช่น "วัดพระแก้ว") → ค้นใหม่แบบเจาะจงจังหวัด
+    const province = provinceInQuery(query);
+    if (province && (!picked || !candidateInProvince(picked, province))) {
+      const scoped = await searchPlaceCandidates(`${query} จังหวัด${province}`);
+      const scopedPick = pickCoordCandidate(scoped, query);
+      if (scopedPick && candidateInProvince(scopedPick, province)) {
+        picked = scopedPick;
+      }
+    }
+
+    if (picked && picked.latitude != null && picked.longitude != null) {
+      return res.json({
+        ok: true,
+        lat: picked.latitude,
+        lng: picked.longitude,
+        label: picked.name ?? query,
+        source: "places",
+      });
+    }
+  } catch (err: any) {
+    console.warn("[places] resolve-coords search failed:", err?.message);
+    return res.status(502).json({
+      ok: false,
+      reason: "search_failed",
+      error: err?.message ?? "ค้นหาสถานที่ไม่สำเร็จ",
+    });
+  }
+
+  return res.json({ ok: false, reason: "not_found" });
 });
 
 export default router;

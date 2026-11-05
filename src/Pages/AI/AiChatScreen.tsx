@@ -65,6 +65,7 @@ import MyVideoViewer from "../../components/MyVideoViewer";
 import TripDraftCard from "../../components/TripDraftCard";
 import TripPlanCard from "../../components/TripPlanCard";
 import { parseGoogleMapsUrl } from "../../services/savedPlacesService";
+import { resolvePlaceCoords } from "../../services/placesService";
 
 interface AiChatScreenProps {
   threadId: string;
@@ -758,7 +759,14 @@ export default function AiChatScreen({
     const gmapsMatch = body.match(/https?:\/\/(?:maps\.app\.goo\.gl\/[^\s]+|www\.google\.com\/maps[^\s]+)/i);
     if (gmapsMatch) {
       const url = gmapsMatch[0];
-      const parsed = parseGoogleMapsUrl(url);
+      let parsed = parseGoogleMapsUrl(url);
+      // ลิงก์สั้น/ลิงก์ที่มีแต่ชื่อ → แอปอ่าน redirect ไม่ได้ ให้ backend ช่วยหาพิกัด
+      if (!parsed.lat || !parsed.lng) {
+        const resolved = await resolvePlaceCoords({ url });
+        if (resolved) {
+          parsed = { ...parsed, lat: resolved.lat, lng: resolved.lng };
+        }
+      }
       if (parsed.lat && parsed.lng) {
         processedForAi = `${visibleContent + selectionNote}\n[ข้อมูลพิกัดจากลิงก์: ละติจูด ${parsed.lat.toFixed(4)}, ลองจิจูด ${parsed.lng.toFixed(4)}]`;
       } else {
