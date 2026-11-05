@@ -24,7 +24,10 @@
         "googleMaps": {
           "apiKey": ""
         }
-      }
+      },
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -41,6 +44,12 @@
       "expo-status-bar",
       "expo-maps",
       "@react-native-community/datetimepicker"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "1abeab96-a383-4c54-8dd7-d1230a3aca38"
+      }
+    },
+    "owner": "sineenath.r"
   }
 }
