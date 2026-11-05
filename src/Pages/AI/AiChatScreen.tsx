@@ -13,6 +13,8 @@ import {
   Alert,
   Image,
   Linking,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
@@ -245,6 +247,13 @@ export default function AiChatScreen({
   /** จำนวนข้อความล่าสุด + กันเลื่อนซ้ำในเฟรมเดียวกัน */
   const lastMessageCountRef = useRef(0);
   const scrollToEndRafRef = useRef<number | null>(null);
+  /**
+   * ผู้ใช้อยู่ใกล้ล่างสุดของแชทไหม
+   * → ใช้ตัดสินว่าจะเลื่อนลงล่างอัตโนมัติไหม (ถ้าผู้ใช้เลื่อนขึ้นไปอ่านข้อความเก่า ไม่ต้องดึงกลับ)
+   */
+  const nearBottomRef = useRef(true);
+  /** ผู้ใช้กำลังลากลิสต์อยู่ → ห้ามเลื่อนล่างเด็ดขาด */
+  const draggingRef = useRef(false);
 
   const thread = getThread(threadId);
 
@@ -254,18 +263,34 @@ export default function AiChatScreen({
    * เดิมเลื่อนทุกครั้งที่ขนาดเนื้อหาในลิสต์เปลี่ยน — ซึ่งเกิดทันทีที่แถวในการ์ด
    * ขยาย/หด เช่นตอนเลือกรถแล้วแถว "ชนิดน้ำมัน" โผล่ขึ้นมาใต้แถว "รถที่ใช้"
    * → เด้งไปมาจนทั้งแอปค้าง (กดอะไรก็ไม่ได้)
+   *
+   * เพิ่ม: เลื่อนแบบไม่มีแอนิเมชัน + เลื่อนเฉพาะตอนผู้ใช้อยู่ล่างสุดอยู่แล้ว
+   * → ถ้าลิสต์ขยับตอนที่นิ้วผู้ใช้ยังกดค้างอยู่ ทั้งแอปจะกดไม่ได้ (เคยเจอจริง)
    */
   const handleContentSizeChange = useCallback(() => {
     const count = thread?.messages.length ?? 0;
     const isNewMessage = count !== lastMessageCountRef.current;
     lastMessageCountRef.current = count;
     if (!isNewMessage) return; // แถวเดิมขยาย/หด → ไม่ต้องเลื่อน
+    if (draggingRef.current) return; // ผู้ใช้กำลังลากอยู่ → ไม่ดึงกลับ
+    if (!nearBottomRef.current) return; // ผู้ใช้เลื่อนขึ้นไปอ่านของเก่า → ไม่ดึงกลับ
     if (scrollToEndRafRef.current != null) return;
     scrollToEndRafRef.current = requestAnimationFrame(() => {
       scrollToEndRafRef.current = null;
       listRef.current?.scrollToEnd({ animated: false });
     });
   }, [thread?.messages.length]);
+
+  /** ผู้ใช้อยู่ห่างจากล่างสุดแค่ไหน → ใช้ตัดสินว่าจะเลื่อนอัตโนมัติไหม */
+  const handleScroll = useCallback(
+    (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+      const distanceFromBottom =
+        contentSize.height - (contentOffset.y + layoutMeasurement.height);
+      nearBottomRef.current = distanceFromBottom < 120;
+    },
+    []
+  );
 
   const threadFolder = thread?.folderId ? folders.find((f) => f.id === thread.folderId) : undefined;
   const attachedFolder = attachedFolderId ? folders.find((f) => f.id === attachedFolderId) : undefined;
@@ -847,7 +872,11 @@ export default function AiChatScreen({
     });
     setDraft("");
     setSending(true);
-    setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
+    // ผู้ใช้ส่งข้อความ → ต้องเห็นข้อความตัวเอง → เลื่อนลงล่าง
+    // แบบ "ไม่มีแอนิเมชัน" เพราะการเลื่อนแบบแอนิเมชันจะไปแย่งนิ้วผู้ใช้
+    // (เคยเจอจริง: ลิสต์ขยับตอนกดชิปในการ์ด → ทั้งแอปกดไม่ได้)
+    nearBottomRef.current = true;
+    setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 50);
 
     // If the user typed or pasted a Google Maps URL, pre-parse it so AI understands immediately
     let processedForAi = visibleContent + selectionNote;
@@ -944,7 +973,8 @@ export default function AiChatScreen({
       // Without this, any throw above wedged `sending` on forever and the
       // composer could never be used again without remounting the screen.
       setSending(false);
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
+      // ไม่เลื่อนที่นี่ — ตอนคำตอบของเอไaiมา ขนาดเนื้อหาในลิสต์เปลี่ยนเอง
+      // → handleContentSizeChange จะเลื่อนให้เอง (แบบไม่มีแอนิเมชัน)
     }
   };
 
@@ -1195,6 +1225,13 @@ export default function AiChatScreen({
           style={{ flex: 1 }}
           showsVerticalScrollIndicator={false}
           onContentSizeChange={handleContentSizeChange}
+          onScroll={handleScroll}
+          onScrollBeginDrag={() => {
+            draggingRef.current = true;
+          }}
+          onScrollEndDrag={() => {
+            draggingRef.current = false;
+          }}
           removeClippedSubviews={false}
           renderItem={({ item }) => {
             const mine = item.role === "user";
