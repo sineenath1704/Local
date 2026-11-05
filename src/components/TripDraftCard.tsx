@@ -51,6 +51,22 @@ const DEFAULT_FUEL_BY_VEHICLE: Record<string, string> = {
 /** รถที่ไม่ใช้น้ำมัน (ไฟฟ้า / ขนส่งสาธารณะ) → ไม่ต้องเลือกชนิดน้ำมัน */
 const NO_FUEL_VEHICLES = ["ev", "public"];
 
+/**
+ * จัดรูปแบบราคาให้ปลอดภัยเสมอ
+ * -------------------------------------------------------------
+ * ถ้าค่าที่ได้มาไม่ใช่ตัวเลข (เช่น backend ส่ง string มา หรือค่าหาย)
+ * ให้แสดง "—" แทนการเรียก `.toFixed()` แล้วพังทั้งแอป
+ * (ตอนนี้ backend ส่งตัวเลขมาปกติ — อันนี้เป็นกันพลาดเผื่ออนาคต)
+ */
+function formatPrice(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) return value.toFixed(2);
+  if (typeof value === "string" && value.trim() !== "") {
+    const n = Number(value);
+    if (Number.isFinite(n)) return n.toFixed(2);
+  }
+  return "—";
+}
+
 const START_TIMES = [
   "06:00", "07:00", "08:00", "09:00", "10:00", "11:00",
   "12:00", "13:00", "14:00", "16:00", "18:00",
@@ -181,7 +197,7 @@ interface TripDraftCardProps {
   onTapReport?: TapReport;
 }
 
-export default function TripDraftCard({
+function TripDraftCardInner({
   slots,
   onChange,
   onCreatePlan,
@@ -484,7 +500,7 @@ export default function TripDraftCard({
             badge={
               livePrice != null
                 ? {
-                    text: `${livePrice.toFixed(2)} ฿/ลิตร`,
+                    text: `${formatPrice(livePrice)} ฿/ลิตร`,
                     tone: fuelPrice?.isEstimate ? "amber" : "green",
                   }
                 : undefined
@@ -497,7 +513,7 @@ export default function TripDraftCard({
                   label={f.label}
                   sub={
                     fuelPrice?.prices?.[f.key] != null
-                      ? `${fuelPrice.prices[f.key].toFixed(2)} ฿`
+                      ? `${formatPrice(fuelPrice.prices[f.key])} ฿`
                       : undefined
                   }
                   active={fuelKey === f.key}
@@ -628,5 +644,51 @@ export default function TripDraftCard({
         ) : null}
       </View>
     </View>
+  );
+}
+
+/**
+ * ด่านกัน error ตอน render การ์ด
+ * ======================================================================
+ * ถ้ามีอะไรพังในตัวการ์ด (ค่าที่ไม่คาดคิดจาก backend ฯลฯ) ให้โชว์ข้อความแทน
+ * ที่จะทำให้ **ทั้งแอปหลุด** (JS error ที่ไม่มีใครจับ → iOS ปิดแอปทันที)
+ */
+class TripDraftCardBoundary extends React.Component<
+  { children: React.ReactNode },
+  { failed: boolean; message: string }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { failed: false, message: "" };
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return { failed: true, message: String(error?.message ?? error ?? "ไม่ทราบสาเหตุ") };
+  }
+
+  componentDidCatch(error: any) {
+    console.warn("[TripDraftCard] แสดงการ์ดไม่ได้:", error?.message ?? error);
+  }
+
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <View className="mt-2 self-stretch bg-red-50 border border-red-200 rounded-2xl px-3 py-2.5">
+        <Text className="text-red-800 text-[12.5px] font-bold">
+          การ์ดข้อมูลแสดงผิดพลาด (แอปไม่ได้หลุด)
+        </Text>
+        <Text className="text-red-700 text-[11.5px] mt-1 leading-4">
+          {this.state.message}
+        </Text>
+      </View>
+    );
+  }
+}
+
+export default function TripDraftCard(props: TripDraftCardProps) {
+  return (
+    <TripDraftCardBoundary>
+      <TripDraftCardInner {...props} />
+    </TripDraftCardBoundary>
   );
 }

@@ -1,4 +1,5 @@
 import React, { useRef, useState, useEffect, useCallback } from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   View,
   Text,
@@ -176,11 +177,48 @@ function slotsFromTripContext(raw: unknown): TripSlots {
  * อยู่ **นอก** FlatList และมี state ของตัวเอง → ไม่ทำให้ลิสต์แชท re-render
  * และยังรายงานผลได้แม้การ์ดในลิสต์จะตายไปแล้ว
  *
+ * ตัวเลขถูก "บันทึกไว้บนเครื่อง" ทุก ½ วินาที → ถ้าแอปตาย/ค้างจริง
+ * เปิดแอปใหม่จะเห็นตัวเลขของรอบที่แล้ว (เรนเดอร์กี่ครั้ง · กดอะไรเป็นอันสุดท้าย)
+ * → บอกได้ว่าเป็น "render loop" (ตัวเลขพุ่ง) หรือ "crash ฝั่ง native" (ตัวเลขนิ่ง)
+ *
  * วิธีอ่านผล:
  *   · ปุ่ม "ทดสอบ" ยังกดได้ แต่ชิปในการ์ดไม่ผ่าน → ตัวการ์ดถูกบัง/ถูกทิ้ง
  *   · ชิปได้ "แตะลง" แต่ไม่ได้ "กด"           → แตะถูกขโมยไปเป็นการเลื่อน
  *   · ชิปได้ "กด" แล้วแต่หน้าจอไม่เปลี่ยน    → ปัญหาอยู่ถัดจากการกด
  */
+
+/** คีย์เก็บตัวเลขวินิจฉัยของรอบก่อน (บนเครื่อง) */
+const DIAG_KEY = "ai-chat-diag-last";
+
+interface DiagSnapshot {
+  chat: number;
+  card: number;
+  down: number;
+  press: number;
+  last: string;
+  at: number;
+}
+
+async function loadDiagSnapshot(): Promise<DiagSnapshot | null> {
+  try {
+    const raw = await AsyncStorage.getItem(DIAG_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as DiagSnapshot;
+    if (!parsed || typeof parsed.at !== "number") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function saveDiagSnapshot(snap: DiagSnapshot): Promise<void> {
+  try {
+    await AsyncStorage.setItem(DIAG_KEY, JSON.stringify(snap));
+  } catch {
+    // บันทึกไม่สำเร็จก็ปล่อยไป — เป็นแค่ตัววินิจฉัย
+  }
+}
+
 function TapDiagStrip({
   register,
 }: {
@@ -190,6 +228,18 @@ function TapDiagStrip({
   /** จำนวนครั้งที่ render ต่อวินาที (0 = ไม่มี render loop) */
   const [rate, setRate] = useState({ chat: 0, card: 0 });
   const prevCountRef = useRef({ chat: 0, card: 0 });
+  /** ตัวเลขของ "รอบก่อน" (ถ้าแอปเพิ่งตายมา แอปใหม่จะเห็นตรงนี้) */
+  const [prevRun, setPrevRun] = useState<DiagSnapshot | null>(null);
+  /** เวลาที่หน้าจอนี้เปิด (ใช้แยกว่าตัวเลขที่อ่านมาเป็นของ "รอบก่อน" จริงไหม) */
+  const mountedAtRef = useRef<number | null>(null);
+  useEffect(() => {
+    mountedAtRef.current = Date.now();
+  }, []);
+  // เก็บค่าล่าสุดไว้ใน ref เพื่อไม่ต้องให้ interval ขึ้นใหม่ทุกครั้งที่แตะ
+  const diagRef = useRef(diag);
+  useEffect(() => {
+    diagRef.current = diag;
+  }, [diag]);
 
   useEffect(() => {
     register((label, phase) => {
@@ -201,6 +251,19 @@ function TapDiagStrip({
     });
   }, [register]);
 
+  // อ่านตัวเลขของรอบก่อน (ถ้ามี)
+  useEffect(() => {
+    let cancelled = false;
+    void loadDiagSnapshot().then((snap) => {
+      // เก่ากว่าเวลาที่หน้าจอนี้เปิด = เป็นของรอบก่อนจริง ๆ
+      const mountedAt = mountedAtRef.current ?? 0;
+      if (!cancelled && snap && snap.at < mountedAt) setPrevRun(snap);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     const t = setInterval(() => {
       const now = { chat: renderCounter.chat, card: renderCounter.card };
@@ -210,28 +273,44 @@ function TapDiagStrip({
         chat: Math.max(0, (now.chat - prev.chat) * 2),
         card: Math.max(0, (now.card - prev.card) * 2),
       });
+      // บันทึกไว้บนเครื่อง → ถ้าแอปตายจะได้ตัวเลขของรอบนั้นมาดู
+      void saveDiagSnapshot({
+        ...now,
+        down: diagRef.current.down,
+        press: diagRef.current.press,
+        last: diagRef.current.last,
+        at: Date.now(),
+      });
     }, 500);
     return () => clearInterval(t);
   }, []);
 
   return (
     <View
-      style={{ height: 30 }}
-      className="flex-row items-center bg-amber-50 border-b border-amber-200 px-3"
+      style={{ minHeight: 30 }}
+      className="bg-amber-50 border-b border-amber-200 px-3 py-1"
     >
-      <TouchableOpacity
-        onPressIn={() => setDiag((d) => ({ ...d, down: d.down + 1, last: "ปุ่มทดสอบ" }))}
-        onPress={() => setDiag((d) => ({ ...d, press: d.press + 1, last: "ปุ่มทดสอบ" }))}
-        activeOpacity={0.8}
-        className="bg-amber-500 px-2.5 py-1 rounded-full mr-2"
-      >
-        <Text className="text-white text-[11px] font-black">ทดสอบ</Text>
-      </TouchableOpacity>
-      <Text className="text-amber-900 text-[11px] font-bold flex-1" numberOfLines={1}>
-        แตะ {diag.down} · กด {diag.press}
-        {diag.last ? ` · "${diag.last}"` : ""}
-        {` · เรนเดอร์/วิ ${rate.chat}/${rate.card}`}
-      </Text>
+      <View className="flex-row items-center">
+        <TouchableOpacity
+          onPressIn={() => setDiag((d) => ({ ...d, down: d.down + 1, last: "ปุ่มทดสอบ" }))}
+          onPress={() => setDiag((d) => ({ ...d, press: d.press + 1, last: "ปุ่มทดสอบ" }))}
+          activeOpacity={0.8}
+          className="bg-amber-500 px-2.5 py-1 rounded-full mr-2"
+        >
+          <Text className="text-white text-[11px] font-black">ทดสอบ</Text>
+        </TouchableOpacity>
+        <Text className="text-amber-900 text-[11px] font-bold flex-1" numberOfLines={1}>
+          {/* เรนเดอร์/วิ ขึ้นก่อน — เพราะเป็นตัวเลขที่สำคัญที่สุด (ถ้าไม่พุ่ง = ไม่ใช่ render loop) */}
+          เรนเดอร์/วิ {rate.chat}/{rate.card} · แตะ {diag.down} · กด {diag.press}
+          {diag.last ? ` · "${diag.last}"` : ""}
+        </Text>
+      </View>
+      {prevRun ? (
+        <Text className="text-amber-800 text-[10.5px] font-bold" numberOfLines={1}>
+          รอบก่อน: เรนเดอร์ {prevRun.chat}/{prevRun.card} · กด {prevRun.press}
+          {prevRun.last ? ` · "${prevRun.last}"` : ""}
+        </Text>
+      ) : null}
     </View>
   );
 }
@@ -289,6 +368,21 @@ export default function AiChatScreen({
     const last = [...(t?.messages ?? [])].reverse().find((m) => m.tripDraft);
     return last?.tripDraft?.slots ?? {};
   });
+  /**
+   * ค่าช่องข้อมูล "ล่าสุด" เก็บไว้ใน ref (ไม่ใช่แค่ค่าใน state)
+   * -------------------------------------------------------------
+   * เอไaiตอบช้า 10–30 วินาที → ระหว่างรอ ผู้ใช้กดเลือกช่องในการ์ดไปได้หลายครั้ง
+   * ถ้าเอไaiตอบมาแล้วเอา "ค่าตอนส่ง" มารวมทับ → ค่าที่ผู้ใช้เพิ่งแตะหายไป
+   * (เคยเจอจริง: กดแพลนไม่ได้ เพราะพิกัด/วันที่ที่กรอกไว้ถูกย้อนกลับ)
+   *
+   * ref นี้เก็บ "ค่าที่เพิ่งอัปเดต" เสมอ → ตอนเอไaiตอบมา รวมเข้ากับค่าล่าสุด
+   */
+  const draftSlotsRef = useRef<TripSlots>(draftSlots);
+  /** อัปเดตช่องข้อมูล + เก็บไว้ใน ref ให้ตรงกันเสมอ */
+  const applyDraftSlots = useCallback((next: TripSlots) => {
+    draftSlotsRef.current = next;
+    setDraftSlots(next);
+  }, []);
   /** ข้อความที่กำลังแก้แผนอยู่ (กด "แก้ไขกับเอไai" → แผนใหม่จะกลับไปอัปเดตข้อความเดิม) */
   const [editingPlanMessageId, setEditingPlanMessageId] = useState<string | null>(null);
   /**
@@ -413,14 +507,14 @@ export default function AiChatScreen({
     // จุดเริ่มต้นที่ผู้ใช้เลือก = ช่องข้อมูลจุดเริ่มต้นของแผนทริป (ไม่ต้องพิมพ์ซ้ำ)
     const coords = origin.coords ?? null;
     const nextSlots: TripSlots = {
-      ...draftSlots,
+      ...draftSlotsRef.current,
       startPoint: {
         label: origin.label,
         address: origin.address || null,
         coords,
       },
     };
-    setDraftSlots(nextSlots);
+    applyDraftSlots(nextSlots);
     const msg = `🚗 จุดเริ่มต้นเดินทางของฉัน: ${origin.label} (${origin.address})${origin.url ? `\nลิงก์: ${origin.url}` : ""}`;
     // ส่ง "ช่องข้อมูลที่เพิ่งได้" ไปด้วย — ถ้าใช้ค่าเดิมใน state จะเป็นข้อมูลเก่า
     // (ปิด state ไว้ก่อนหน้านี้) → เซิร์ฟเวอร์ไม่ได้พิกัดที่ผู้ใช้เพิ่งเลือก
@@ -445,15 +539,18 @@ export default function AiChatScreen({
       address: origin.address || null,
       coords: origin.coords ?? null,
     };
-    setDraftSlots((prev) => {
-      if (target === "start") return { ...prev, startPoint: point };
-      if (target === "end") {
-        return { ...prev, endPoint: point, returnMode: "custom" };
-      }
-      const list = [...(prev.dayEndPoints ?? [])];
-      list[target.day] = point;
-      return { ...prev, dayEndPoints: list };
-    });
+    const prev = draftSlotsRef.current;
+    if (target === "start") {
+      applyDraftSlots({ ...prev, startPoint: point });
+      return;
+    }
+    if (target === "end") {
+      applyDraftSlots({ ...prev, endPoint: point, returnMode: "custom" });
+      return;
+    }
+    const list = [...(prev.dayEndPoints ?? [])];
+    list[target.day] = point;
+    applyDraftSlots({ ...prev, dayEndPoints: list });
   };
 
   // ── ระบบวางแผนทริป ────────────────────────────────────────────────
@@ -482,27 +579,63 @@ export default function AiChatScreen({
   };
 
   /**
+   * เทียบค่าสองช่องข้อมูลว่า "เหมือนกันไหม" (ใช้บอกว่าผู้ใช้แก้ไปหรือยัง)
+   */
+  const sameSlotValue = (a: unknown, b: unknown): boolean => {
+    if (a === b) return true;
+    if (a == null || b == null) return false;
+    if (typeof a !== "object" || typeof b !== "object") return false;
+    const pa = a as Record<string, any>;
+    const pb = b as Record<string, any>;
+    if ((pa.label ?? null) !== (pb.label ?? null)) return false;
+    if ((pa.address ?? null) !== (pb.address ?? null)) return false;
+    const ca = pa.coords;
+    const cb = pb.coords;
+    if (!ca || !cb) return !ca && !cb;
+    return ca.lat === cb.lat && ca.lng === cb.lng;
+  };
+
+  /**
    * รวมช่องข้อมูลที่เอไaiสกัดได้ กับช่องที่ผู้ใช้เคยกรอกไว้
    * · ค่าที่โมเดลไม่รู้ (null) จะไม่ทับค่าเดิม
    * · จุดที่มีพิกัดอยู่แล้ว จะไม่ถูกจุดที่ไม่มีพิกัดทับ (ดู `mergePoint`)
    * · `dayEndPoints` เก็บฝั่งแอปเท่านั้น (backend ไม่รู้จัก) → ต้องคงเดิม
    * · ถ้ากลับไป "กลับจุดเดิม" → ล้างจุดสิ้นสุดที่เคยเลือกทิ้ง
+   *
+   * `base` = ค่าที่ส่งไปรอบนี้ → ใช้บอกว่าผู้ใช้เพิ่งแก้ช่องไหนไปหลังส่ง
+   *   ถ้าผู้ใช้แก้แล้ว → **ค่าของผู้ใช้ชนะ** (เอไaiไม่รู้ค่าที่เพิ่งแตะ)
    */
-  const mergeSlots = (current: TripSlots, incoming: TripSlots): TripSlots => {
+  const mergeSlots = (
+    current: TripSlots,
+    incoming: TripSlots,
+    base?: TripSlots
+  ): TripSlots => {
     const next: TripSlots = { ...current };
+    /** ผู้ใช้แก้ช่องนี้ไปหรือยัง (หลังส่งข้อความไปรอบนี้) */
+    const userChanged = (key: keyof TripSlots) =>
+      !!base && !sameSlotValue(current[key], base[key]);
+
     const start = mergePoint(current.startPoint, incoming.startPoint);
-    if (start) next.startPoint = start;
-    if (incoming.returnMode) next.returnMode = incoming.returnMode;
+    if (start && !userChanged("startPoint")) next.startPoint = start;
+    if (incoming.returnMode && !userChanged("returnMode")) {
+      next.returnMode = incoming.returnMode;
+    }
     const end = mergePoint(current.endPoint, incoming.endPoint);
-    if (end) next.endPoint = end;
-    if (incoming.date) next.date = incoming.date;
-    if (incoming.startTime) next.startTime = incoming.startTime;
-    if (incoming.days) next.days = incoming.days;
-    if (incoming.vehicle) next.vehicle = incoming.vehicle;
-    if (incoming.fuelType) next.fuelType = incoming.fuelType;
-    if (incoming.travelers) next.travelers = incoming.travelers;
-    if (incoming.budgetPerPerson) next.budgetPerPerson = incoming.budgetPerPerson;
-    if (incoming.style) next.style = incoming.style;
+    if (end && !userChanged("endPoint")) next.endPoint = end;
+    if (incoming.date && !userChanged("date")) next.date = incoming.date;
+    if (incoming.startTime && !userChanged("startTime")) {
+      next.startTime = incoming.startTime;
+    }
+    if (incoming.days && !userChanged("days")) next.days = incoming.days;
+    if (incoming.vehicle && !userChanged("vehicle")) next.vehicle = incoming.vehicle;
+    if (incoming.fuelType && !userChanged("fuelType")) next.fuelType = incoming.fuelType;
+    if (incoming.travelers && !userChanged("travelers")) {
+      next.travelers = incoming.travelers;
+    }
+    if (incoming.budgetPerPerson && !userChanged("budgetPerPerson")) {
+      next.budgetPerPerson = incoming.budgetPerPerson;
+    }
+    if (incoming.style && !userChanged("style")) next.style = incoming.style;
     if (current.dayEndPoints) next.dayEndPoints = current.dayEndPoints;
     if (next.returnMode === "same_as_start") next.endPoint = null;
     return next;
@@ -1021,10 +1154,14 @@ export default function AiChatScreen({
       });
       // เอไaiสกัดช่องข้อมูลได้ → รวมกับที่ผู้ใช้เคยกรอก (ค่าที่โมเดลไม่รู้จะไม่ทับของเดิม
       // และพิกัดที่ผู้ใช้เลือกเองจะไม่หาย)
+      // ── สำคัญ: รวมกับ "ค่าล่าสุด" ไม่ใช่ค่าตอนส่งข้อความ ──
+      //   ระหว่างที่รอเอไaiตอบ (10–30 วิ) ผู้ใช้กดแก้การ์ดไปได้หลายครั้ง
+      //   ถ้าเอา "ค่าตอนส่ง" มารวมทับ → ค่าที่ผู้ใช้เพิ่งแก้หายไป
+      //   (base = ค่าตอนส่ง → เทียบว่าผู้ใช้แก้ช่องไหนหลังส่ง → ช่องนั้นผู้ใช้ชนะ)
       const mergedSlots = result.tripDraft
-        ? mergeSlots(slotsForRequest, result.tripDraft.slots)
+        ? mergeSlots(draftSlotsRef.current, result.tripDraft.slots, slotsForRequest)
         : null;
-      if (mergedSlots) setDraftSlots(mergedSlots);
+      if (mergedSlots) applyDraftSlots(mergedSlots);
       // ผู้ใช้ส่งแผนเดิมกลับมาให้เอไaiแก้ (จากหน้าแผนทริป) → ผูกการ์ดใหม่นี้เข้ากับแถวเดิม
       // → กดยืนยันแล้วจะอัปเดตทับแถวเดิม ไม่สร้างแผนซ้ำ
       const linkedPlanId =
@@ -1154,6 +1291,14 @@ export default function AiChatScreen({
     return null;
   })();
 
+  /**
+   * การ์ดช่องข้อมูลต้องโผล่ต่อเมื่อ "ยังไม่ได้สร้างแพลน" ของข้อความ draft ล่าสุด
+   * (ถ้าสร้างแพลนแล้ว → ให้การ์ดแผนในเซลล์ข้อความแทน)
+   */
+  const showDraftCard =
+    !!lastDraftMessageId &&
+    !thread?.messages.find((m) => m.id === lastDraftMessageId)?.plan;
+
   /** การ์ดแผนที่คำนวณเสร็จแล้ว (ผูกกับข้อความที่สร้างมัน) */
   const renderPlanCard = (messageId: string, plan: TripPlan) => (
     <TripPlanCard
@@ -1180,7 +1325,7 @@ export default function AiChatScreen({
   const renderDraftCard = () => (
     <TripDraftCard
       slots={draftSlots}
-      onChange={(next) => setDraftSlots(next)}
+      onChange={applyDraftSlots}
       onCreatePlan={() => void handleCreatePlan(lastDraftMessageId ?? "")}
       creating={planning}
       onRequestOrigin={setCardOriginTarget}
@@ -1457,15 +1602,10 @@ export default function AiChatScreen({
                   {/* แผนที่คำนวณเสร็จแล้ว → การ์ดแผน (แผนที่จริง · เวลา · ต้นทุน · เพิ่ม/ลบจุด) */}
                   {!mine && !failed && item.plan ? renderPlanCard(item.id, item.plan) : null}
 
-                  {/* ยังไม่ได้สร้างแพลน → การ์ดช่องข้อมูล (โผล่ที่ข้อความล่าสุดที่มี draft เท่านั้น
-                      เพื่อไม่ให้การ์ดซ้ำทุกข้อความ — เดิมปุ่ม "เลือกแพลนทริปนี้" ขึ้นทุกครั้งที่เอไaiตอบ) */}
-                  {!mine &&
-                  !failed &&
-                  !item.plan &&
-                  item.tripDraft &&
-                  item.id === lastDraftMessageId
-                    ? renderDraftCard()
-                    : null}
+                  {/* การ์ดช่องข้อมูลย้ายไปอยู่ใน ListFooterComponent แล้ว
+                      (เพราะถ้าอยู่ในเซลล์ของ FlatList → เซลล์ถูก recycle → การ์ดถูกถอด/เข้าใหม่
+                       → สถานะ "กำลังแก้" หาย และที่กดอยู่ถูกลบ → แอปค้าง/แอปหลุด)
+                      แผนที่คำนวณเสร็จแล้ว → การ์ดแผนยังอยู่ในเซลล์เหมือนเดิม */}
 
                   {/* ชื่อสถานที่ซ้ำหลายแห่ง → ให้ผู้ใช้เลือกแห่งที่ถูก
                       (แตะ = ถามคำเดิมซ้ำพร้อม placeId → ได้คำตอบใหม่ต่อท้าย) */}
@@ -1559,12 +1699,18 @@ export default function AiChatScreen({
             );
           }}
           ListFooterComponent={
-            sending ? (
-              <View className="flex-row items-center ml-9 mb-3">
-                <ActivityIndicator size="small" color="#7C3AED" />
-                <Text className="text-gray-400 text-[12px] ml-2">กำลังคิด...</Text>
-              </View>
-            ) : null
+            <>
+              {sending ? (
+                <View className="flex-row items-center ml-9 mb-3">
+                  <ActivityIndicator size="small" color="#7C3AED" />
+                  <Text className="text-gray-400 text-[12px] ml-2">กำลังคิด...</Text>
+                </View>
+              ) : null}
+              {/* การ์ดช่องข้อมูลอยู่ที่ footer ของ FlatList
+                  → footer ไม่ถูก recycle (RN ดันเข้า cells หลังข้อมูลที่แสดง)
+                  → การ์ดไม่ถูกถอด/เข้าใหม่ตอนเอไaiตอบ → ไม่ค้าง ไม่หลุดแอป */}
+              {showDraftCard ? <View className="ml-9 mr-1">{renderDraftCard()}</View> : null}
+            </>
           }
         />
       )}
