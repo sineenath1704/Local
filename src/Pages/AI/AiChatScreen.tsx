@@ -55,6 +55,7 @@ import {
   TripPlan,
   TripPlanLodging,
   TripPlanMeta,
+  TripPlanPoint,
   TripSlots,
   computeTripMissing,
   isTripPlanReady,
@@ -62,7 +63,7 @@ import {
 import type { VideoPost } from "../../data/homeFeedData";
 import OriginSelectorModal from "../../components/OriginSelectorModal";
 import MyVideoViewer from "../../components/MyVideoViewer";
-import TripDraftCard from "../../components/TripDraftCard";
+import TripDraftCard, { TripOriginTarget } from "../../components/TripDraftCard";
 import TripPlanCard from "../../components/TripPlanCard";
 import { parseGoogleMapsUrl } from "../../services/savedPlacesService";
 import { resolvePlaceCoords } from "../../services/placesService";
@@ -218,6 +219,13 @@ export default function AiChatScreen({
   });
   /** ข้อความที่กำลังแก้แผนอยู่ (กด "แก้ไขกับเอไai" → แผนใหม่จะกลับไปอัปเดตข้อความเดิม) */
   const [editingPlanMessageId, setEditingPlanMessageId] = useState<string | null>(null);
+  /**
+   * ตัวเลือกจุดของการ์ดช่องข้อมูล — เปิดที่ระดับหน้าจอ ไม่ใช่ในแถวของลิสต์
+   * (Modal ของ native ที่อยู่ในแถวที่ลิสต์ recycle ทิ้งได้ → กลืนการแตะทั้งหน้าจอ)
+   */
+  const [cardOriginTarget, setCardOriginTarget] = useState<TripOriginTarget | null>(
+    null
+  );
   /** กำลังคำนวณแผนใหม่ (ลบ/สลับลำดับ/เปลี่ยนราคาน้ำมัน) — key = id ข้อความ */
   const [replanning, setReplanning] = useState<string | null>(null);
   /** ราคาน้ำมันที่ผู้ใช้ระบุเอง — key = id ข้อความ */
@@ -293,30 +301,89 @@ export default function AiChatScreen({
     setCurrentOrigin(origin);
     // จุดเริ่มต้นที่ผู้ใช้เลือก = ช่องข้อมูลจุดเริ่มต้นของแผนทริป (ไม่ต้องพิมพ์ซ้ำ)
     const coords = origin.coords ?? null;
-    setDraftSlots((prev) => ({
-      ...prev,
+    const nextSlots: TripSlots = {
+      ...draftSlots,
       startPoint: {
         label: origin.label,
         address: origin.address || null,
         coords,
       },
-    }));
+    };
+    setDraftSlots(nextSlots);
     const msg = `🚗 จุดเริ่มต้นเดินทางของฉัน: ${origin.label} (${origin.address})${origin.url ? `\nลิงก์: ${origin.url}` : ""}`;
-    void send(msg);
+    // ส่ง "ช่องข้อมูลที่เพิ่งได้" ไปด้วย — ถ้าใช้ค่าเดิมใน state จะเป็นข้อมูลเก่า
+    // (ปิด state ไว้ก่อนหน้านี้) → เซิร์ฟเวอร์ไม่ได้พิกัดที่ผู้ใช้เพิ่งเลือก
+    void send(msg, { tripDraftOverride: nextSlots });
+  };
+
+  /**
+   * ผู้ใช้เลือกจุดจากตัวเลือกจุดของการ์ด
+   * (จุดเริ่มต้น · จุดสิ้นสุดตอนกลับ · จุดจบของแต่ละวัน)
+   */
+  const handleCardOriginSelected = (origin: {
+    label: string;
+    address: string;
+    url?: string;
+    coords?: { lat: number; lng: number };
+  }) => {
+    const target = cardOriginTarget;
+    setCardOriginTarget(null);
+    if (!target) return;
+    const point: TripPlanPoint = {
+      label: origin.label,
+      address: origin.address || null,
+      coords: origin.coords ?? null,
+    };
+    setDraftSlots((prev) => {
+      if (target === "start") return { ...prev, startPoint: point };
+      if (target === "end") {
+        return { ...prev, endPoint: point, returnMode: "custom" };
+      }
+      const list = [...(prev.dayEndPoints ?? [])];
+      list[target.day] = point;
+      return { ...prev, dayEndPoints: list };
+    });
   };
 
   // ── ระบบวางแผนทริป ────────────────────────────────────────────────
   /**
+   * รวมจุด (จุดเริ่มต้น / จุดสิ้นสุด) โดยไม่ให้พิกัดที่ผู้ใช้เลือกเองหาย
+   * -------------------------------------------------------------
+   * โมเดล/เซิร์ฟเวอร์ **หาพิกัดเองไม่ได้** → จุดที่กลับมามักมีแต่ชื่อ (`coords: null`)
+   * ถ้าเอาค่านั้นทับของเดิมทิ้ง พิกัดที่ผู้ใช้เลือกเองจะหาย
+   *   แล้วการ์ดจะขึ้นว่า "ยังขาด: พิกัดจุดเริ่มต้น" ทั้งที่ผู้ใช้เลือกไปแล้ว
+   *   (เคยเจอจริง: กด "สร้างแผนทริป" ไม่ได้ ทั้งที่กรอกครบแล้ว)
+   *
+   * กฎ: **จุดที่มีพิกัดอยู่แล้ว = ผู้ใช้เลือกเอง = ข้อมูลที่ถูกที่สุด → ชนะเสมอ**
+   */
+  const mergePoint = (
+    current?: TripPlanPoint | null,
+    incoming?: TripPlanPoint | null
+  ): TripPlanPoint | null | undefined => {
+    if (!incoming) return current ?? undefined;
+    if (!current) return incoming;
+    if (current.coords) return current;
+    return {
+      label: incoming.label || current.label,
+      address: incoming.address ?? current.address ?? null,
+      coords: incoming.coords ?? current.coords ?? null,
+    };
+  };
+
+  /**
    * รวมช่องข้อมูลที่เอไaiสกัดได้ กับช่องที่ผู้ใช้เคยกรอกไว้
    * · ค่าที่โมเดลไม่รู้ (null) จะไม่ทับค่าเดิม
+   * · จุดที่มีพิกัดอยู่แล้ว จะไม่ถูกจุดที่ไม่มีพิกัดทับ (ดู `mergePoint`)
    * · `dayEndPoints` เก็บฝั่งแอปเท่านั้น (backend ไม่รู้จัก) → ต้องคงเดิม
    * · ถ้ากลับไป "กลับจุดเดิม" → ล้างจุดสิ้นสุดที่เคยเลือกทิ้ง
    */
   const mergeSlots = (current: TripSlots, incoming: TripSlots): TripSlots => {
     const next: TripSlots = { ...current };
-    if (incoming.startPoint) next.startPoint = incoming.startPoint;
+    const start = mergePoint(current.startPoint, incoming.startPoint);
+    if (start) next.startPoint = start;
     if (incoming.returnMode) next.returnMode = incoming.returnMode;
-    if (incoming.endPoint) next.endPoint = incoming.endPoint;
+    const end = mergePoint(current.endPoint, incoming.endPoint);
+    if (end) next.endPoint = end;
     if (incoming.date) next.date = incoming.date;
     if (incoming.startTime) next.startTime = incoming.startTime;
     if (incoming.days) next.days = incoming.days;
@@ -756,10 +823,15 @@ export default function AiChatScreen({
       useClipPlace?: boolean;
       /** แผนที่กำลังแก้อยู่ → ส่งไปให้เอไaiรู้บริบท (กด "แก้ไขกับเอไai") */
       planContext?: unknown;
+      /** ช่องข้อมูลแผนทริปที่จะส่งไปเป็นรอบนี้ (สำหรับกรณีที่เพิ่งได้ค่าใหม่ แต่ state ยังไม่ทันอัปเดต) */
+      tripDraftOverride?: TripSlots;
     }
   ) => {
     const body = text.trim();
     if (!body || !thread || sending) return;
+
+    // ช่องข้อมูลแผนทริปที่จะส่งไปรอบนี้ (ค่าที่เพิ่งได้ใหม่ ถ้ามี → ใช้ค่านั้น)
+    const slotsForRequest = opts?.tripDraftOverride ?? draftSlots;
 
     // If a folder is attached, make it visible in the transcript too.
     const visibleContent = attachedFolder
@@ -828,13 +900,14 @@ export default function AiChatScreen({
         // บริบทคลิป → backend แทรกใน system prompt ให้โมเดลยึดข้อมูลคลิปเป็นหลัก
         clipContext,
         // ช่องข้อมูลแผนทริปที่สะสมไว้ → backend merge กับที่โมเดลสกัดใหม่
-        tripDraft: Object.keys(draftSlots).length > 0 ? draftSlots : null,
+        tripDraft: Object.keys(slotsForRequest).length > 0 ? slotsForRequest : null,
         // แผนที่กำลังแก้ → backend แทรกลง system prompt ให้เอไaiอ้างอิงได้
         planContext: opts?.planContext ?? null,
       });
-      // เอไaiสกัดช่องข้อมูลได้ → รวมกับที่ผู้ใช้เคยกรอก (ค่าที่โมเดลไม่รู้จะไม่ทับของเดิม)
+      // เอไaiสกัดช่องข้อมูลได้ → รวมกับที่ผู้ใช้เคยกรอก (ค่าที่โมเดลไม่รู้จะไม่ทับของเดิม
+      // และพิกัดที่ผู้ใช้เลือกเองจะไม่หาย)
       const mergedSlots = result.tripDraft
-        ? mergeSlots(draftSlots, result.tripDraft.slots)
+        ? mergeSlots(slotsForRequest, result.tripDraft.slots)
         : null;
       if (mergedSlots) setDraftSlots(mergedSlots);
       // ผู้ใช้ส่งแผนเดิมกลับมาให้เอไaiแก้ (จากหน้าแผนทริป) → ผูกการ์ดใหม่นี้เข้ากับแถวเดิม
@@ -994,6 +1067,7 @@ export default function AiChatScreen({
       onChange={(next) => setDraftSlots(next)}
       onCreatePlan={() => void handleCreatePlan(lastDraftMessageId ?? "")}
       creating={planning}
+      onRequestOrigin={setCardOriginTarget}
     />
   );
 
@@ -1118,6 +1192,7 @@ export default function AiChatScreen({
           data={thread!.messages}
           keyExtractor={(m) => m.id}
           contentContainerStyle={{ paddingVertical: 14, paddingHorizontal: 14 }}
+          style={{ flex: 1 }}
           showsVerticalScrollIndicator={false}
           onContentSizeChange={handleContentSizeChange}
           removeClippedSubviews={false}
@@ -1652,6 +1727,13 @@ export default function AiChatScreen({
         visible={originModalOpen}
         onClose={() => setOriginModalOpen(false)}
         onSelectOrigin={handleSelectOrigin}
+      />
+
+      {/* ตัวเลือกจุดของการ์ดช่องข้อมูล — อยู่ที่ระดับหน้าจอ (นอกลิสต์) เพื่อไม่ให้ค้างกลืนการแตะ */}
+      <OriginSelectorModal
+        visible={cardOriginTarget !== null}
+        onClose={() => setCardOriginTarget(null)}
+        onSelectOrigin={handleCardOriginSelected}
       />
     </View>
   );

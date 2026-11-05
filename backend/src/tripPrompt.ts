@@ -830,10 +830,35 @@ export function normalizeTripSlots(raw: unknown): TripSlots {
 }
 
 /**
+ * รวมจุด (จุดเริ่มต้น / จุดสิ้นสุด) โดยไม่ให้พิกัดที่ผู้ใช้เลือกเองหาย
+ * -------------------------------------------------------------
+ * โมเดล **หาพิกัดเองไม่ได้** (สเปก TRIP_DRAFT บังคับให้เขียน `coords: null`)
+ * → ถ้าเอาจุดจากโมเดลทับค่าที่ผู้ใช้เลือกไว้ พิกัดจะหายทันที
+ *   แล้วการ์ดจะขึ้นว่า "ยังขาด: พิกัดจุดเริ่มต้น" ทั้งที่ผู้ใช้เลือกไปแล้ว
+ *   (เคยเจอจริง: กดสร้างแพลนไม่ได้ ทั้งที่กรอกครบแล้ว)
+ *
+ * กฎ: **จุดที่มีพิกัดอยู่แล้ว = ผู้ใช้เลือกเอง = ข้อมูลที่ถูกที่สุด → ชนะเสมอ**
+ */
+function mergeTripPoint(
+  current?: TripPlanPoint | null,
+  incoming?: TripPlanPoint | null
+): TripPlanPoint | null {
+  if (!incoming) return current ?? null;
+  if (!current) return incoming;
+  if (current.coords) return current;
+  return {
+    label: incoming.label || current.label,
+    address: incoming.address ?? current.address ?? null,
+    coords: incoming.coords ?? current.coords ?? null,
+  };
+}
+
+/**
  * รวมค่าที่โมเดลเพิ่งสกัดได้ กับค่าที่สะสมมาจากรอบก่อน ๆ
  * -------------------------------------------------------------
  * `null` = "ไม่รู้" → **ไม่ทับ** ค่าเดิม (โมเดลไม่ได้ยืนยัน = ไม่ได้แปลว่าผู้ใช้แก้)
  * ยกเว้น `returnMode` = "same_as_start" → ล้างจุดสิ้นสุดทิ้ง เพราะกลับจุดเดิม = ไม่มีจุดสิ้นสุดแยก
+ * และจุดที่มีพิกัดอยู่แล้ว → โมเดลทับไม่ได้ (ดู `mergeTripPoint`)
  */
 export function mergeTripSlots(
   base?: TripSlots | null,
@@ -845,6 +870,14 @@ export function mergeTripSlots(
   for (const key of TRIP_DRAFT_SLOT_KEYS) {
     const value = (incoming as Record<string, unknown>)[key];
     if (value === undefined || value === null) continue;
+    if (key === "startPoint" || key === "endPoint") {
+      const merged = mergeTripPoint(
+        out[key] ?? null,
+        value as TripPlanPoint
+      );
+      if (merged) out[key] = merged;
+      continue;
+    }
     (out as Record<string, unknown>)[key] = value;
   }
 

@@ -14,14 +14,12 @@ import {
 } from "react-native-heroicons/outline";
 import {
   TripSlots,
-  TripPlanPoint,
   VEHICLE_OPTIONS,
   FUEL_TYPE_OPTIONS,
   computeTripMissing,
 } from "../data/tripsData";
 import { fetchFuelPrices, FuelPriceSnapshot } from "../services/tripService";
 import EditableValueRow from "./EditableValueRow";
-import OriginSelectorModal from "./OriginSelectorModal";
 
 /**
  * การ์ด "ข้อมูลแผนทริป" ในแชท
@@ -142,6 +140,9 @@ function Chip({
   );
 }
 
+/** เป้าหมายของตัวเลือกจุด — จุดเริ่มต้น / จุดสิ้นสุดตอนกลับ / จุดจบของแต่ละวัน */
+export type TripOriginTarget = "start" | "end" | { day: number };
+
 interface TripDraftCardProps {
   slots: TripSlots;
   /** ผู้ใช้แก้ช่องในการ์ด → ส่งค่าใหม่กลับไปเก็บสะสม */
@@ -150,6 +151,14 @@ interface TripDraftCardProps {
   onCreatePlan: () => void;
   /** กำลังเรียก backend อยู่ */
   creating?: boolean;
+  /**
+   * ขอเปิดตัวเลือกจุด
+   * -------------------------------------------------------------
+   * ตัวเลือกจุด (Modal ของ native) ต้องอยู่ **นอก** ลิสต์ ไม่ใช่ในแถวที่ลิสต์
+   * เอาไว้ recycle เพราะ modal ที่ค้างอยู่ในแถวจะกลืนการแตะทั้งหน้าจอ
+   * (เคยเจอจริง: กดอะไรก็ไม่ได้ หน้าจะเหมือนค้าง)
+   */
+  onRequestOrigin?: (target: TripOriginTarget) => void;
 }
 
 export default function TripDraftCard({
@@ -157,11 +166,9 @@ export default function TripDraftCard({
   onChange,
   onCreatePlan,
   creating,
+  onRequestOrigin,
 }: TripDraftCardProps) {
   const [editing, setEditing] = useState<string | null>(null);
-  const [originTarget, setOriginTarget] = useState<
-    "start" | "end" | { day: number } | null
-  >(null);
   const [fuelPrice, setFuelPrice] = useState<FuelPriceSnapshot | null>(null);
   // เริ่มที่ true เพราะกำลังดึงราคาทันทีที่เปิดการ์ด (ไม่ต้อง setState ซ้ำใน effect)
   const [fuelLoading, setFuelLoading] = useState(true);
@@ -189,29 +196,6 @@ export default function TripDraftCard({
   }, []);
 
   const patch = (next: Partial<TripSlots>) => onChange({ ...slots, ...next });
-
-  const selectOrigin = (origin: {
-    label: string;
-    address: string;
-    url?: string;
-    coords?: { lat: number; lng: number };
-  }) => {
-    const point: TripPlanPoint = {
-      label: origin.label,
-      address: origin.address || null,
-      coords: origin.coords ?? null,
-    };
-    if (originTarget === "start") {
-      patch({ startPoint: point });
-    } else if (originTarget === "end") {
-      patch({ endPoint: point, returnMode: "custom" });
-    } else if (originTarget && typeof originTarget === "object") {
-      const list = [...(slots.dayEndPoints ?? [])];
-      list[originTarget.day] = point;
-      patch({ dayEndPoints: list });
-    }
-    setOriginTarget(null);
-  };
 
   const days7 = upcomingDays(14);
   const fuelKey = slots.fuelType ?? (vehKey ? DEFAULT_FUEL_BY_VEHICLE[vehKey] : null);
@@ -249,7 +233,7 @@ export default function TripDraftCard({
           }
         >
           <TouchableOpacity
-            onPress={() => setOriginTarget("start")}
+            onPress={() => onRequestOrigin?.("start")}
             activeOpacity={0.8}
             className="flex-row items-center bg-violet-50 border border-violet-200 rounded-xl px-3 py-2.5"
           >
@@ -297,7 +281,7 @@ export default function TripDraftCard({
           </View>
           {returnMode === "custom" ? (
             <TouchableOpacity
-              onPress={() => setOriginTarget("end")}
+              onPress={() => onRequestOrigin?.("end")}
               activeOpacity={0.8}
               className="flex-row items-center bg-violet-50 border border-violet-200 rounded-xl px-3 py-2.5"
             >
@@ -332,7 +316,7 @@ export default function TripDraftCard({
                   }
                 >
                   <TouchableOpacity
-                    onPress={() => setOriginTarget({ day: i })}
+                    onPress={() => onRequestOrigin?.({ day: i })}
                     activeOpacity={0.8}
                     className="flex-row items-center bg-violet-50 border border-violet-200 rounded-xl px-3 py-2.5"
                   >
@@ -599,13 +583,6 @@ export default function TripDraftCard({
           </View>
         ) : null}
       </View>
-
-      {/* ตัวเลือกจุด — ใช้ instance เดียว สลับเป้าหมายตามที่ผู้ใช้กด */}
-      <OriginSelectorModal
-        visible={originTarget !== null}
-        onClose={() => setOriginTarget(null)}
-        onSelectOrigin={selectOrigin}
-      />
     </View>
   );
 }

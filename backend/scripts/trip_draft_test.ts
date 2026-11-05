@@ -124,6 +124,30 @@ console.log("\n[mergeTripSlots]");
   eq("ไม่มี incoming → คืนค่าเดิม", mergeTripSlots(base, null).days, 2);
   eq("ไม่มี base → ใช้ค่าใหม่", mergeTripSlots(null, { days: 5 }).days, 5);
 
+  // พิกัดที่ผู้ใช้เลือกเอง → จุดที่โมเดลส่งมาโดยไม่มีพิกัด ทับไม่ได้
+  // (เคยเจอจริง: กดสร้างแพลนไม่ได้ ทั้งที่กรอกครบแล้ว เพราะพิกัดหายระหว่างทาง)
+  const keepCoords = mergeTripSlots(
+    { startPoint: { label: "บ้าน", coords: { lat: 18.79, lng: 98.98 } } },
+    { startPoint: { label: "บ้าน", address: null, coords: null } }
+  );
+  ok(
+    "จุดที่ไม่มีพิกัด → ไม่ลบพิกัดที่ผู้ใช้เลือก",
+    keepCoords.startPoint?.coords?.lat === 18.79 &&
+      keepCoords.startPoint?.coords?.lng === 98.98
+  );
+  eq("ชื่อจุดเดิมยังอยู่", keepCoords.startPoint?.label, "บ้าน");
+
+  // จุดเดิมไม่มีพิกัด แต่ของใหม่มี → ใช้พิกัดของใหม่
+  const takeCoords = mergeTripSlots(
+    { startPoint: { label: "บ้าน", coords: null } },
+    { startPoint: { label: "วัดพระแก้ว", coords: { lat: 18.78, lng: 98.97 } } }
+  );
+  ok(
+    "ของใหม่มีพิกัด → ใช้พิกัดของใหม่",
+    takeCoords.startPoint?.coords?.lng === 98.97 &&
+      takeCoords.startPoint?.label === "วัดพระแก้ว"
+  );
+
   // กลับจุดเดิม → ต้องล้างจุดสิ้นสุดทิ้ง ไม่ให้ค้างเป็นจุดคนละจุด
   const backToStart = mergeTripSlots(
     {
@@ -134,6 +158,32 @@ console.log("\n[mergeTripSlots]");
   );
   eq("กลับจุดเดิม → ล้างจุดสิ้นสุด", backToStart.endPoint, null);
   eq("กลับจุดเดิม → returnMode", backToStart.returnMode, "same_as_start");
+
+  // เส้นทางจริงตามที่ production ทำ: แอปส่งจุดที่มีพิกัด → normalize → merge กับจุดที่โมเดลส่งมา
+  const fromApp = normalizeTripSlots({
+    startPoint: {
+      label: "บ้าน",
+      address: "เชียงใหม่",
+      coords: { lat: 18.79, lng: 98.98 },
+    },
+    date: "2026-11-08",
+  });
+  const afterModel = mergeTripSlots(
+    fromApp,
+    normalizeTripSlots({
+      startPoint: { label: "บ้าน", address: null, coords: null },
+      date: null,
+    })
+  );
+  ok(
+    "รอบจริง: พิกัดที่ผู้ใช้เลือกรอดจากการ merge",
+    afterModel.startPoint?.coords?.lat === 18.79 &&
+      afterModel.startPoint?.coords?.lng === 98.98
+  );
+  ok(
+    "รอบจริง: ไม่ขาดพิกัดจุดเริ่มต้น",
+    !computeTripMissing(afterModel).includes("พิกัดจุดเริ่มต้น")
+  );
 }
 
 // ── 3. computeTripMissing ────────────────────────────────────────────────
