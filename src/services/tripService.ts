@@ -8,6 +8,9 @@ import {
   TripPlanLodging,
   TripPlanPoint,
   TRAVEL_STYLES,
+  TRIP_MAX_DAYS,
+  tripRangeDays,
+  vehicleClassOf,
 } from "../data/tripsData";
 import { aiFetch, AiError, toastAiError } from "./aiHttp";
 
@@ -234,6 +237,8 @@ export interface PlanTripRequest {
   /** จุดสิ้นสุดของแต่ละวัน (หลายวัน) */
   dayEndPoints?: (TripPlanPoint | null)[];
   vehicle: string;
+  /** ชื่อ/รุ่นรถที่ผู้ใช้พิมพ์เอง (เช่น "Toyota Corolla Altis") — ให้ backend หาชนิดน้ำมันให้ */
+  vehicleModel?: string | null;
   fuelType?: string | null;
   travelers: number;
   budgetPerPerson: number;
@@ -305,6 +310,7 @@ export async function generateTripPlan(
       endPoint: req.endPoint ?? undefined,
       dayEndPoints: req.dayEndPoints ?? undefined,
       vehicle: req.vehicle,
+      vehicleModel: req.vehicleModel ?? undefined,
       fuelType: req.fuelType ?? undefined,
       travelers: req.travelers,
       budgetPerPerson: req.budgetPerPerson,
@@ -340,6 +346,9 @@ export async function generateTripPlan(
 /**
  * แปลงช่องข้อมูลที่เอไaiสกัดมา → คำขอวางแผน
  * ค่าที่ยังไม่ครบจะถูกเติมด้วยค่าเริ่มต้นของระบบ (ผู้ใช้เปลี่ยนได้ในการ์ด)
+ *
+ * ช่วงวันที่ของแอป = `startDate` + `endDate` แต่ขา `/trips/plan` ของ backend
+ * ยังรับแค่ `date` (วันเริ่ม) + `days` (จำนวนวัน) → แปลงตรงนี้ที่จุดเดียว
  */
 export function planRequestFromSlots(
   slots: TripSlots,
@@ -356,16 +365,30 @@ export function planRequestFromSlots(
       ? slots.endPoint ?? null
       : { label: startPoint.label, address: startPoint.address, coords: startPoint.coords };
 
+  // จำนวนวัน = ช่วงวันที่ที่ผู้ใช้เลือก (ถ้ายังไม่เลือก → 1 วัน)
+  const rangeDays = tripRangeDays(slots.startDate, slots.endDate);
+  const days = Math.min(TRIP_MAX_DAYS, Math.max(1, rangeDays ?? 1));
+
+  // รถ: 2 คลาส (ส่วนตัว / สาธารณะ) → backend รู้จัก key เดิม
+  const vehicleClass = vehicleClassOf(slots.vehicle);
+  const vehicle =
+    slots.fuelType === "electric"
+      ? "ev"
+      : vehicleClass === "public"
+      ? "public"
+      : slots.vehicle ?? "private_car";
+
   return {
     folderId: folderId ?? null,
-    days: Math.min(7, Math.max(1, Number(slots.days) || 1)),
-    date: slots.date ?? null,
+    days,
+    date: slots.startDate ?? null,
     startTime: slots.startTime ?? "08:00",
     startPoint,
     returnMode,
     endPoint,
     dayEndPoints: slots.dayEndPoints ?? undefined,
-    vehicle: slots.vehicle ?? "private_car",
+    vehicle,
+    vehicleModel: slots.vehicleModel ?? null,
     fuelType: slots.fuelType ?? null,
     travelers: Math.max(1, Number(slots.travelers) || 1),
     budgetPerPerson: Number(slots.budgetPerPerson) || 3000,
@@ -442,7 +465,7 @@ export async function fetchNearbySuggestions(params: {
     }));
 }
 
-/** ราคาน้ำมันล่าสุดที่ backend ดึงสดจากเว็บ */
+/** ราคาน้ำมันล่าสุดที่ backend ดึงสดจากเว็บ (cache รายวันตามเวลาไทย) */
 export interface FuelPriceSnapshot {
   prices: Record<string, number>;
   labels: Record<string, string>;
@@ -453,6 +476,17 @@ export interface FuelPriceSnapshot {
   origin: string;
   isEstimate: boolean;
   url: string | null;
+  /**
+   * วันที่ของราคาใน cache ("YYYY-MM-DD" เวลาไทย)
+   * → ถ้าไม่ตรงกับวันไทยวันนี้ = ข้อมูลเก่า (ห้ามแสดงเป็น "ราคาวันนี้")
+   */
+  cacheDate?: string | null;
+  /** true = ดึงราคาวันนี้ไม่สำเร็จ ใช้ค่าล่าสุดที่มีอยู่แทน */
+  isStale?: boolean;
+  /** ข้อความแจ้งผู้ใช้ว่าเป็นข้อมูลเก่า */
+  staleNotice?: string | null;
+  /** วันไทยวันนี้ ("YYYY-MM-DD") ที่ backend ใช้ตัดสินว่า cache หมดอายุหรือยัง */
+  bangkokDate?: string | null;
 }
 
 export async function fetchFuelPrices(): Promise<FuelPriceSnapshot | null> {
@@ -477,6 +511,10 @@ export async function fetchFuelPrices(): Promise<FuelPriceSnapshot | null> {
       origin: String(data.origin ?? ""),
       isEstimate: data.isEstimate === true,
       url: data.url ?? null,
+      cacheDate: data.cacheDate ?? null,
+      isStale: data.isStale === true,
+      staleNotice: data.staleNotice ?? null,
+      bangkokDate: data.bangkokDate ?? null,
     };
   } catch {
     // ราคาน้ำมันเป็นข้อมูลเสริม — ล้มเหลวไม่ทำให้ทั้งระบบล้ม

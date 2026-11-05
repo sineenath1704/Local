@@ -106,6 +106,8 @@ export interface LodgingSuggestion {
 export interface PlanVehicleInfo {
   key: string;
   label: string;
+  /** ชื่อ/รุ่นรถที่ผู้ใช้กรอก (ถ้ามี) */
+  model?: string | null;
   kmPerLitre: number | null;
   fuelType: FuelType | null;
   fuelPricePerLitre: number | null;
@@ -140,7 +142,8 @@ export interface BuiltPlan {
   tips: string[];
   routeSource: "osrm" | "estimate" | "mixed";
   routeCredit: string;
-  fuel: ResolvedFuelPrice & { text: string };
+  /** ข้อมูลราคาน้ำมันที่ใช้จริง — ไม่มีสำหรับรถที่ไม่ใช้น้ำมัน (รถสาธารณะ/รถไฟฟ้า) */
+  fuel?: ResolvedFuelPrice & { text: string };
   aiUsed: boolean;
   aiNote?: string;
   /** เวลาเริ่มต้นของวันแรก (เก็บไว้ให้ฝั่งแอปคำนวณแผนใหม่ได้ตรง ๆ) */
@@ -242,6 +245,8 @@ export interface PlannerInput {
   /** จุดสิ้นสุดของแต่ละวัน (หลายวัน) — วันสุดท้ายใช้ endPoint */
   dayEndPoints?: (PlanPoint | null)[];
   vehicle: VehicleProfile;
+  /** ชื่อ/รุ่นรถที่ผู้ใช้กรอก (เช่น "Toyota Corolla Altis") */
+  vehicleModel?: string | null;
   fuelType: FuelType | null;
   fuelPriceOverride?: number | null;
   travelers: number;
@@ -522,21 +527,38 @@ export async function buildTripPlan(
   const days = Math.max(1, input.days);
   const nights = Math.max(0, days - 1);
 
-  // ── ราคาน้ำมัน (ต้องมีเสมอ — ห้ามปล่อยให้โมเดลเดา) ──
-  const fuelTable = await deps.fuelPrices();
-  const fuelType: FuelType =
-    input.fuelType ?? input.vehicle.defaultFuelType ?? "gasohol95";
-  const resolvedFuel = resolveFuelPrice(fuelTable, fuelType, input.fuelPriceOverride);
-  if (!resolvedFuel.pricePerLitre) {
-    warnings.push(
-      "ยังไม่ทราบราคาน้ำมันของชนิดนี้ — ค่าน้ำมันในแผนเป็น 0 กรุณากรอกราคาที่ปั๊มเอง"
-    );
-  } else {
-    assumptions.push(
-      `ราคาน้ำมัน ${resolvedFuel.pricePerLitre.toFixed(2)} ฿/ลิตร · ที่มา: ${resolvedFuel.sourceLabel}` +
-        (resolvedFuel.effectiveDate ? ` · มีผล ${resolvedFuel.effectiveDate}` : "") +
-        (resolvedFuel.isEstimate ? " · เป็นค่าประมาณการ" : "")
-    );
+  // ── ราคาน้ำมัน (เฉพาะรถที่ใช้น้ำมัน — รถสาธารณะ/รถไฟฟ้าไม่มีค่าน้ำมัน) ──
+  // รถสาธารณะ → ไม่ต้องดึงราคา · ไม่มีชนิดน้ำมัน · ไม่มีค่าน้ำมันในแผน
+  const usesFuel = input.vehicle.usesFuel;
+  const fuelTable = usesFuel ? await deps.fuelPrices() : null;
+  // รถไฟฟ้ายังมีชนิดพลังงาน (electric) แต่ไม่มี "ราคาน้ำมัน" → เก็บชนิดไว้ ค่าไฟคิดแยก
+  const fuelType: FuelType | null =
+    input.fuelType ?? input.vehicle.defaultFuelType ?? null;
+  const resolvedFuel: ResolvedFuelPrice | null =
+    usesFuel && fuelTable && fuelType
+      ? resolveFuelPrice(fuelTable, fuelType, input.fuelPriceOverride)
+      : null;
+  if (resolvedFuel) {
+    if (!resolvedFuel.pricePerLitre) {
+      warnings.push(
+        "ยังไม่ทราบราคาน้ำมันของชนิดนี้ — ค่าน้ำมันในแผนเป็น 0 กรุณากรอกราคาที่ปั๊มเอง"
+      );
+    } else {
+      assumptions.push(
+        `ราคาน้ำมัน ${resolvedFuel.pricePerLitre.toFixed(2)} ฿/ลิตร · ที่มา: ${resolvedFuel.sourceLabel}` +
+          (resolvedFuel.effectiveDate ? ` · มีผล ${resolvedFuel.effectiveDate}` : "") +
+          (resolvedFuel.isEstimate ? " · เป็นค่าประมาณการ" : "")
+      );
+      // ดึงราคาวันนี้ไม่สำเร็จ → ใช้ราคาของวันก่อน (ห้ามแสดงเป็นราคาวันนี้)
+      if (resolvedFuel.isStale) {
+        assumptions.push(
+          fuelTable?.staleNotice ||
+            `ราคาน้ำมันที่ใช้เป็นข้อมูลวันที่ ${
+              fuelTable?.cacheDate ?? "ก่อนหน้า"
+            } — ดึงราคาวันนี้ไม่สำเร็จ`
+        );
+      }
+    }
   }
 
   // ── จัดกลุ่มจุดตามวัน ──
@@ -574,7 +596,7 @@ export async function buildTripPlan(
   // ── รอบที่ 1: คำนวณเส้นทาง + ไทม์ไลน์ของทุกวัน ──
   const fuelInfo = {
     vehicle: input.vehicle,
-    pricePerLitre: resolvedFuel.pricePerLitre,
+    pricePerLitre: resolvedFuel?.pricePerLitre ?? null,
   };
   for (const st of states) {
     await computeDayState(st, deps, fuelInfo);
@@ -674,7 +696,11 @@ export async function buildTripPlan(
 
   // ── งบประมาณ ──
   const totalKm = builtDays.reduce((s, d) => s + d.totalKm, 0);
-  const totalFuel = fuelCost(totalKm, input.vehicle, resolvedFuel.pricePerLitre);
+  const totalFuel = fuelCost(
+    totalKm,
+    input.vehicle,
+    resolvedFuel?.pricePerLitre ?? null
+  );
   const food = Number(input.aiBudget?.food ?? 0) || 0;
   const activities = Number(input.aiBudget?.activities ?? 0) || 0;
   const other = Number(input.aiBudget?.other ?? 0) || 0;
@@ -723,7 +749,10 @@ export async function buildTripPlan(
     tips: input.aiTips ?? [],
     routeSource,
     routeCredit: "ข้อมูลเส้นทาง: © OpenStreetMap contributors (ผ่าน OSRM)",
-    fuel: { ...resolvedFuel, text: describeFuelPrice(resolvedFuel) },
+    // รถที่ไม่ใช้น้ำมัน (รถสาธารณะ/รถไฟฟ้า) → ไม่มีข้อมูลราคาน้ำมันในแผน
+    ...(resolvedFuel
+      ? { fuel: { ...resolvedFuel, text: describeFuelPrice(resolvedFuel) } }
+      : {}),
     aiUsed: Boolean(input.aiSelection),
     droppedStops,
     startTime: input.startTime,
@@ -733,14 +762,17 @@ export async function buildTripPlan(
     vehicle: {
       key: input.vehicle.key,
       label: input.vehicle.label,
+      model: input.vehicleModel ?? null,
       kmPerLitre: input.vehicle.kmPerLitre,
       fuelType,
-      fuelPricePerLitre: resolvedFuel.pricePerLitre,
-      fuelPriceSource: resolvedFuel.sourceLabel,
-      fuelPriceEffectiveDate: resolvedFuel.effectiveDate,
-      fuelPriceFetchedAt: resolvedFuel.fetchedAt,
-      fuelPriceIsEstimate: resolvedFuel.isEstimate,
-      fuelPriceText: describeFuelPrice(resolvedFuel),
+      fuelPricePerLitre: resolvedFuel?.pricePerLitre ?? null,
+      fuelPriceSource: resolvedFuel?.sourceLabel ?? "ไม่มีค่าน้ำมัน",
+      fuelPriceEffectiveDate: resolvedFuel?.effectiveDate,
+      fuelPriceFetchedAt: resolvedFuel?.fetchedAt,
+      fuelPriceIsEstimate: resolvedFuel?.isEstimate ?? false,
+      fuelPriceText: resolvedFuel
+        ? describeFuelPrice(resolvedFuel)
+        : `${input.vehicle.label} — ไม่มีค่าน้ำมัน`,
     },
   };
 }

@@ -232,21 +232,31 @@ export const FUEL_TYPE_OPTIONS: { key: FuelTypeKey; label: string }[] = [
  * ช่องข้อมูลของแผนทริปที่เอไอสกัดได้จากบทสนทนา
  * -------------------------------------------------------------
  * `null` = "ยังไม่รู้" → ห้ามทับค่าที่ผู้ใช้เคยกรอกไว้ (merge ที่ฝั่ง backend)
- * ชื่อของ slot ต้องตรงกับ `backend/src/tripPrompt.ts` เป๊ะ ๆ
+ *
+ * ช่วงวันที่เก็บเป็น `startDate` + `endDate` (string `"YYYY-MM-DD"` ทั้งคู่)
+ * → ไม่ใช้ Date object เพราะข้ามเขตเวลาแล้ววันเพี้ยน (เช่น เลือก 00:00 ของวันถัดไป)
+ * ส่วนขาเข้า–ขาออกกับ backend ยังเป็น `date` + `days` → แปลงที่ `slotsToWire` / `slotsFromWire`
  */
 export interface TripSlots {
   startPoint?: TripPlanPoint | null;
   returnMode?: TripReturnMode | null;
   endPoint?: TripPlanPoint | null;
-  date?: string | null;
+  /** วันเริ่มต้นของทริป ("YYYY-MM-DD") */
+  startDate?: string | null;
+  /** วันสิ้นสุดของทริป ("YYYY-MM-DD") */
+  endDate?: string | null;
   startTime?: string | null;
-  days?: number | null;
   /**
    * key ของรถ (`private_car` …) หรือชื่อที่แสดง ("รถยนต์ส่วนตัว")
    * → เป็น string ธรรมดา เพราะโมเดลอาจเขียนชื่อมาแทน key
    * (backend จับคู่ให้เอง · ถ้าไม่รู้จักจะใช้รถยนต์ส่วนตัวเป็นค่าเริ่มต้น)
    */
   vehicle?: string | null;
+  /**
+   * ชื่อ/รุ่นรถที่ผู้ใช้พิมพ์เอง (เช่น "Toyota Corolla Altis")
+   * → ให้เอไaiเป็นคนระบุชนิดน้ำมันที่รถคันนี้ใช้จริง
+   */
+  vehicleModel?: string | null;
   fuelType?: string | null;
   travelers?: number | null;
   budgetPerPerson?: number | null;
@@ -258,11 +268,246 @@ export interface TripSlots {
   dayEndPoints?: (TripPlanPoint | null)[] | null;
 }
 
+// ---- ช่วงวันที่ (คำนวณจากสตริง ไม่ผ่าน Date.parse ข้ามเขตเวลา) ----
+
+/** ทริปยาวสุดกี่วัน (backend clamp ไว้ที่ 7 วันเหมือนกัน) */
+export const TRIP_MAX_DAYS = 7;
+
+/** เดือนแบบย่อ (ม.ค.–ธ.ค.) — ใช้ร่วมกันทั้งการ์ดและปฏิทิน */
+export const THAI_MONTHS = [
+  "ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
+  "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค.",
+];
+
+/** วันในสัปดาห์แบบย่อ (เริ่มที่อาทิตย์ — ตรงกับปฏิทินไทย) */
+export const THAI_WEEKDAYS = ["อา.", "จ.", "อ.", "พ.", "พฤ.", "ศ.", "ส."];
+
+/** วันนี้ตามเวลาท้องถิ่นของเครื่องผู้ใช้ ("YYYY-MM-DD") */
+export function tripTodayIso(now: Date = new Date()): string {
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${mm}-${dd}`;
+}
+
+function parseIsoParts(iso: string): { y: number; m: number; d: number } | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso ?? "");
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  return { y, m: mo, d };
+}
+
+/** เลื่อนวันแบบไม่สนเขตเวลา (ใช้ Date.UTC เป็นตัวกลาง) */
+export function tripAddDays(iso: string, n: number): string {
+  const p = parseIsoParts(iso);
+  if (!p) return iso;
+  const t = Date.UTC(p.y, p.m - 1, p.d) + n * 86400000;
+  const dt = new Date(t);
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getUTCDate()).padStart(2, "0");
+  return `${dt.getUTCFullYear()}-${mm}-${dd}`;
+}
+
+/** จำนวนวันระหว่างสองวัน (b − a) — ลบเครื่องหมาย = ย้อนหลัง */
+export function tripDiffDays(a: string, b: string): number {
+  const pa = parseIsoParts(a);
+  const pb = parseIsoParts(b);
+  if (!pa || !pb) return 0;
+  const ta = Date.UTC(pa.y, pa.m - 1, pa.d);
+  const tb = Date.UTC(pb.y, pb.m - 1, pb.d);
+  return Math.round((tb - ta) / 86400000);
+}
+
 /**
- * ข้อมูลที่ยังขาด — คำนวณแบบ deterministic ฝั่งแอป (เหมือน `computeTripMissing` ของ backend)
+ * จำนวนวันของช่วง (รวมวันเริ่มและวันสิ้นสุด) = end − start + 1
+ * → null เมื่อช่วงยังไม่ครบหรือสิ้นสุดมาก่อนเริ่ม
+ */
+export function tripRangeDays(
+  start?: string | null,
+  end?: string | null
+): number | null {
+  if (!start || !end) return null;
+  const diff = tripDiffDays(start, end);
+  if (diff < 0) return null;
+  return diff + 1;
+}
+
+/** "10 พ.ย. 2569" (ใส่ชื่อวันได้) */
+export function formatThaiDate(iso?: string | null, withWeekday = false): string {
+  if (!iso) return "";
+  const p = parseIsoParts(iso);
+  if (!p) return iso;
+  const dt = new Date(Date.UTC(p.y, p.m - 1, p.d));
+  const dow = THAI_WEEKDAYS[dt.getUTCDay()];
+  const core = `${p.d} ${THAI_MONTHS[p.m - 1]} ${p.y + 543}`;
+  return withWeekday ? `${dow} ${core}` : core;
+}
+
+/** สรุปช่วงวันที่แบบสั้น: "10–12 พ.ย. 2569 · 3 วัน 2 คืน" */
+export function formatThaiDateRange(
+  start?: string | null,
+  end?: string | null
+): string {
+  if (!start) return "";
+  const days = tripRangeDays(start, end);
+  if (!end || days == null) return formatThaiDate(start);
+  const sp = parseIsoParts(start);
+  const ep = parseIsoParts(end);
+  const nights = days - 1;
+  const span =
+    sp && ep && sp.m === ep.m
+      ? `${sp.d}–${ep.d} ${THAI_MONTHS[ep.m - 1]} ${ep.y + 543}`
+      : `${formatThaiDate(start)} – ${formatThaiDate(end)}`;
+  return `${span} · ${days} วัน${nights > 0 ? ` ${nights} คืน` : " · ไป-กลับ"}`;
+}
+
+// ---- ประเภทรถ (2 แบบ) ----
+
+/** รถที่ผู้ใช้เลือกได้มีแค่ 2 คลาส */
+export type VehicleClass = "private_car" | "public";
+
+export const VEHICLE_CLASS_OPTIONS: { key: VehicleClass; label: string }[] = [
+  { key: "private_car", label: "รถส่วนตัว" },
+  { key: "public", label: "รถสาธารณะ" },
+];
+
+/** คำที่บอกว่าเป็น "รถสาธารณะ" (ใช้จับคำที่โมเดลเขียนมา) */
+const PUBLIC_VEHICLE_WORDS = [
+  "public",
+  "transit",
+  "bus",
+  "train",
+  "plane",
+  "ferry",
+  "รถสาธารณะ",
+  "ขนส่งสาธารณะ",
+  "รถไฟ",
+  "เครื่องบิน",
+  "รถเมล์",
+  "รถตู้เอก",
+  "เรือ",
+];
+
+/**
+ * จัดค่าที่ได้ (key หรือชื่อรถ) → เป็นคลาสรถ 2 แบบ
+ * → null = ยังไม่ได้เลือกรถ
+ */
+export function vehicleClassOf(v?: string | null): VehicleClass | null {
+  if (!v) return null;
+  const raw = String(v).trim();
+  if (!raw) return null;
+  const opt = VEHICLE_CLASS_OPTIONS.find(
+    (o) => o.key === raw || o.label === raw
+  );
+  if (opt) return opt.key;
+  const hit = VEHICLE_OPTIONS.find((o) => o.key === raw || o.label === raw);
+  if (hit) return hit.key === "public" ? "public" : "private_car";
+  const lower = raw.toLowerCase();
+  if (PUBLIC_VEHICLE_WORDS.some((w) => lower.includes(w.toLowerCase()))) {
+    return "public";
+  }
+  return "private_car";
+}
+
+/** ป้ายที่อ่านง่ายของรถที่เลือกไว้ (คลาส 2 แบบ) */
+export function vehicleClassLabel(v?: string | null): string {
+  const cls = vehicleClassOf(v);
+  if (!cls) return "";
+  return (
+    VEHICLE_CLASS_OPTIONS.find((o) => o.key === cls)?.label ?? String(v ?? "")
+  );
+}
+
+// ---- แปลงรูปแบบขาเข้า/ขาออกกับ backend ----
+
+/**
+ * รูปแบบที่ส่งไปหา backend / ที่ backend ส่งกลับมา
+ * → backend รู้จักแค่ `date` (วันเริ่ม) + `days` (จำนวนวัน)
+ */
+export interface TripSlotsWire {
+  startPoint?: TripPlanPoint | null;
+  returnMode?: TripReturnMode | null;
+  endPoint?: TripPlanPoint | null;
+  date?: string | null;
+  startTime?: string | null;
+  days?: number | null;
+  vehicle?: string | null;
+  vehicleModel?: string | null;
+  fuelType?: string | null;
+  travelers?: number | null;
+  budgetPerPerson?: number | null;
+  style?: string | null;
+}
+
+/**
+ * ทำให้ช่องข้อมูลเป็นรูปแบบของแอปเสมอ
  * -------------------------------------------------------------
- * ต้องมี: จุดเริ่ม(พร้อมพิกัด) · วันที่ · เวลาเริ่ม · รถ · จำนวนวัน
- * และจุดสิ้นสุดตอนกลับ (พร้อมพิกัด) เมื่อ returnMode = "custom"
+ * รองรับทั้งรูปแบบใหม่ (`startDate`/`endDate`) และรูปแบบเก่า (`date`/`days`)
+ * ที่ยังค้างอยู่ในแชทเก่า → แปลงให้อัตโนมัติ
+ */
+export function normalizeTripSlotsShape(
+  raw?: TripSlots | TripSlotsWire | null
+): TripSlots {
+  if (!raw || typeof raw !== "object") return {};
+  const r = raw as Record<string, any>;
+  const date = (r.startDate ?? r.date ?? null) as string | null;
+  const rawDays = Number(r.days);
+  const endDate: string | null =
+    (r.endDate as string | null) ??
+    (date && Number.isFinite(rawDays) && rawDays > 1
+      ? tripAddDays(date, rawDays - 1)
+      : date);
+  return {
+    startPoint: r.startPoint ?? null,
+    returnMode: r.returnMode ?? null,
+    endPoint: r.endPoint ?? null,
+    startDate: date,
+    endDate,
+    startTime: r.startTime ?? null,
+    vehicle: r.vehicle ?? null,
+    vehicleModel: r.vehicleModel ?? null,
+    fuelType: r.fuelType ?? null,
+    travelers: r.travelers ?? null,
+    budgetPerPerson: r.budgetPerPerson ?? null,
+    style: r.style ?? null,
+    dayEndPoints: Array.isArray(r.dayEndPoints) ? r.dayEndPoints : null,
+  };
+}
+
+/** แอป → backend (แปลงช่วงวันที่เป็น `date` + `days`) */
+export function slotsToWire(slots: TripSlots): TripSlotsWire {
+  const days = tripRangeDays(slots.startDate, slots.endDate);
+  return {
+    startPoint: slots.startPoint ?? null,
+    returnMode: slots.returnMode ?? null,
+    endPoint: slots.endPoint ?? null,
+    date: slots.startDate ?? null,
+    startTime: slots.startTime ?? null,
+    days: days == null ? null : Math.min(TRIP_MAX_DAYS, Math.max(1, days)),
+    vehicle: slots.vehicle ?? null,
+    vehicleModel: slots.vehicleModel ?? null,
+    fuelType: slots.fuelType ?? null,
+    travelers: slots.travelers ?? null,
+    budgetPerPerson: slots.budgetPerPerson ?? null,
+    style: slots.style ?? null,
+  };
+}
+
+/** backend → แอป (แปลง `date` + `days` กลับเป็นช่วงวันที่) */
+export function slotsFromWire(wire?: TripSlotsWire | null): TripSlots {
+  return normalizeTripSlotsShape(wire);
+}
+
+/**
+ * ข้อมูลที่ยังขาด — คำนวณแบบ deterministic ฝั่งแอป
+ * -------------------------------------------------------------
+ * ต้องมี: จุดเริ่ม(พร้อมพิกัด) · จุดสิ้นสุดตอนกลับ (เมื่อกลับคนละจุด)
+ * · ช่วงวันที่ที่ถูกต้อง · เวลาออกเดินทาง · ประเภทรถ
+ * และ "ชื่อ/รุ่นรถ" เมื่อเป็นรถส่วนตัว
+ *
+ * งบ / จำนวนคน / จุดสิ้นสุดรายวัน / สไตล์ → **ไม่บังคับ** (มีค่าเริ่มต้นของระบบ)
  */
 export function computeTripMissing(slots: TripSlots): string[] {
   const missing: string[] = [];
@@ -281,10 +526,30 @@ export function computeTripMissing(slots: TripSlots): string[] {
     }
   }
 
-  if (!slots.date) missing.push("วันที่");
-  if (!slots.startTime) missing.push("เวลาเริ่มต้น");
-  if (!slots.vehicle) missing.push("รถที่ใช้");
-  if (!slots.days) missing.push("จำนวนวัน");
+  // ช่วงวันที่ — ต้องครบและ "ถูกต้อง" ไม่ใช่แค่มีค่า
+  if (!slots.startDate) {
+    missing.push("วันเดินทาง");
+  } else if (!slots.endDate) {
+    missing.push("วันสิ้นสุดของทริป");
+  } else {
+    const days = tripRangeDays(slots.startDate, slots.endDate);
+    if (days == null) {
+      missing.push("วันสิ้นสุดต้องไม่ก่อนวันเริ่มต้น");
+    } else if (days > TRIP_MAX_DAYS) {
+      missing.push(`ทริปได้ไม่เกิน ${TRIP_MAX_DAYS} วัน`);
+    } else if (slots.startDate < tripTodayIso()) {
+      missing.push("วันเดินทางย้อนหลัง");
+    }
+  }
+
+  if (!slots.startTime) missing.push("เวลาออกเดินทาง");
+
+  const vehicleClass = vehicleClassOf(slots.vehicle);
+  if (!vehicleClass) {
+    missing.push("ประเภทรถ");
+  } else if (vehicleClass === "private_car" && !slots.vehicleModel?.trim()) {
+    missing.push("ชื่อ/รุ่นรถ");
+  }
 
   return missing;
 }
@@ -374,6 +639,8 @@ export interface TripPlanLodging {
 export interface TripPlanVehicle {
   key: string;
   label: string;
+  /** ชื่อ/รุ่นรถที่ผู้ใช้กรอก (ถ้ามี) — ใช้ระบุชนิดน้ำมัน */
+  model?: string | null;
   kmPerLitre: number | null;
   fuelType: string | null;
   fuelPricePerLitre: number | null;

@@ -2,8 +2,10 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   View,
   Text,
+  TextInput,
   TouchableOpacity,
   ActivityIndicator,
+  Alert,
 } from "react-native";
 import {
   CheckIcon,
@@ -14,9 +16,14 @@ import {
 } from "react-native-heroicons/outline";
 import {
   TripSlots,
-  VEHICLE_OPTIONS,
   FUEL_TYPE_OPTIONS,
   computeTripMissing,
+  formatThaiDateRange,
+  tripRangeDays,
+  tripTodayIso,
+  vehicleClassOf,
+  VEHICLE_CLASS_OPTIONS,
+  type VehicleClass,
 } from "../data/tripsData";
 import { fetchFuelPrices, FuelPriceSnapshot } from "../services/tripService";
 import EditableValueRow from "./EditableValueRow";
@@ -24,39 +31,22 @@ import EditableValueRow from "./EditableValueRow";
 /**
  * การ์ด "ข้อมูลแผนทริป" ในแชท
  * =============================================================
- * แสดงว่าเอไaiรู้อะไรแล้ว (✓) และอะไรยังขาด (…)
- * ผู้ใช้เติมเองได้ทีละช่อง → ปุ่ม "สร้างแพลนทริป" โผล่**เฉพาะเมื่อข้อมูลครบ**
- * (แก้ปัญหาปุ่ม "เลือกแพลนทริปนี้" ที่เดิมขึ้นทุกครั้งที่เอไaiตอบ)
+ * แบ่งเป็น 2 กลุ่ม:
+ *   · "ต้องกรอก"          — ข้อมูลที่ขาดไม่ได้จริง ๆ (จุดเริ่ม · จุดสิ้นสุดตอนกลับ · ช่วงวันที่ · เวลา · รถ)
+ *   · "ข้อมูลเพิ่มเติม"      — ไม่บังคับ (งบ · จำนวนคน · จุดจบรายวัน) ปล่อยว่างไว้ให้เอไaiจัดให้
  *
- * จุดเริ่มต้น / จุดสิ้นสุดตอนกลับ / จุดสิ้นสุดต่อวัน เป็นคนละช่องข้อมูลกัน
+ * ชนิดน้ำมัน **ไม่ใช่ช่องกรอก** — ผู้ใช้ใส่ชื่อ/รุ่นรถ แล้วเอไaiเป็นคนระบุว่ารถคันนั้นใช้น้ำมันอะไร
+ * ราคา/ลิตรมาจาก cache รายวันของ backend และค่าน้ำมันในแผนคิดจากระยะทางจริงของแผน
  */
 
-const THAI_MONTHS = [
-  "ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
-  "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค.",
-];
-const THAI_WEEKDAYS = ["อา.", "จ.", "อ.", "พ.", "พฤ.", "ศ.", "ส."];
-
-/** ชนิดน้ำมันเริ่มต้นของแต่ละรถ (ต้องตรงกับ backend/src/vehicles.ts) */
-const DEFAULT_FUEL_BY_VEHICLE: Record<string, string> = {
-  private_car: "gasohol95",
-  diesel_car: "diesel",
-  pickup: "gasohol95",
-  van: "diesel",
-  motorbike: "gasohol95",
-  ev: "electric",
-  public: "",
-};
-
-/** รถที่ไม่ใช้น้ำมัน (ไฟฟ้า / ขนส่งสาธารณะ) → ไม่ต้องเลือกชนิดน้ำมัน */
-const NO_FUEL_VEHICLES = ["ev", "public"];
+/** ราคาน้ำมันของวันนี้ (กันดึงซ้ำตอนมีการ์ดหลายใบในหน้าเดียว) */
+let fuelCache: { day: string; snap: FuelPriceSnapshot | null } | null = null;
 
 /**
  * จัดรูปแบบราคาให้ปลอดภัยเสมอ
  * -------------------------------------------------------------
  * ถ้าค่าที่ได้มาไม่ใช่ตัวเลข (เช่น backend ส่ง string มา หรือค่าหาย)
  * ให้แสดง "—" แทนการเรียก `.toFixed()` แล้วพังทั้งแอป
- * (ตอนนี้ backend ส่งตัวเลขมาปกติ — อันนี้เป็นกันพลาดเผื่ออนาคต)
  */
 function formatPrice(value: unknown): string {
   if (typeof value === "number" && Number.isFinite(value)) return value.toFixed(2);
@@ -67,55 +57,55 @@ function formatPrice(value: unknown): string {
   return "—";
 }
 
-const START_TIMES = [
-  "06:00", "07:00", "08:00", "09:00", "10:00", "11:00",
-  "12:00", "13:00", "14:00", "16:00", "18:00",
-];
-
-function toIso(d: Date): string {
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${d.getFullYear()}-${mm}-${dd}`;
-}
-
-function formatDate(iso: string): string {
-  const d = new Date(`${iso}T00:00:00`);
-  if (Number.isNaN(d.getTime())) return iso;
-  return `${THAI_WEEKDAYS[d.getDay()]} ${d.getDate()} ${THAI_MONTHS[d.getMonth()]} ${d.getFullYear() + 543}`;
-}
-
-/** 14 วันนับจากวันนี้ — เลือกวันที่ได้โดยไม่ต้องมี date-picker */
-function upcomingDays(count = 14): { iso: string; label: string; dow: string; day: string }[] {
-  const out: { iso: string; label: string; dow: string; day: string }[] = [];
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  for (let i = 0; i < count; i++) {
-    const d = new Date(today);
-    d.setDate(d.getDate() + i);
-    out.push({
-      iso: toIso(d),
-      label: THAI_MONTHS[d.getMonth()],
-      dow: THAI_WEEKDAYS[d.getDay()],
-      day: String(d.getDate()),
-    });
-  }
-  return out;
-}
-
-function vehicleKey(v?: string | null): string | null {
-  if (!v) return null;
-  const hit = VEHICLE_OPTIONS.find((o) => o.key === v || o.label === v);
-  return hit?.key ?? null;
-}
-
-function vehicleLabel(v?: string | null): string {
-  if (!v) return "";
-  return VEHICLE_OPTIONS.find((o) => o.key === v || o.label === v)?.label ?? v;
-}
-
 function fuelLabel(v?: string | null): string {
   if (!v) return "";
   return FUEL_TYPE_OPTIONS.find((o) => o.key === v || o.label === v)?.label ?? v;
+}
+
+/** เป้าหมายของตัวเลือกจุด — จุดเริ่มต้น / จุดสิ้นสุดตอนกลับ / จุดจบของแต่ละวัน */
+export type TripOriginTarget = "start" | "end" | { day: number };
+
+/**
+ * รายงานการแตะ (phase = "down" คือนิ้วแตะลง · "press" คือกดสำเร็จ)
+ * ใช้ตรวจอาการ "กดการ์ดแล้วไม่มีอะไรเกิดขึ้น" — ชั่วคราว แก้เสร็จแล้วเอาออก
+ */
+export type TapReport = (label: string, phase: "down" | "press") => void;
+
+/**
+ * ตัวนับจำนวนครั้งที่ render (ชั่วคราว — ใช้วินิจฉัยว่าแอปค้างเพราะ render loop)
+ * · chat = หน้าจอแชท · card = การ์ดช่องข้อมูล
+ */
+export const renderCounter = { chat: 0, card: 0 };
+
+/** ช่องติ๊ก (ใช้กับ "จุดสิ้นสุดคือที่เดียวกับจุดเริ่มต้นไหม") */
+function CheckBox({
+  checked,
+  onPress,
+  label,
+}: {
+  checked: boolean;
+  onPress: () => void;
+  label: string;
+}) {
+  return (
+    <TouchableOpacity
+      onPress={onPress}
+      activeOpacity={0.8}
+      accessibilityRole="checkbox"
+      accessibilityState={{ checked }}
+      accessibilityLabel={label}
+      className="flex-row items-center"
+    >
+      <View
+        className={`w-5 h-5 rounded-md border items-center justify-center ${
+          checked ? "bg-violet-600 border-violet-600" : "bg-white border-gray-300"
+        }`}
+      >
+        {checked ? <CheckIcon size={13} color="#FFFFFF" strokeWidth={3} /> : null}
+      </View>
+      <Text className="text-[13.5px] font-bold text-gray-800 ml-2">{label}</Text>
+    </TouchableOpacity>
+  );
 }
 
 /** ชิปเลือกค่า (ใช้ซ้ำทุกแถว) */
@@ -162,20 +152,39 @@ function Chip({
   );
 }
 
-/** เป้าหมายของตัวเลือกจุด — จุดเริ่มต้น / จุดสิ้นสุดตอนกลับ / จุดจบของแต่ละวัน */
-export type TripOriginTarget = "start" | "end" | { day: number };
-
-/**
- * รายงานการแตะ (phase = "down" คือนิ้วแตะลง · "press" คือกดสำเร็จ)
- * ใช้ตรวจอาการ "กดการ์ดแล้วไม่มีอะไรเกิดขึ้น" — ชั่วคราว แก้เสร็จแล้วเอาออก
- */
-export type TapReport = (label: string, phase: "down" | "press") => void;
-
-/**
- * ตัวนับจำนวนครั้งที่ render (ชั่วคราว — ใช้วินิจฉัยว่าแอปค้างเพราะ render loop)
- * · chat = หน้าจอแชท · card = การ์ดช่องข้อมูล
- */
-export const renderCounter = { chat: 0, card: 0 };
+/** หัวการ์ดย่อยของแต่ละกลุ่ม */
+function SectionTitle({
+  title,
+  hint,
+  tone,
+}: {
+  title: string;
+  hint?: string;
+  tone: "required" | "optional";
+}) {
+  const isRequired = tone === "required";
+  return (
+    <View className="flex-row items-center mt-1 mb-2">
+      <View
+        className={`px-2 py-0.5 rounded-full ${
+          isRequired ? "bg-amber-100" : "bg-gray-100"
+        }`}
+      >
+        <Text
+          className={`text-[11px] font-black ${
+            isRequired ? "text-amber-800" : "text-gray-500"
+          }`}
+        >
+          {isRequired ? "ต้องกรอก" : "ไม่บังคับ"}
+        </Text>
+      </View>
+      <Text className="text-[13px] font-black text-gray-800 ml-2">{title}</Text>
+      {hint ? (
+        <Text className="text-[11.5px] text-gray-400 ml-1.5 flex-1">{hint}</Text>
+      ) : null}
+    </View>
+  );
+}
 
 interface TripDraftCardProps {
   slots: TripSlots;
@@ -190,9 +199,13 @@ interface TripDraftCardProps {
    * -------------------------------------------------------------
    * ตัวเลือกจุด (Modal ของ native) ต้องอยู่ **นอก** ลิสต์ ไม่ใช่ในแถวที่ลิสต์
    * เอาไว้ recycle เพราะ modal ที่ค้างอยู่ในแถวจะกลืนการแตะทั้งหน้าจอ
-   * (เคยเจอจริง: กดอะไรก็ไม่ได้ หน้าจะเหมือนค้าง)
+   * (เคยเจอจริง: กดอะไรก็ไม่ได้ หน้าจอเหมือนค้าง)
    */
-  onRequestOrigin?: (target: TripOriginTarget) => void;
+  onRequestOrigin: (target: TripOriginTarget) => void;
+  /** ขอเปิดปฏิทินเลือกช่วงวันที่ (เปิดครั้งเดียว เลือกวันเริ่ม → วันสิ้นสุด) */
+  onRequestDateRange: () => void;
+  /** ขอเปิดล้อเวลาออกเดินทาง */
+  onRequestTime: () => void;
   /** รายงานการแตะทุกปุ่มในการ์ด (ใช้วินิจฉัยอาการกดไม่ได้ — ชั่วคราว) */
   onTapReport?: TapReport;
 }
@@ -203,40 +216,80 @@ function TripDraftCardInner({
   onCreatePlan,
   creating,
   onRequestOrigin,
+  onRequestDateRange,
+  onRequestTime,
   onTapReport,
 }: TripDraftCardProps) {
   const [editing, setEditing] = useState<string | null>(null);
-  const [fuelPrice, setFuelPrice] = useState<FuelPriceSnapshot | null>(null);
-  // เริ่มที่ true เพราะกำลังดึงราคาทันทีที่เปิดการ์ด (ไม่ต้อง setState ซ้ำใน effect)
-  const [fuelLoading, setFuelLoading] = useState(true);
+  /**
+   * ราคาน้ำมันที่เพิ่งดึงมา (เก็บใน state)
+   * ถ้ามี cache ของวันนี้อยู่แล้วจะใช้ค่านั้นโดยตรง (ไม่ต้อง setState ใน effect)
+   */
+  const [fetchedFuel, setFetchedFuel] = useState<FuelPriceSnapshot | null>(
+    null
+  );
+  const [fuelFailed, setFuelFailed] = useState(false);
 
-  const days = Math.min(7, Math.max(1, Number(slots.days) || 1));
   const missing = useMemo(() => computeTripMissing(slots), [slots]);
   const ready = missing.length === 0;
   const returnMode = slots.returnMode === "custom" ? "custom" : "same_as_start";
-  const vehKey = vehicleKey(slots.vehicle);
-  const usesFuel = !!vehKey && !NO_FUEL_VEHICLES.includes(vehKey);
+  const vehicleClass: VehicleClass | null = vehicleClassOf(slots.vehicle);
+  const usesFuel = vehicleClass === "private_car";
+  const days = tripRangeDays(slots.startDate, slots.endDate) ?? 1;
 
-  // ราคาน้ำมันสด — ดึงครั้งเดียวตอนเปิดการ์ด (backend แคป 3 ชม. อยู่แล้ว)
   useEffect(() => {
     renderCounter.card += 1;
   });
 
+  /**
+   * ดึงราคาน้ำมันแบบขี้เกียจ
+   * -------------------------------------------------------------
+   * ดึงเฉพาะตอนที่ "ใช้น้ำมัน" จริง ๆ (รถส่วนตัว) ไม่งั้นทุกครั้งที่เปิดการ์ด
+   * และมี `.catch()` เสมอ → ราคาน้ำมันล้มเหลวไม่ทำให้การ์ดพัง
+   *
+   * ถ้ามี cache ของวันนี้อยู่แล้ว → ไม่ยิงซ้ำ (ค่าถูกอ่านตอน render อยู่แล้ว)
+   */
   useEffect(() => {
+    if (!usesFuel) return;
+    const day = tripTodayIso();
+    if (fuelCache?.day === day) return;
     let cancelled = false;
     fetchFuelPrices()
       .then((snap) => {
-        if (!cancelled) setFuelPrice(snap);
+        fuelCache = { day, snap };
+        if (!cancelled) {
+          setFetchedFuel(snap);
+          setFuelFailed(false);
+        }
       })
-      .finally(() => {
-        if (!cancelled) setFuelLoading(false);
+      .catch(() => {
+        // ราคาน้ำมันเป็นข้อมูลเสริม — ล้มเหลวไม่ทำให้ทั้งแอปล้ม
+        if (!cancelled) setFuelFailed(true);
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [usesFuel]);
 
   const patch = (next: Partial<TripSlots>) => onChange({ ...slots, ...next });
+
+  /**
+   * ขอเปิดตัวเลือกจุด
+   * -------------------------------------------------------------
+   * `onRequestOrigin` เป็น prop บังคับ (TypeScript จับได้ถ้าลืมส่ง) แต่กันไว้อีกชั้น
+   * เผื่อถูกเรียกจากที่ที่ callback ยังไม่พร้อม → เดิมเกิด "กดแล้วไม่มีอะไรเกิดขึ้น"
+   * เงียบ ๆ (ผู้ใช้คิดว่าแอปค้าง)
+   */
+  const requestOrigin = (target: TripOriginTarget) => {
+    if (typeof onRequestOrigin === "function") {
+      onRequestOrigin(target);
+      return;
+    }
+    Alert.alert(
+      "เปิดตัวเลือกจุดไม่ได้",
+      "หน้านี้ยังไม่พร้อมให้เลือกจุด — ลองกลับไปหน้าแชทแล้วเปิดใหม่"
+    );
+  };
 
   /** เปิด/ปิดแถวที่กำลังแก้ (พร้อมรายงานการแตะไว้วินิจฉัย) */
   const toggleRow = (key: string, label: string) => () => {
@@ -244,17 +297,28 @@ function TripDraftCardInner({
     setEditing((cur) => (cur === key ? null : key));
   };
 
-  const days7 = upcomingDays(14);
-  const fuelKey = slots.fuelType ?? (vehKey ? DEFAULT_FUEL_BY_VEHICLE[vehKey] : null);
+  /**
+   * ราคาน้ำมันที่ใช้แสดงผล
+   * - ค่าที่เพิ่งดึงมา (state) ชนะก่อน
+   * - ถ้ายังไม่มี → ใช้ cache ของ "วันนี้" (ข้ามวันแล้วถือว่าไม่มี)
+   * - ยังไม่มีและยังไม่ล้มเหลว → กำลังโหลด
+   */
+  const todayKey = tripTodayIso();
+  const cachedFuel = fuelCache?.day === todayKey ? fuelCache.snap : null;
+  const fuelPrice = fetchedFuel ?? cachedFuel;
+  const fuelLoading = usesFuel && !fuelPrice && !fuelFailed;
+
+  const fuelKey = slots.fuelType ?? null;
   const livePrice =
-    fuelPrice && fuelKey ? fuelPrice.prices?.[fuelKey] : undefined;
+    fuelPrice && fuelKey ? fuelPrice.prices[fuelKey] : undefined;
+  const isStale = fuelPrice?.isStale === true;
 
   return (
     <View className="mt-2 self-stretch bg-violet-50 border border-violet-200 rounded-2xl overflow-hidden">
       <View className="flex-row items-center px-3.5 py-2.5 bg-violet-100">
         <SparklesIcon size={15} color="#6D28D9" />
         <Text className="text-violet-900 text-[13px] font-black ml-1.5 flex-1">
-          ข้อมูลแผนทริปที่ต้องการ
+          ข้อมูลแผนทริปที่ต้องกร
         </Text>
         <Text className="text-violet-700 text-[12px] font-bold">
           {ready ? "ครบแล้ว ✓" : `ขาด ${missing.length} ช่อง`}
@@ -262,6 +326,13 @@ function TripDraftCardInner({
       </View>
 
       <View className="p-3">
+        {/* ══ กลุ่มที่ต้องกรอก ═════════════════════════════════════ */}
+        <SectionTitle
+          title="ข้อมูลที่ต้องกรอก"
+          hint="5 ช่องนี้พอวางแผนได้แล้ว"
+          tone="required"
+        />
+
         {/* ── จุดเริ่มต้น ───────────────────────────────────────── */}
         <EditableValueRow
           label="จุดเริ่มต้น"
@@ -280,7 +351,7 @@ function TripDraftCardInner({
           }
         >
           <TouchableOpacity
-            onPress={() => onRequestOrigin?.("start")}
+            onPress={() => requestOrigin("start")}
             onPressIn={() => onTapReport?.("เลือกจุดเริ่มต้น", "down")}
             activeOpacity={0.8}
             className="flex-row items-center bg-violet-50 border border-violet-200 rounded-xl px-3 py-2.5"
@@ -292,7 +363,7 @@ function TripDraftCardInner({
           </TouchableOpacity>
         </EditableValueRow>
 
-        {/* ── จุดสิ้นสุดตอนกลับ (แยกจากจุดเริ่มต้น) ─────────────── */}
+        {/* ── จุดสิ้นสุดตอนกลับ (ช่องติ๊ก: เหมือนจุดเริ่มต้นไหม) ──── */}
         <EditableValueRow
           label="จุดสิ้นสุดตอนกลับ"
           icon="🏁"
@@ -313,38 +384,155 @@ function TripDraftCardInner({
               : { text: "กลับจุดเดิม", tone: "gray" }
           }
         >
-          <View className="flex-row flex-wrap mb-2">
-            <Chip
-              label="กลับจุดเดิม"
-              active={returnMode === "same_as_start"}
-              onTapReport={onTapReport}
-              onPress={() =>
-                patch({ returnMode: "same_as_start", endPoint: null })
-              }
-            />
-            <Chip
-              label="กลับคนละจุดกับจุดเริ่ม"
-              active={returnMode === "custom"}
-              onTapReport={onTapReport}
-              onPress={() => patch({ returnMode: "custom" })}
-            />
-          </View>
+          <CheckBox
+            checked={returnMode === "same_as_start"}
+            onPress={() =>
+              patch(
+                returnMode === "same_as_start"
+                  ? { returnMode: "custom" }
+                  : { returnMode: "same_as_start", endPoint: null }
+              )
+            }
+            label="จุดสิ้นสุดคือที่เดียวกับจุดเริ่มต้น"
+          />
           {returnMode === "custom" ? (
             <TouchableOpacity
-              onPress={() => onRequestOrigin?.("end")}
+              onPress={() => requestOrigin("end")}
               onPressIn={() => onTapReport?.("เลือกจุดสิ้นสุดตอนกลับ", "down")}
               activeOpacity={0.8}
-              className="flex-row items-center bg-violet-50 border border-violet-200 rounded-xl px-3 py-2.5"
+              className="flex-row items-center bg-violet-50 border border-violet-200 rounded-xl px-3 py-2.5 mt-2"
             >
               <MapPinIcon size={16} color="#7C3AED" />
               <Text className="text-violet-800 text-[13px] font-bold ml-1.5">
                 เลือกจุดสิ้นสุดตอนกลับ
               </Text>
             </TouchableOpacity>
+          ) : (
+            <Text className="text-gray-500 text-[12px] mt-1.5">
+              กลับจุดเริ่มต้นเดิม — ไม่ต้องเลือกเพิ่ม
+            </Text>
+          )}
+        </EditableValueRow>
+
+        {/* ── วันเดินทาง (ช่วง) ────────────────────────────────── */}
+        <EditableValueRow
+          label="วันเดินทาง"
+          icon="📅"
+          tone="amber"
+          value={formatThaiDateRange(slots.startDate, slots.endDate)}
+          emptyHint="ยังไม่ได้เลือกวันที่"
+          editing={editing === "date"}
+          onToggle={toggleRow("date", "วันเดินทาง")}
+          badge={
+            slots.startDate && slots.endDate
+              ? { text: `${days} วัน`, tone: "green" }
+              : undefined
+          }
+        >
+          <TouchableOpacity
+            onPress={onRequestDateRange}
+            onPressIn={() => onTapReport?.("เลือกช่วงวันที่", "down")}
+            activeOpacity={0.8}
+            className="flex-row items-center bg-violet-50 border border-violet-200 rounded-xl px-3 py-2.5"
+          >
+            <CalendarDaysIcon size={16} color="#7C3AED" />
+            <Text className="text-violet-800 text-[13px] font-bold ml-1.5">
+              เลือกช่วงวันที่ (วันเริ่ม → วันสิ้นสุด)
+            </Text>
+          </TouchableOpacity>
+          <Text className="text-gray-500 text-[12px] mt-1.5">
+            เปิดปฏิทินครั้งเดียว กดวันเริ่มแล้วกดวันสิ้นสุด · ได้ไม่เกิน 7 วัน
+          </Text>
+        </EditableValueRow>
+
+        {/* ── เวลาออกเดินทาง ────────────────────────────────────── */}
+        <EditableValueRow
+          label="เวลาออกเดินทาง"
+          icon="⏰"
+          tone="amber"
+          value={slots.startTime ?? ""}
+          emptyHint="ยังไม่ได้เลือกเวลา"
+          editing={editing === "time"}
+          onToggle={toggleRow("time", "เวลาออกเดินทาง")}
+        >
+          <TouchableOpacity
+            onPress={onRequestTime}
+            onPressIn={() => onTapReport?.("เลือกเวลาออกเดินทาง", "down")}
+            activeOpacity={0.8}
+            className="flex-row items-center bg-violet-50 border border-violet-200 rounded-xl px-3 py-2.5"
+          >
+            <Text className="text-violet-800 text-[13px] font-bold">
+              เลือกเวลาออกเดินทาง
+            </Text>
+          </TouchableOpacity>
+        </EditableValueRow>
+
+        {/* ── ประเภทรถ (+ ชื่อ/รุ่นรถ) ───────────────────────────── */}
+        <EditableValueRow
+          label="ประเภทรถ"
+          icon="🚙"
+          tone="amber"
+          value={
+            vehicleClass
+              ? VEHICLE_CLASS_OPTIONS.find((o) => o.key === vehicleClass)?.label ??
+                ""
+              : ""
+          }
+          emptyHint="ยังไม่ได้เลือกรถ"
+          editing={editing === "vehicle"}
+          onToggle={toggleRow("vehicle", "ประเภทรถ")}
+          badge={
+            slots.vehicleModel?.trim()
+              ? { text: slots.vehicleModel.trim(), tone: "blue" }
+              : undefined
+          }
+        >
+          <View className="flex-row flex-wrap">
+            {VEHICLE_CLASS_OPTIONS.map((v) => (
+              <Chip
+                key={v.key}
+                label={v.label}
+                active={vehicleClass === v.key}
+                onTapReport={onTapReport}
+                onPress={() =>
+                  patch(
+                    v.key === "public"
+                      ? { vehicle: v.key, vehicleModel: null, fuelType: null }
+                      : { vehicle: v.key }
+                  )
+                }
+              />
+            ))}
+          </View>
+
+          {vehicleClass === "private_car" ? (
+            <View className="mt-1">
+              <Text className="text-[12.5px] font-bold text-gray-700 mb-1">
+                ชื่อ/รุ่นรถ
+              </Text>
+              <TextInput
+                value={slots.vehicleModel ?? ""}
+                onChangeText={(t) => patch({ vehicleModel: t })}
+                placeholder="เช่น Toyota Corolla Altis"
+                placeholderTextColor="#9CA3AF"
+                className="bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 text-[14px] text-gray-900"
+                accessibilityLabel="ชื่อหรือรุ่นรถ"
+              />
+              <Text className="text-gray-500 text-[12px] mt-1.5 leading-4">
+                เอไaiจะเป็นคนระบุว่ารถคันนี้ใช้น้ำมันอะไร และคิดราคาจากระยะทางในแผนจริง
+              </Text>
+            </View>
           ) : null}
         </EditableValueRow>
 
-        {/* ── จุดสิ้นสุดของแต่ละวัน (หลายวัน) ──────────────────── */}
+        {/* ══ กลุ่มข้อมูลเพิ่มเติม (ไม่บังคับ) ═════════════════════ */}
+        <SectionTitle
+          title="ข้อมูลเพิ่มเติม"
+          hint="ปล่อยว่างไว้ได้ เอไaiจะจัดให้"
+          tone="optional"
+        />
+
+        {/* ── จุดสิ้นสุดของแต่ละวัน ─────────────────────────────── */}
         {days > 1
           ? Array.from({ length: days - 1 }).map((_, i) => {
               const point = slots.dayEndPoints?.[i] ?? null;
@@ -353,27 +541,25 @@ function TripDraftCardInner({
                   key={`day-end-${i}`}
                   label={`จุดสิ้นสุดของวันที่ ${i + 1}`}
                   icon="🌙"
-                  tone="amber"
+                  tone="green"
                   value={point?.label ?? ""}
                   emptyHint="ยังไม่ได้เลือก — ปล่อยว่างไว้ได้ ระบบจะจัดให้"
                   editing={editing === `day-${i}`}
                   onToggle={toggleRow(`day-${i}`, `จุดสิ้นสุดของวันที่ ${i + 1}`)}
                   badge={
-                    point?.coords
-                      ? { text: "มีพิกัด", tone: "green" }
-                      : undefined
+                    point?.coords ? { text: "มีพิกัด", tone: "green" } : undefined
                   }
                 >
                   <TouchableOpacity
-                    onPress={() => onRequestOrigin?.({ day: i })}
+                    onPress={() => requestOrigin({ day: i })}
                     onPressIn={() =>
                       onTapReport?.(`เลือกจุดจบของวันที่ ${i + 1}`, "down")
                     }
                     activeOpacity={0.8}
-                    className="flex-row items-center bg-violet-50 border border-violet-200 rounded-xl px-3 py-2.5"
+                    className="flex-row items-center bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2.5"
                   >
-                    <MapPinIcon size={16} color="#7C3AED" />
-                    <Text className="text-violet-800 text-[13px] font-bold ml-1.5">
+                    <MapPinIcon size={16} color="#2D6A4F" />
+                    <Text className="text-emerald-800 text-[13px] font-bold ml-1.5">
                       เลือกจุดจบของวันที่ {i + 1}
                     </Text>
                   </TouchableOpacity>
@@ -382,175 +568,80 @@ function TripDraftCardInner({
             })
           : null}
 
-        {/* ── วันที่ ────────────────────────────────────────────── */}
-        <EditableValueRow
-          label="วันที่"
-          icon="📅"
-          tone="amber"
-          value={slots.date ? formatDate(slots.date) : ""}
-          emptyHint="ยังไม่ได้เลือกวันที่"
-          editing={editing === "date"}
-          onToggle={toggleRow("date", "วันที่")}
-        >
-          <View className="flex-row flex-wrap">
-            {days7.map((d) => (
-              <Chip
-                key={d.iso}
-                label={`${d.dow} ${d.day} ${d.label}`}
-                active={slots.date === d.iso}
-                onTapReport={onTapReport}
-                onPress={() => patch({ date: d.iso })}
-              />
-            ))}
-          </View>
-        </EditableValueRow>
-
-        {/* ── เวลาเริ่มต้น ─────────────────────────────────────── */}
-        <EditableValueRow
-          label="เวลาเริ่มต้น"
-          icon="⏰"
-          tone="amber"
-          value={slots.startTime ?? ""}
-          emptyHint="ยังไม่ได้เลือกเวลา"
-          editing={editing === "time"}
-          onToggle={toggleRow("time", "เวลาเริ่มต้น")}
-        >
-          <View className="flex-row flex-wrap">
-            {START_TIMES.map((t) => (
-              <Chip
-                key={t}
-                label={t}
-                active={slots.startTime === t}
-                onTapReport={onTapReport}
-                onPress={() => patch({ startTime: t })}
-              />
-            ))}
-          </View>
-        </EditableValueRow>
-
-        {/* ── จำนวนวัน ─────────────────────────────────────────── */}
-        <EditableValueRow
-          label="จำนวนวัน"
-          icon="📆"
-          tone="amber"
-          value={slots.days ? `${slots.days} วัน` : ""}
-          emptyHint="ยังไม่ได้เลือก"
-          editing={editing === "days"}
-          onToggle={toggleRow("days", "จำนวนวัน")}
-        >
-          <View className="flex-row flex-wrap">
-            {[1, 2, 3, 4, 5].map((n) => (
-              <Chip
-                key={n}
-                label={`${n} วัน`}
-                sub={n > 1 ? `ค้างคืน ${n - 1}` : "ไป-กลับ"}
-                active={slots.days === n}
-                onTapReport={onTapReport}
-                onPress={() =>
-                  patch({
-                    days: n,
-                    dayEndPoints:
-                      n <= 1 ? null : (slots.dayEndPoints ?? []).slice(0, n - 1),
-                  })
-                }
-              />
-            ))}
-          </View>
-        </EditableValueRow>
-
-        {/* ── รถที่ใช้ ─────────────────────────────────────────── */}
-        <EditableValueRow
-          label="รถที่ใช้"
-          icon="🚙"
-          tone="amber"
-          value={vehicleLabel(slots.vehicle)}
-          emptyHint="ยังไม่ได้เลือกรถ"
-          editing={editing === "vehicle"}
-          onToggle={toggleRow("vehicle", "รถที่ใช้")}
-        >
-          <View className="flex-row flex-wrap">
-            {VEHICLE_OPTIONS.map((v) => (
-              <Chip
-                key={v.key}
-                label={v.label}
-                active={vehKey === v.key}
-                onTapReport={onTapReport}
-                onPress={() => {
-                  const nextFuel = DEFAULT_FUEL_BY_VEHICLE[v.key] || null;
-                  patch({
-                    vehicle: v.key,
-                    fuelType: nextFuel,
-                  });
-                }}
-              />
-            ))}
-          </View>
-        </EditableValueRow>
-
-        {/* ── ชนิดน้ำมัน (+ ราคาสด) ────────────────────────────── */}
+        {/* ── ชนิดน้ำมัน (ผลจากเอไai — ไม่ใช่ช่องกรอก) ──────────── */}
         {usesFuel ? (
-          <EditableValueRow
-            label="ชนิดน้ำมัน"
-            icon="⛽"
-            tone="amber"
-            value={fuelLabel(fuelKey)}
-            emptyHint="ยังไม่ได้เลือก"
-            editing={editing === "fuel"}
-            onToggle={toggleRow("fuel", "ชนิดน้ำมัน")}
-            badge={
-              livePrice != null
-                ? {
-                    text: `${formatPrice(livePrice)} ฿/ลิตร`,
-                    tone: fuelPrice?.isEstimate ? "amber" : "green",
-                  }
-                : undefined
-            }
-          >
-            <View className="flex-row flex-wrap mb-2">
-              {FUEL_TYPE_OPTIONS.filter((f) => f.key !== "electric").map((f) => (
-                <Chip
-                  key={f.key}
-                  label={f.label}
-                  sub={
-                    fuelPrice?.prices?.[f.key] != null
-                      ? `${formatPrice(fuelPrice.prices[f.key])} ฿`
-                      : undefined
-                  }
-                  active={fuelKey === f.key}
-                  onTapReport={onTapReport}
-                  onPress={() => patch({ fuelType: f.key })}
-                />
-              ))}
+          <View className="bg-white border border-emerald-200 rounded-2xl p-3.5 mb-3">
+            <View className="flex-row items-center flex-1 mr-2 flex-wrap">
+              <Text className="text-[15px] mr-1.5">⛽</Text>
+              <Text className="text-[14px] font-bold text-[#1B4332]">
+                ชนิดน้ำมัน
+              </Text>
+              {livePrice != null ? (
+                <View
+                  className={`ml-2 px-2 py-0.5 rounded-full border ${
+                    isStale
+                      ? "bg-amber-100 text-amber-800 border-amber-200"
+                      : "bg-emerald-100 text-emerald-800 border-emerald-200"
+                  }`}
+                >
+                  <Text className="text-[10px] font-bold">
+                    {formatPrice(livePrice)} ฿/ลิตร
+                    {isStale ? " · ข้อมูลเก่า" : ""}
+                  </Text>
+                </View>
+              ) : null}
             </View>
-            {fuelLoading ? (
-              <View className="flex-row items-center">
-                <ActivityIndicator size="small" color="#7C3AED" />
-                <Text className="text-gray-500 text-[12px] ml-1.5">
-                  กำลังดึงราคาน้ำมันล่าสุด...
+
+            <Text
+              className={`text-[15px] font-bold mt-0.5 ${
+                fuelKey ? "text-gray-900" : "text-gray-400"
+              }`}
+            >
+              {fuelKey
+                ? fuelLabel(fuelKey)
+                : slots.vehicleModel?.trim()
+                ? "รอให้เอไaiระบุ (พิมพ์ชื่อรถแล้วคุยกับเอไai)"
+                : "เอไaiจะระบุให้จากชื่อ/รุ่นรถ"}
+            </Text>
+
+            <View className="mt-1.5">
+              {fuelLoading ? (
+                <View className="flex-row items-center">
+                  <ActivityIndicator size="small" color="#7C3AED" />
+                  <Text className="text-gray-500 text-[12px] ml-1.5">
+                    กำลังดึงราคาน้ำมันล่าสุด...
+                  </Text>
+                </View>
+              ) : fuelPrice ? (
+                <Text className="text-gray-500 text-[12px] leading-5">
+                  {isStale
+                    ? fuelPrice.staleNotice ||
+                      `ราคานี้เป็นข้อมูลวันที่ ${
+                        fuelPrice.cacheDate ?? "ก่อนหน้า"
+                      } — ดึงราคาวันนี้ไม่สำเร็จ`
+                    : `ราคาวันนี้จาก ${fuelPrice.source}`}
+                  {fuelPrice.effectiveDate
+                    ? ` · มีผล ${fuelPrice.effectiveDate}`
+                    : ""}
+                  {fuelPrice.isEstimate ? " · ประมาณการ (ดึงเว็บไม่สำเร็จ)" : ""}
+                  {"\n"}ตัวเลขนี้จะถูกใช้คิดค่าน้ำมันในแผนตามระยะทางจริง — แก้เองได้หลังสร้างแพลน
                 </Text>
-              </View>
-            ) : fuelPrice ? (
-              <Text className="text-gray-500 text-[12px] leading-5">
-                ราคาวันนี้จาก {fuelPrice.source}
-                {fuelPrice.effectiveDate ? ` · มีผล ${fuelPrice.effectiveDate}` : ""}
-                {fuelPrice.isEstimate ? " · ประมาณการ (ดึงเว็บไม่สำเร็จ)" : ""}
-                {"\n"}ตัวเลขนี้จะถูกใช้คิดค่าน้ำมันในแผน — แก้เองได้หลังสร้างแพลน
-              </Text>
-            ) : (
-              <Text className="text-gray-500 text-[12px]">
-                ดึงราคาน้ำมันไม่สำเร็จ — ระบบจะใช้ค่าสำรองและติดป้าย "ประมาณการ"
-              </Text>
-            )}
-          </EditableValueRow>
+              ) : (
+                <Text className="text-gray-500 text-[12px]">
+                  ดึงราคาน้ำมันไม่สำเร็จ — ระบบจะใช้ค่าสำรองและติดป้าย "ประมาณการ"
+                </Text>
+              )}
+            </View>
+          </View>
         ) : null}
 
         {/* ── จำนวนผู้เดินทาง ─────────────────────────────────── */}
         <EditableValueRow
           label="จำนวนผู้เดินทาง"
           icon="👥"
-          tone="amber"
-          value={slots.travelers ? `${slots.travelers} คน` : ""}
-          emptyHint="ยังไม่ได้ระบุ"
+          tone="green"
+          value={slots.travelers ? `${slots.travelers} คน` : "1 คน (ค่าเริ่มต้น)"}
+          emptyHint="1 คน (ค่าเริ่มต้น)"
           editing={editing === "travelers"}
           onToggle={toggleRow("travelers", "จำนวนผู้เดินทาง")}
         >
@@ -571,13 +662,13 @@ function TripDraftCardInner({
         <EditableValueRow
           label="งบต่อคน"
           icon="💰"
-          tone="amber"
+          tone="green"
           value={
             slots.budgetPerPerson
               ? `${slots.budgetPerPerson.toLocaleString("th-TH")} บาท`
-              : ""
+              : "ใช้ค่าเริ่มต้น 3,000 บาท"
           }
-          emptyHint="ยังไม่ได้ระบุ"
+          emptyHint="ใช้ค่าเริ่มต้น 3,000 บาท"
           editing={editing === "budget"}
           onToggle={toggleRow("budget", "งบต่อคน")}
         >
@@ -594,13 +685,13 @@ function TripDraftCardInner({
           </View>
         </EditableValueRow>
 
-        {/* ── สรุปว่าขาดอะไร ───────────────────────────────────── */}
+        {/* ── สรุปว่าต้องเพิ่ม/แก้อะไร ───────────────────────────── */}
         {!ready ? (
           <View className="bg-amber-50 border border-amber-200 rounded-2xl px-3 py-2.5 mb-3">
             <View className="flex-row items-center">
               <ExclamationTriangleIcon size={14} color="#B45309" />
               <Text className="text-amber-800 text-[12.5px] font-bold ml-1.5">
-                ยังขาด: {missing.join(" · ")}
+                ต้องเพิ่ม/แก้: {missing.join(" · ")}
               </Text>
             </View>
           </View>
@@ -650,7 +741,7 @@ function TripDraftCardInner({
 /**
  * ด่านกัน error ตอน render การ์ด
  * ======================================================================
- * ถ้ามีอะไรพังในตัวการ์ด (ค่าที่ไม่คาดคิดจาก backend ฯลฯ) ให้โชว์ข้อความแทน
+ * ถ้ามีอะไรพังในตัวการ์ด (ค่าที่ไม่คาดคิดจาก backend ฯลฯ) ให้แสดงข้อความแทน
  * ที่จะทำให้ **ทั้งแอปหลุด** (JS error ที่ไม่มีใครจับ → iOS ปิดแอปทันที)
  */
 class TripDraftCardBoundary extends React.Component<

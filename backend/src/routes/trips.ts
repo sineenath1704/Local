@@ -602,6 +602,46 @@ export function normalizeFuelType(raw: any): FuelType | null {
 }
 
 /**
+ * เดาชนิดน้ำมันจากชื่อ/รุ่นรถที่ผู้ใช้พิมพ์
+ * -------------------------------------------------------------
+ * ผู้ใช้กรอกชื่อรถเอง (เช่น "Isuzu D-Max", "Toyota Corolla Altis")
+ * แล้วให้เอไaiเป็นคนระบุชนิดน้ำมัน · แต่ถ้าผู้ใช้กดสร้างแพลนเลย
+ * โดยยังไม่ได้คุยกับเอไai → ต้องมีค่าเริ่มต้นที่ใกล้เคียงที่สุด
+ *
+ * เป็นแค่ "ค่าเริ่มต้น" — ค่าที่เอไaiระบุมาจะชนะเสมอ
+ * (ลำดับ: fuelType จาก body → เดาจากชื่อรถ → ค่าเริ่มต้นของโปรไฟล์รถ)
+ */
+export function inferFuelTypeFromVehicleModel(raw: any): FuelType | null {
+  const s = String(raw ?? "")
+    .toLowerCase()
+    .trim();
+  if (!s) return null;
+
+  // ไฮบริด → ใช้น้ำมันเบนซินเหมือนกัน (เช็นก่อนรถไฟฟ้า เพราะบางรุ่นเป็นทั้งคู่)
+  if (/hybrid/.test(s)) return "gasohol95";
+
+  // รถไฟฟ้า
+  if (
+    /ไฟฟ้า|electric|\bev\b|\bev\d|\bbyd\b|\batto\b|\bioniq\b|\bdolphin\b|\bseagull\b|\bneta\b|\bmg4\b|\bora\b|\bbz\d/.test(
+      s
+    )
+  ) {
+    return "electric";
+  }
+  // ดีเซล
+  if (/ดีเซล|เดเซล|diesel|\bd-?max\b|\bdmax\b|\bxenon\b|\bfortuner\b|\bhino\b/.test(s)) {
+    return "dieselB20";
+  }
+  // แก๊สโซฮอล์ E20
+  if (/\be-?20\b/.test(s)) return "gasoholE20";
+  // แก๊สโซฮอล์ 91
+  if (/แก๊สโซฮอล์\s*91|gasohol\s*91|\b91\b/.test(s)) return "gasohol91";
+  // เบนซิน / พรีเมียม
+  if (/เบนซิน|gasoline|premium/.test(s)) return "gasoline95";
+  return null;
+}
+
+/**
  * จับคู่ชื่อที่ AI เขียนมากับจุดจริง
  * -------------------------------------------------------------
  * คืน null = ชื่อที่แต่งขึ้น (ไม่มีในโฟลเดอร์/ไม่มีในจุดที่ผู้ใช้เพิ่ม) → ต้องตัดทิ้ง
@@ -933,7 +973,16 @@ router.post("/plan", async (req: Request, res: Response) => {
     ? startTimeStr.padStart(5, "0")
     : "08:00";
   const vehicle = getVehicle(String(b.vehicle ?? ""));
-  const fuelType = normalizeFuelType(b.fuelType) ?? vehicle.defaultFuelType;
+  // ชื่อ/รุ่นรถที่ผู้ใช้กรอก (เช่น "Isuzu D-Max") — ใช้เป็นตัวช่วยเดาชนิดน้ำมัน
+  const vehicleModelRaw = String(b.vehicleModel ?? "").trim().slice(0, 80);
+  const vehicleModel = vehicleModelRaw || null;
+  // ลำดับชนิดน้ำมัน: ที่เอไai/ผู้ใช้ระบุไว้ → เดาจากชื่อรถ → ค่าเริ่มต้นของโปรไฟล์รถ
+  const fuelType =
+    normalizeFuelType(b.fuelType) ??
+    inferFuelTypeFromVehicleModel(vehicleModel) ??
+    vehicle.defaultFuelType;
+  // รถสาธารณะ = ไม่มีค่าน้ำมันในแผน
+  const finalFuelType = vehicle.key === "public" ? null : fuelType;
   const travelers = Math.max(1, Math.round(Number(b.travelers) || 1));
   const budgetPerPerson =
     Number(b.budgetPerPerson) > 0 ? Number(b.budgetPerPerson) : 3000;
@@ -1045,8 +1094,8 @@ router.post("/plan", async (req: Request, res: Response) => {
 
   // ── ราคาน้ำมันสด (ต้องมีเสมอ ห้ามให้โมเดลเดา) ─────────────────────
   const fuelTable = await fetchFuelPrices();
-  const resolvedFuel = fuelType
-    ? resolveFuelPrice(fuelTable, fuelType, fuelPriceOverride)
+  const resolvedFuel = finalFuelType
+    ? resolveFuelPrice(fuelTable, finalFuelType, fuelPriceOverride)
     : null;
 
   // ── ให้ AI เลือกจุด + จัดวัน ───────────────────────────────────────
@@ -1058,7 +1107,7 @@ router.post("/plan", async (req: Request, res: Response) => {
     budgetPerPerson,
     style,
     travelers,
-    transportMode: "private_car",
+    transportMode: vehicle.key === "public" ? "public_transport" : "private_car",
     endPoint: endPoint.label,
     departDate: date ?? undefined,
     sourceFolderId: folderId ?? undefined,
@@ -1080,9 +1129,9 @@ router.post("/plan", async (req: Request, res: Response) => {
       userAdded: c.userAdded ?? false,
     })),
   };
-  if (fuelType && resolvedFuel) {
+  if (finalFuelType && resolvedFuel) {
     tripReq.fuel = {
-      fuelType,
+      fuelType: finalFuelType,
       pricePerLitre: resolvedFuel.pricePerLitre ?? undefined,
       kmPerLitre: vehicle.kmPerLitre ?? undefined,
       source: resolvedFuel.sourceLabel,
@@ -1208,7 +1257,8 @@ router.post("/plan", async (req: Request, res: Response) => {
       returnMode,
       dayEndPoints,
       vehicle,
-      fuelType,
+      vehicleModel,
+      fuelType: finalFuelType,
       fuelPriceOverride,
       travelers,
       budgetPerPerson,
@@ -1440,6 +1490,11 @@ router.get("/fuel-price", async (_req: Request, res: Response) => {
     origin: table.origin,
     isEstimate: table.isEstimate,
     url: table.url,
+    // ข้อมูล cache รายวัน (เวลาไทย) — แอปใช้ติดป้ายว่าเป็น "ข้อมูลเก่า" หรือไม่
+    cacheDate: table.cacheDate ?? null,
+    isStale: table.isStale === true,
+    staleNotice: table.staleNotice ?? null,
+    bangkokDate: table.bangkokDate ?? null,
   });
 });
 

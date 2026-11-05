@@ -1,6 +1,12 @@
 import { API_TIMEOUT_MS } from "./apiConfig";
 import { aiFetch, AiError, AiFetchOptions, toastAiError } from "./aiHttp";
-import type { PlaceChoice, ClipContext, TripDraft, TripSlots } from "../data/tripsData";
+import type {
+  PlaceChoice,
+  ClipContext,
+  TripDraft,
+  TripSlotsWire,
+} from "../data/tripsData";
+import { slotsFromWire } from "../data/tripsData";
 
 export interface ChatTurn {
   role: "user" | "assistant";
@@ -34,7 +40,7 @@ function parseTripDraft(raw: unknown): TripDraft | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const d = raw as Record<string, unknown>;
   if (!d.slots || typeof d.slots !== "object") return undefined;
-  const slots = d.slots as TripSlots;
+  const slots = slotsFromWire(d.slots as TripSlotsWire);
   const missing = Array.isArray(d.missing)
     ? d.missing.filter((m): m is string => typeof m === "string")
     : [];
@@ -128,8 +134,11 @@ export interface SendChatOptions {
   /**
    * ช่องข้อมูลแผนทริปที่ผู้ใช้ให้ไว้แล้ว (สะสม) → backend merge กับค่าที่โมเดลสกัดใหม่
    * ค่าที่โมเดลไม่รู้ (null) จะไม่ทับค่านี้
+   *
+   * รูปแบบที่ส่ง = ขาเข้า/ขาออกของ backend (`date` + `days`) → แปลงจาก
+   * ช่วงวันที่ของแอปด้วย `slotsToWire` ก่อนส่ง
    */
-  tripDraft?: TripSlots | null;
+  tripDraft?: TripSlotsWire | null;
   /**
    * แผนทริปที่กำลังจะให้เอไaiแก้ไข (จาก ItineraryViewer) → แทรกเป็นบล็อกข้อมูล
    * ใน system prompt เพื่อให้เอไaiรู้ว่าแก้อะไรจากแผนเดิม

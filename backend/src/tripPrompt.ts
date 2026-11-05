@@ -195,6 +195,8 @@ TRIP_DRAFT:{"startPoint":null,"returnMode":null,"endPoint":null,"date":null,"sta
 - budgetPerPerson = งบต่อคน (บาท) · style = คำอธิบายสั้น ๆ เป็นภาษาไทย
 - vehicle = "private_car" | "diesel_car" | "pickup" | "van" | "motorbike" | "ev" | "public"
 - fuelType = "gasohol95" | "gasohol91" | "gasoholE20" | "dieselB20" | "diesel" | "premiumDiesel" | "gsh95" | "x99" | "gasoline95" | "electric"
+- ถ้ามี "รุ่นรถ" (เช่น Toyota Corolla Altis) ให้ระบุ fuelType ที่รถคันนั้นใช้จริง (เช่น แก๊สโซฮอล์ 95 / ดีเซล B20) ถ้าไม่แน่ใจให้เป็น null
+- ถ้าผู้ใช้เลือกรถสาธารณะ ให้ fuelType เป็น null (ไม่ใช้น้ำมัน)
 - ถ้าผู้ใช้ถามเรื่องทั่วไป (ราคา เวลาเปิด ที่อยู่) โดยไม่ได้วางแผนทริป ให้ไม่ต้องใส่บรรทัด TRIP_DRAFT
 - ถ้าผู้ใช้กำลังแก้แผนเดิม ให้ใส่ค่าที่แก้แล้วทั้งหมดใน TRIP_DRAFT`;
 
@@ -708,6 +710,11 @@ export interface TripSlots {
   startTime?: string | null;
   days?: number | null;
   vehicle?: string | null;
+  /**
+   * ชื่อ/รุ่นรถที่ผู้ใช้พิมพ์เอง (เช่น "Toyota Corolla Altis")
+   * → ให้โมเดลเป็นคนระบุ `fuelType` ที่รถคันนี้ใช้จริง
+   */
+  vehicleModel?: string | null;
   fuelType?: string | null;
   travelers?: number | null;
   budgetPerPerson?: number | null;
@@ -734,6 +741,7 @@ export const TRIP_DRAFT_SLOT_KEYS = [
   "startTime",
   "days",
   "vehicle",
+  "vehicleModel",
   "fuelType",
   "travelers",
   "budgetPerPerson",
@@ -811,6 +819,9 @@ export function normalizeTripSlots(raw: unknown): TripSlots {
 
   const vehicle = planText(String(r.vehicle ?? ""), 40);
   if (vehicle) out.vehicle = vehicle;
+
+  const vehicleModel = planText(String(r.vehicleModel ?? ""), 80);
+  if (vehicleModel) out.vehicleModel = vehicleModel;
 
   const fuelType = planText(String(r.fuelType ?? ""), 40);
   if (fuelType) out.fuelType = fuelType;
@@ -1048,6 +1059,7 @@ export function buildTripDraftBlock(slots?: TripSlots | null): string {
   if (slots.startTime) lines.push(`เวลาเริ่มต้น: ${slots.startTime}`);
   if (slots.days) lines.push(`จำนวนวัน: ${slots.days}`);
   if (slots.vehicle) lines.push(`รถที่ใช้: ${slots.vehicle}`);
+  if (slots.vehicleModel) lines.push(`รุ่นรถ: ${slots.vehicleModel}`);
   if (slots.fuelType) lines.push(`ชนิดน้ำมัน: ${slots.fuelType}`);
   if (slots.travelers) lines.push(`จำนวนผู้เดินทาง: ${slots.travelers}`);
   if (slots.budgetPerPerson) lines.push(`งบต่อคน: ${slots.budgetPerPerson} บาท`);

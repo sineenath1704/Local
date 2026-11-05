@@ -62,6 +62,8 @@ import {
   TripSlots,
   computeTripMissing,
   isTripPlanReady,
+  normalizeTripSlotsShape,
+  slotsToWire,
 } from "../../data/tripsData";
 import type { VideoPost } from "../../data/homeFeedData";
 import OriginSelectorModal from "../../components/OriginSelectorModal";
@@ -71,6 +73,8 @@ import TripDraftCard, {
   TapReport,
   renderCounter,
 } from "../../components/TripDraftCard";
+import TripDateRangeSheet from "../../components/TripDateRangeSheet";
+import TripTimeSheet from "../../components/TripTimeSheet";
 import TripPlanCard from "../../components/TripPlanCard";
 import { parseGoogleMapsUrl } from "../../services/savedPlacesService";
 import { resolvePlaceCoords } from "../../services/placesService";
@@ -137,8 +141,13 @@ function slotsFromTripContext(raw: unknown): TripSlots {
   if (!raw || typeof raw !== "object") return {};
   const t = raw as Record<string, any>;
   const itinerary: any[] = Array.isArray(t.itinerary) ? t.itinerary : [];
-  const first = itinerary[0] ?? {};
   const vehicle = t.vehicle ?? null;
+  // วันที่ของแต่ละวันในแผน → ช่วงวันที่ของทริป (วันเริ่ม … วันสิ้นสุด)
+  const dayDates = itinerary
+    .map((d: any) => (typeof d?.date === "string" ? d.date : null))
+    .filter((d: string | null): d is string => !!d);
+  const startDate = dayDates[0] ?? null;
+  const endDate = dayDates.length ? dayDates[dayDates.length - 1] : startDate;
   return {
     startPoint: t.startPoint
       ? {
@@ -156,10 +165,11 @@ function slotsFromTripContext(raw: unknown): TripSlots {
             coords: t.endPointCoords ?? null,
           }
         : null,
-    date: first.date ?? null,
+    startDate,
+    endDate,
     startTime: t.startTime ?? "08:00",
-    days: Number(t.days) || itinerary.length || 1,
     vehicle: vehicle?.key ?? null,
+    vehicleModel: vehicle?.model ?? null,
     fuelType: vehicle?.fuelType ?? null,
     travelers: Number(t.travelers) || 1,
     budgetPerPerson: Number(t.budgetPerPerson) || 3000,
@@ -197,7 +207,32 @@ interface DiagSnapshot {
   press: number;
   last: string;
   at: number;
+  /** เวลาที่เอไaiใช้ตอบรอบล่าสุด (ms) */
+  replyMs?: number;
+  /** จำนวนครั้งที่ผู้ใช้ "กด" หลังเอไaiตอบกลับมาแล้ว */
+  pressAfter?: number;
 }
+
+/**
+ * ตัวจับเวลาฝั่งแอป (ระดับโมดูล) — ใช้พิสูจน์ว่า "แอปค้างตอนเอไaiตอบกลับมาพอดี" หรือไม่
+ * ------------------------------------------------------------------
+ * ทฤษฎี: ผู้ใช้กดกรอกการ์ด → ส่งข้อความไป → ระหว่างรอคำตอบ ผู้ใช้กดชิปไปเรื่อยๆ
+ *        → พอเอไaiตอบกลับมา (คำตอบใหม่เข้าลิสต์) = จุดที่การ์ดถูกย้าย/ถูกทับ
+ *        → ปุ่มใต้นิ้วหาย → "ค้าง"
+ * ตัวเลขที่ต้องดู: replyMs (เอไaiตอบช้าแค่ไหน) + pressAfter (กดไปกี่ครั้งก่อนตอบมา)
+ */
+const aiDiag = {
+  /** เวลาที่ส่งข้อความรอบล่าสุด (epoch ms) */
+  sentAt: 0,
+  /** เวลาที่เอไaiตอบกลับมา (epoch ms) */
+  repliedAt: 0,
+  /** ระยะเวลาที่เอไaiใช้ตอบรอบล่าสุด (ms) */
+  lastReplyMs: 0,
+  /** จำนวนครั้งที่ผู้ใช้ "กด" บนการ์ด (นับตั้งแต่แอปเปิด) */
+  pressCount: 0,
+  /** จำนวน "กด" ตอนที่เอไaiเพิ่งตอบกลับมา (ใช้คำนวณว่ากดไปกี่ครั้งก่อนตอบ) */
+  pressAtReply: -1,
+};
 
 async function loadDiagSnapshot(): Promise<DiagSnapshot | null> {
   try {
@@ -230,6 +265,8 @@ function TapDiagStrip({
   const prevCountRef = useRef({ chat: 0, card: 0 });
   /** ตัวเลขของ "รอบก่อน" (ถ้าแอปเพิ่งตายมา แอปใหม่จะเห็นตรงนี้) */
   const [prevRun, setPrevRun] = useState<DiagSnapshot | null>(null);
+  /** เวลาที่เอไaiใช้ตอบ + จำนวนครั้งที่กดหลังตอบกลับมา */
+  const [timing, setTiming] = useState({ replyMs: 0, pressAfter: -1 });
   /** เวลาที่หน้าจอนี้เปิด (ใช้แยกว่าตัวเลขที่อ่านมาเป็นของ "รอบก่อน" จริงไหม) */
   const mountedAtRef = useRef<number | null>(null);
   useEffect(() => {
@@ -273,6 +310,9 @@ function TapDiagStrip({
         chat: Math.max(0, (now.chat - prev.chat) * 2),
         card: Math.max(0, (now.card - prev.card) * 2),
       });
+      // เวลาที่เอไaiตอบ + กดไปกี่ครั้งก่อนคำตอบจะมา
+      const pressAfter = aiDiag.pressAtReply >= 0 ? aiDiag.pressCount - aiDiag.pressAtReply : -1;
+      setTiming({ replyMs: aiDiag.lastReplyMs, pressAfter });
       // บันทึกไว้บนเครื่อง → ถ้าแอปตายจะได้ตัวเลขของรอบนั้นมาดู
       void saveDiagSnapshot({
         ...now,
@@ -280,6 +320,8 @@ function TapDiagStrip({
         press: diagRef.current.press,
         last: diagRef.current.last,
         at: Date.now(),
+        replyMs: aiDiag.lastReplyMs,
+        pressAfter,
       });
     }, 500);
     return () => clearInterval(t);
@@ -305,10 +347,20 @@ function TapDiagStrip({
           {diag.last ? ` · "${diag.last}"` : ""}
         </Text>
       </View>
+      {timing.replyMs > 0 ? (
+        <Text className="text-amber-800 text-[10.5px] font-bold" numberOfLines={1}>
+          ตอบกลับ: {(timing.replyMs / 1000).toFixed(1)} วิ · กดหลังตอบ:{" "}
+          {timing.pressAfter < 0 ? "-" : timing.pressAfter}
+        </Text>
+      ) : null}
       {prevRun ? (
         <Text className="text-amber-800 text-[10.5px] font-bold" numberOfLines={1}>
           รอบก่อน: เรนเดอร์ {prevRun.chat}/{prevRun.card} · กด {prevRun.press}
           {prevRun.last ? ` · "${prevRun.last}"` : ""}
+          {prevRun.replyMs ? ` · ตอบกลับ ${(prevRun.replyMs / 1000).toFixed(1)} วิ` : ""}
+          {prevRun.pressAfter != null && prevRun.pressAfter >= 0
+            ? ` · กดหลังตอบ ${prevRun.pressAfter}`
+            : ""}
         </Text>
       ) : null}
     </View>
@@ -364,9 +416,10 @@ export default function AiChatScreen({
     const fromPlan = slotsFromTripContext(initialPlanContext);
     if (Object.keys(fromPlan).length > 0) return fromPlan;
     // ถ้าเปิดแชทเดิมที่เคยคุยเรื่องแผนทริปไว้ → ดึงช่องข้อมูลเดิมกลับมา
+    // (แชทเก่าที่ยังใช้ `date`/`days` → แปลงเป็น `startDate`/`endDate` ให้อัตโนมัติ)
     const t = getThread(threadId);
     const last = [...(t?.messages ?? [])].reverse().find((m) => m.tripDraft);
-    return last?.tripDraft?.slots ?? {};
+    return normalizeTripSlotsShape(last?.tripDraft?.slots);
   });
   /**
    * ค่าช่องข้อมูล "ล่าสุด" เก็บไว้ใน ref (ไม่ใช่แค่ค่าใน state)
@@ -392,6 +445,21 @@ export default function AiChatScreen({
   const [cardOriginTarget, setCardOriginTarget] = useState<TripOriginTarget | null>(
     null
   );
+  /**
+   * sheet ที่กำลังเปิดจากการ์ด (ปฏิทินช่วงวันที่ · ล้อเวลา)
+   * → อยู่ที่ระดับหน้าจอ ไม่ใช่ในแถวของลิสต์ (Modal ในแถวที่ recycle ทิ้งจะกลืนการแตะ)
+   */
+  const [cardPicker, setCardPicker] = useState<"date" | "time" | null>(null);
+  /**
+   * ลำดับการเปิด sheet — ใช้เป็น `key` ให้ sheet mount ใหม่ทุกครั้งที่เปิด
+   * → ค่าเริ่มต้นใน sheet อ่านจาก props ล่าสุดเสมอ (ไม่ต้องมี effect ซิงก์ค่า)
+   */
+  const [cardPickerSeq, setCardPickerSeq] = useState(0);
+  /** เปิด sheet จากการ์ด (ปฏิทินช่วงวันที่ · ล้อเวลา) */
+  const openCardPicker = (kind: "date" | "time") => {
+    setCardPickerSeq((n) => n + 1);
+    setCardPicker(kind);
+  };
   /** กำลังคำนวณแผนใหม่ (ลบ/สลับลำดับ/เปลี่ยนราคาน้ำมัน) — key = id ข้อความ */
   const [replanning, setReplanning] = useState<string | null>(null);
   /** ราคาน้ำมันที่ผู้ใช้ระบุเอง — key = id ข้อความ */
@@ -427,6 +495,8 @@ export default function AiChatScreen({
     tapReporterRef.current = fn;
   }, []);
   const reportTap = useCallback((label: string, phase: "down" | "press") => {
+    // นับจำนวนครั้งที่ผู้ใช้ "กด" บนการ์ด (ใช้เทียบกับเวลาที่เอไaiตอบกลับมา)
+    if (phase === "press") aiDiag.pressCount += 1;
     tapReporterRef.current?.(label, phase);
   }, []);
 
@@ -601,6 +671,8 @@ export default function AiChatScreen({
    * · จุดที่มีพิกัดอยู่แล้ว จะไม่ถูกจุดที่ไม่มีพิกัดทับ (ดู `mergePoint`)
    * · `dayEndPoints` เก็บฝั่งแอปเท่านั้น (backend ไม่รู้จัก) → ต้องคงเดิม
    * · ถ้ากลับไป "กลับจุดเดิม" → ล้างจุดสิ้นสุดที่เคยเลือกทิ้ง
+   * · **ช่วงวันที่ที่ผู้ใช้เลือกเอง = ชนะเสมอ** (โมเดลเสนอได้แค่ตอนที่ยังไม่มี)
+   *   → กันกรณีผู้ใช้เลือก 3 วันแล้วโมเดลตอบ `days: 2` แล้วแผนได้ 2 วัน
    *
    * `base` = ค่าที่ส่งไปรอบนี้ → ใช้บอกว่าผู้ใช้เพิ่งแก้ช่องไหนไปหลังส่ง
    *   ถ้าผู้ใช้แก้แล้ว → **ค่าของผู้ใช้ชนะ** (เอไaiไม่รู้ค่าที่เพิ่งแตะ)
@@ -622,12 +694,30 @@ export default function AiChatScreen({
     }
     const end = mergePoint(current.endPoint, incoming.endPoint);
     if (end && !userChanged("endPoint")) next.endPoint = end;
-    if (incoming.date && !userChanged("date")) next.date = incoming.date;
+
+    // ── ช่วงวันที่ ────────────────────────────────────────────────
+    // ผู้ใช้มีช่วงวันที่อยู่แล้ว = ตัดสินใจเอง → ชนะเสมอ (ไม่ว่าเลือกไว้ก่อนหรือหลังส่ง)
+    const hasUserRange = !!(current.startDate || current.endDate);
+    if (!hasUserRange) {
+      if (incoming.startDate) next.startDate = incoming.startDate;
+      if (incoming.endDate) next.endDate = incoming.endDate;
+    } else if (
+      current.startDate &&
+      !current.endDate &&
+      incoming.startDate === current.startDate &&
+      incoming.endDate
+    ) {
+      // ผู้ใช้มีแต่วันเริ่ม (ข้อมูลเก่า) และโมเดลต่อยอดจากวันเริ่มเดียวกัน → รับวันสิ้นสุดได้
+      next.endDate = incoming.endDate;
+    }
+
     if (incoming.startTime && !userChanged("startTime")) {
       next.startTime = incoming.startTime;
     }
-    if (incoming.days && !userChanged("days")) next.days = incoming.days;
     if (incoming.vehicle && !userChanged("vehicle")) next.vehicle = incoming.vehicle;
+    if (incoming.vehicleModel && !userChanged("vehicleModel")) {
+      next.vehicleModel = incoming.vehicleModel;
+    }
     if (incoming.fuelType && !userChanged("fuelType")) next.fuelType = incoming.fuelType;
     if (incoming.travelers && !userChanged("travelers")) {
       next.travelers = incoming.travelers;
@@ -647,14 +737,17 @@ export default function AiChatScreen({
    */
   const slotsFromPlan = (plan: TripPlan): TripSlots => {
     const days = plan.days ?? [];
+    const startDate = days[0]?.date ?? null;
+    const endDate = days.length ? days[days.length - 1].date ?? startDate : startDate;
     return {
       startPoint: plan.startPoint,
       returnMode: plan.returnMode,
       endPoint: plan.returnMode === "custom" ? plan.endPoint : null,
-      date: days[0]?.date ?? null,
+      startDate,
+      endDate,
       startTime: plan.startTime ?? "08:00",
-      days: days.length || 1,
       vehicle: plan.vehicle?.key ?? "private_car",
+      vehicleModel: plan.vehicle?.model ?? null,
       fuelType: plan.vehicle?.fuelType ?? null,
       travelers: plan.travelers ?? 1,
       budgetPerPerson: plan.budgetPerPerson ?? plan.budget?.perPerson ?? 3000,
@@ -1131,6 +1224,8 @@ export default function AiChatScreen({
     }
 
     try {
+      // จับเวลา: เอไaiตอบกลับมาช้าแค่ไหน (ใช้เทียบกับจำนวนครั้งที่ผู้ใช้กดระหว่างรอ)
+      aiDiag.sentAt = Date.now();
       const result = await sendChat(history, {
         folder: folderCtxPayload,
         // ส่งรหัสโฟลเดอร์ → backend โหลดคลิปจริง + จับคู่ทะเบียนสถานที่เอง
@@ -1148,10 +1243,19 @@ export default function AiChatScreen({
         // บริบทคลิป → backend แทรกใน system prompt ให้โมเดลยึดข้อมูลคลิปเป็นหลัก
         clipContext,
         // ช่องข้อมูลแผนทริปที่สะสมไว้ → backend merge กับที่โมเดลสกัดใหม่
-        tripDraft: Object.keys(slotsForRequest).length > 0 ? slotsForRequest : null,
+        // (แอปเก็บช่วงวันที่เป็น startDate/endDate แต่ backend รู้จักแค่ date+days
+        //  → แปลงตรงจุดส่ง ด้วย slotsToWire)
+        tripDraft:
+          Object.keys(slotsForRequest).length > 0
+            ? slotsToWire(slotsForRequest)
+            : null,
         // แผนที่กำลังแก้ → backend แทรกลง system prompt ให้เอไaiอ้างอิงได้
         planContext: opts?.planContext ?? null,
       });
+      // เอไaiตอบกลับมาแล้ว → บันทึกเวลาที่ใช้ + จำนวน "กด" ที่เกิดไประหว่างรอคำตอบ
+      aiDiag.repliedAt = Date.now();
+      aiDiag.lastReplyMs = aiDiag.repliedAt - aiDiag.sentAt;
+      aiDiag.pressAtReply = aiDiag.pressCount;
       // เอไaiสกัดช่องข้อมูลได้ → รวมกับที่ผู้ใช้เคยกรอก (ค่าที่โมเดลไม่รู้จะไม่ทับของเดิม
       // และพิกัดที่ผู้ใช้เลือกเองจะไม่หาย)
       // ── สำคัญ: รวมกับ "ค่าล่าสุด" ไม่ใช่ค่าตอนส่งข้อความ ──
@@ -1329,6 +1433,8 @@ export default function AiChatScreen({
       onCreatePlan={() => void handleCreatePlan(lastDraftMessageId ?? "")}
       creating={planning}
       onRequestOrigin={setCardOriginTarget}
+      onRequestDateRange={() => openCardPicker("date")}
+      onRequestTime={() => openCardPicker("time")}
       onTapReport={reportTap}
     />
   );
@@ -2007,6 +2113,39 @@ export default function AiChatScreen({
         visible={cardOriginTarget !== null}
         onClose={() => setCardOriginTarget(null)}
         onSelectOrigin={handleCardOriginSelected}
+      />
+
+      {/* ปฏิทินเลือกช่วงวันที่ (วันเริ่ม → วันสิ้นสุด ในหน้าเดียว) */}
+      <TripDateRangeSheet
+        key={`date-${cardPickerSeq}`}
+        visible={cardPicker === "date"}
+        startDate={draftSlots.startDate ?? null}
+        endDate={draftSlots.endDate ?? null}
+        onCancel={() => setCardPicker(null)}
+        onConfirm={(startDate, endDate) => {
+          setCardPicker(null);
+          // ใช้ค่าล่าสุดจาก ref (ไม่ใช่ state ที่อาจค้างอยู่ตอนเปิด sheet)
+          applyDraftSlots({
+            ...draftSlotsRef.current,
+            startDate,
+            endDate,
+          });
+        }}
+      />
+
+      {/* ล้อเวลาออกเดินทาง */}
+      <TripTimeSheet
+        key={`time-${cardPickerSeq}`}
+        visible={cardPicker === "time"}
+        value={draftSlots.startTime ?? null}
+        onCancel={() => setCardPicker(null)}
+        onConfirm={(time) => {
+          setCardPicker(null);
+          applyDraftSlots({
+            ...draftSlotsRef.current,
+            startTime: time,
+          });
+        }}
       />
     </View>
   );

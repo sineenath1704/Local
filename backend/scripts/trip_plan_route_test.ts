@@ -16,6 +16,7 @@ import {
   reconcileName,
   reconcileAiPlan,
   normalizeFuelType,
+  inferFuelTypeFromVehicleModel,
   persistPlan,
 } from "../src/routes/trips";
 import { buildTripPlan, type CandidateStop } from "../src/tripPlanner";
@@ -101,6 +102,27 @@ console.log("\n[readPlanPoint]");
   ok("null → null", readPlanPoint(null) === null);
   ok("undefined → null", readPlanPoint(undefined) === null);
   ok("string → null", readPlanPoint("บ้าน") === null);
+}
+
+// ── 1b. ชนิดน้ำมันจากชื่อ/รุ่นรถ ──────────────────────────────────────────
+console.log("\n[ชนิดน้ำมัน]");
+{
+  eq("normalizeFuelType: key", normalizeFuelType("gasohol95"), "gasohol95");
+  eq("normalizeFuelType: ชื่อที่แสดง", normalizeFuelType("แก๊สโซฮอล์ 95"), "gasohol95");
+  eq("normalizeFuelType: ไม่รู้จัก", normalizeFuelType("น้ำมันพืช"), null);
+  eq("normalizeFuelType: ว่าง", normalizeFuelType(""), null);
+
+  // เดาจากชื่อ/รุ่นรถ (ใช้เป็นค่าเริ่มต้นตอนที่เอไaiยังไม่ได้ระบุ)
+  eq("D-Max → ดีเซล", inferFuelTypeFromVehicleModel("Isuzu D-Max"), "dieselB20");
+  eq("Fortuner → ดีเซล", inferFuelTypeFromVehicleModel("Toyota Fortuner"), "dieselB20");
+  eq("ดีเซล (ไทย) → ดีเซล", inferFuelTypeFromVehicleModel("รถดีเซล"), "dieselB20");
+  eq("BYD → ไฟฟ้า", inferFuelTypeFromVehicleModel("BYD Atto 3"), "electric");
+  eq("ไฟฟ้า (ไทย) → ไฟฟ้า", inferFuelTypeFromVehicleModel("รถไฟฟ้า"), "electric");
+  eq("E20 → แก๊สโซฮอล์ E20", inferFuelTypeFromVehicleModel("Toyota Corolla E20"), "gasoholE20");
+  eq("hybrid → แก๊สโซฮอล์ 95", inferFuelTypeFromVehicleModel("Corolla Hybrid"), "gasohol95");
+  eq("ชื่อที่ไม่มีข้อมูล → null", inferFuelTypeFromVehicleModel("Toyota Corolla Altis"), null);
+  eq("ว่าง → null", inferFuelTypeFromVehicleModel(""), null);
+  eq("null → null", inferFuelTypeFromVehicleModel(null), null);
 }
 
 // ── 2. guessStopType ─────────────────────────────────────────────────────
@@ -583,6 +605,44 @@ async function main() {
     );
     eq("override ชนะราคาสด", plan.vehicle.fuelPricePerLitre, 45);
     eq("ที่มา = ผู้ใช้ระบุเอง", plan.vehicle.fuelPriceSource, "ผู้ใช้ระบุเอง");
+  }
+
+  {
+    // รถสาธารณะ → ไม่มีชนิดน้ำมัน ไม่มีราคาน้ำมัน ไม่มีค่าน้ำมันในงบ
+    const plan = await buildTripPlan(
+      { ...baseInput, vehicle: getVehicle("public"), fuelType: null },
+      { route: fakeRoute, fuelPrices: async () => FUEL_TABLE }
+    );
+    eq("รถสาธารณะ → ไม่มีชนิดน้ำมัน", plan.vehicle.fuelType, null);
+    eq("รถสาธารณะ → ไม่มีราคาน้ำมัน", plan.vehicle.fuelPricePerLitre, null);
+    eq("รถสาธารณะ → ค่าน้ำมันในงบ = 0", plan.budget.fuel, 0);
+    eq("รถสาธารณะ → ไม่มีข้อมูลราคาน้ำมันในแผน", plan.fuel, undefined);
+    ok(
+      "รถสาธารณะ → ไม่มีบรรทัดราคาน้ำมันในสมมติฐาน",
+      !plan.assumptions.some((a) => a.includes("ราคาน้ำมัน")),
+      plan.assumptions.join(" | ")
+    );
+    ok(
+      "รถสาธารณะ → ไม่มีคำเตือนให้ไปกรอกราคาน้ำมัน",
+      !plan.warnings.some((w) => w.includes("ราคาน้ำมัน")),
+      plan.warnings.join(" | ")
+    );
+  }
+
+  {
+    // รถไฟฟ้า → มีชนิดพลังงาน แต่ไม่มีราคาน้ำมัน (และไม่ควรเตือนให้กรอกราคาน้ำมัน)
+    const plan = await buildTripPlan(
+      { ...baseInput, vehicle: getVehicle("ev"), fuelType: "electric" },
+      { route: fakeRoute, fuelPrices: async () => FUEL_TABLE }
+    );
+    eq("รถไฟฟ้า → ชนิดพลังงาน = electric", plan.vehicle.fuelType, "electric");
+    eq("รถไฟฟ้า → ไม่มีราคาน้ำมัน", plan.vehicle.fuelPricePerLitre, null);
+    eq("รถไฟฟ้า → ค่าน้ำมันในงบ = 0", plan.budget.fuel, 0);
+    ok(
+      "รถไฟฟ้า → ไม่มีคำเตือนให้ไปกรอกราคาน้ำมัน",
+      !plan.warnings.some((w) => w.includes("ราคาน้ำมัน")),
+      plan.warnings.join(" | ")
+    );
   }
 
   {

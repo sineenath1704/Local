@@ -3,7 +3,7 @@
  *   - routing    : OSRM ใช้ไม่ได้ → ค่าประมาณ + source:"estimate"
  *   - openHours  : 3 แหล่งข้อมูล × (ก่อนเปิด / ในเวลาเปิด / หลังปิด / วันปิด)
  *   - vehicles   : สูตรค่าน้ำมัน
- *   - fuelPrice  : parse HTML → ราคาถูกต้อง · เว็บล้ม → ค่าสำรอง · แคป 3 ชม.
+ *   - fuelPrice  : parse HTML → ราคาถูกต้อง · แคปรายวัน · ดึงไม่สำเร็จใช้ของเก่าพร้อมป้าย "เก่า"
  *
  * รัน: npm run test:trip-planner
  */
@@ -34,7 +34,12 @@ import {
   FALLBACK_FUEL_PRICES,
   __setFuelPriceFetcher,
   __clearFuelPriceCache,
+  __seedFuelPriceCache,
 } from "../src/fuelPrice";
+import {
+  __clearFuelPriceMemory,
+  __setFuelPriceStoreUseSupabase,
+} from "../src/fuelPriceStore";
 
 let pass = 0;
 let fail = 0;
@@ -244,7 +249,10 @@ console.log("\n[fuelPrice]");
 
   // แคป + fallback (มี await → ต้องอยู่ใน async fn)
   void (async () => {
+    // ราคาในเทสต์เป็น fixture → ปิด Supabase ไว้ ไม่งั้นจะไปเขียนทับราคาจริงของวันนี้
+    __setFuelPriceStoreUseSupabase(false);
     __clearFuelPriceCache();
+    __clearFuelPriceMemory();
     let calls = 0;
     __setFuelPriceFetcher(async () => {
       calls++;
@@ -255,29 +263,78 @@ console.log("\n[fuelPrice]");
     check("ดึงสำเร็จ → source=pttor.com", t1.source === "pttor.com");
     check("ดึงสำเร็จ → isEstimate=false", t1.isEstimate === false);
     check("ดึงสำเร็จ → ราคาถูกต้อง", t1.prices.gasohol95 === 41.54);
+    check("ดึงสำเร็จ → ไม่ใช่ข้อมูลเก่า", t1.isStale === false);
+    check("ดึงสำเร็จ → มีวันที่ของ cache", Boolean(t1.cacheDate));
 
     const t2 = await fetchFuelPrices();
-    check("แคป 3 ชม. → ไม่ยิงซ้ำ", calls === 1, `ยิงไป ${calls} ครั้ง`);
-    check("แคป → source=cache", t2.source === "cache");
+    check("วันเดิม → ไม่ยิงซ้ำ", calls === 1, `ยิงไป ${calls} ครั้ง`);
+    check("วันเดิม → source=cache", t2.source === "cache");
+    check("วันเดิม → ยังไม่ใช่ข้อมูลเก่า", t2.isStale === false);
 
-    // เว็บล้ม → ค่าสำรอง
+    // ข้ามวัน → ยิงใหม่ (แคปเป็นรายวัน ไม่ใช่รายชั่วโมง)
+    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const t3 = await fetchFuelPrices({ now: tomorrow });
+    check("ข้ามวัน → ยิงเว็บใหม่", calls === 2, `ยิงไป ${calls} ครั้ง`);
+    check("ข้ามวัน → source=pttor.com", t3.source === "pttor.com");
+    check("ข้ามวัน → cacheDate เปลี่ยน", t3.cacheDate !== t1.cacheDate);
+
+    // ดึงวันนี้ไม่สำเร็จ → ใช้ราคาของวันก่อน + ติดป้ายว่าเก่า
     __clearFuelPriceCache();
+    __clearFuelPriceMemory();
+    __seedFuelPriceCache("2026-11-05", {
+      prices: { gasohol95: 40.11 },
+      fetchedAt: "2026-11-05T02:00:00.000Z",
+      effectiveDate: "3 พ.ย. 2569",
+      source: "pttor.com",
+      origin: "pttor.com",
+      isEstimate: false,
+      url: "https://www.pttor.com/",
+      cacheDate: "2026-11-05",
+      isStale: false,
+      staleNotice: null,
+      bangkokDate: "2026-11-05",
+    });
     __setFuelPriceFetcher(async () => {
       throw new Error("network down");
     });
-    const t3 = await fetchFuelPrices();
-    check("เว็บล้ม → source=fallback", t3.source === "fallback");
-    check("เว็บล้ม → isEstimate=true", t3.isEstimate === true);
-    check("เว็บล้ม → ยังมีราคา (ระบบไม่ล้ม)", t3.prices.gasohol95 === FALLBACK_FUEL_PRICES.gasohol95);
+    const t4 = await fetchFuelPrices({ now: new Date("2026-11-06T04:00:00.000Z") });
+    check("ดึงไม่สำเร็จ → ใช้ราคาของวันก่อน", t4.prices.gasohol95 === 40.11);
+    check("ดึงไม่สำเร็จ → isStale=true", t4.isStale === true);
+    check("ดึงไม่สำเร็จ → มี cacheDate ของวันก่อน", t4.cacheDate === "2026-11-05");
+    check(
+      "ดึงไม่สำเร็จ → มีข้อความแจ้งว่าข้อมูลเก่า",
+      Boolean(t4.staleNotice && t4.staleNotice.includes("เก่า"))
+    );
+
+    // เว็บล้ม + ไม่มี cache เลย → ค่าสำรองในโค้ด
+    __clearFuelPriceCache();
+    __clearFuelPriceMemory();
+    __setFuelPriceFetcher(async () => {
+      throw new Error("network down");
+    });
+    const t5 = await fetchFuelPrices();
+    check("เว็บล้ม + ไม่มี cache → source=fallback", t5.source === "fallback");
+    check("เว็บล้ม + ไม่มี cache → isEstimate=true", t5.isEstimate === true);
+    check("เว็บล้ม + ไม่มี cache → ยังมีราคา (ระบบไม่ล้ม)", t5.prices.gasohol95 === FALLBACK_FUEL_PRICES.gasohol95);
+    check("เว็บล้ม + ไม่มี cache → ไม่ใช่ข้อมูลเก่า", t5.isStale === false);
 
     // override ชนะเสมอ
-    const override = resolveFuelPrice(t3, "gasohol95", 44.5);
+    const override = resolveFuelPrice(t5, "gasohol95", 44.5);
     check("ราคาที่ผู้ใช้พิมพ์ ชนะเสมอ", override.pricePerLitre === 44.5);
     check("override ระบุที่มาว่า 'ผู้ใช้ระบุเอง'", override.sourceLabel === "ผู้ใช้ระบุเอง");
 
     const live = resolveFuelPrice(t1, "gasohol95");
     check("ราคาสดมาจาก pttor.com", live.sourceLabel === "pttor.com" && live.isEstimate === false);
     check("ราคาสดมีวันที่มีผล", live.effectiveDate === "29 ต.ค. 2569");
+
+    // ราคาที่มาจาก cache ของวันก่อน → ต้องบอกว่าเก่า (ห้ามโชว์เป็นราคาวันนี้)
+    const stale = resolveFuelPrice(t4, "gasohol95");
+    check("ราคาจาก cache เก่า → isStale=true", stale.isStale === true);
+    check(
+      "ราคาจาก cache เก่า → ที่มาระบุว่าข้อมูลเก่า",
+      stale.sourceLabel.includes("เก่า")
+    );
+    check("ราคาจาก cache เก่า → บอกวันที่ของข้อมูล", stale.cacheDate === "2026-11-05");
 
     const text = describeFuelPrice(live);
     check(
@@ -287,6 +344,8 @@ console.log("\n[fuelPrice]");
 
     __setFuelPriceFetcher(async () => fixture);
     __clearFuelPriceCache();
+    __clearFuelPriceMemory();
+    __setFuelPriceStoreUseSupabase(true);
 
     console.log(`\nผ่าน ${pass} · ไม่ผ่าน ${fail}`);
     if (fail > 0) process.exit(1);

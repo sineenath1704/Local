@@ -132,6 +132,7 @@ function vehicleFromData(raw: any): TripPlanVehicle | undefined {
   return {
     key: String(raw.key ?? ""),
     label: String(raw.label ?? ""),
+    model: raw.model ?? null,
     kmPerLitre: Number.isFinite(kmPerLitre) ? kmPerLitre : null,
     fuelType: raw.fuelType ?? null,
     fuelPricePerLitre:
