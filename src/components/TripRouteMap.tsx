@@ -122,12 +122,21 @@ class MapErrorBoundary extends React.Component<
 //  ส่วนประกอบหลัก
 // ─────────────────────────────────────────────────────────────────────────
 
-export default function TripRouteMap({
+/**
+ * ค่าว่างที่คงที่เสมอ
+ * ถ้าใช้ `[]` เป็นค่าเริ่มต้นตรงๆ จะได้ array ใหม่ทุกครั้งที่ re-render
+ * → memo ข้างในถูก invalidate ทุกครั้ง → แผนที่ native โหลด marker/polyline ใหม่
+ * → แอปค้างตอนผู้ใช้กดแก้ข้อมูลในแชท
+ */
+const NO_STOPS: RouteMapStop[] = [];
+const NO_LEGS: RouteMapLeg[] = [];
+
+function TripRouteMap({
   startPoint,
   endPoint,
   returnMode = "same_as_start",
-  stops = [],
-  legs = [],
+  stops = NO_STOPS,
+  legs = NO_LEGS,
   height = 240,
   onSelectStop,
   selectedStopId,
@@ -391,3 +400,9 @@ export default function TripRouteMap({
     </View>
   );
 }
+
+/**
+ * ห่อด้วย React.memo — แชท re-render ทั้งหน้าตอนผู้ใช้แก้ข้อมูลในการ์ด
+ * แผนที่ native ไม่ต้องถูกส่งค่าใหม่ (ถ้าเนื้อหาไม่เปลี่ยนจริง)
+ */
+export default React.memo(TripRouteMap);

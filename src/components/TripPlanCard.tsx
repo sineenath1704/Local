@@ -59,6 +59,9 @@ function mins(n?: number | null): string {
   return r ? `${h} ชม. ${r} นาที` : `${h} ชม.`;
 }
 
+/** ขาเส้นทางว่าง — ใช้ค่าเดียวทั้งแอป ไม่สร้าง array ใหม่ทุกครั้งที่ re-render */
+const EMPTY_LEGS: TripPlanDay["legs"] = [];
+
 /** แปลงวันที่ ISO (2026-11-08) เป็นข้อความไทยอ่านง่าย */
 const THAI_MONTHS = [
   "ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
@@ -161,6 +164,22 @@ export default function TripPlanCard({
     }
     return veh?.fuelPriceText ?? "ไม่ทราบราคา";
   }, [fuelPriceOverride, veh]);
+
+  /**
+   * จุดหยุดสำหรับแผนที่ — ต้องคงตัวอ้างเดิมไว้เสมอ
+   * ถ้าสร้าง array/objects ใหม่ทุกครั้งที่ re-render แผนที่ native จะได้รับ
+   * ค่าใหม่ทั้งที่ข้อมูลไม่เปลี่ยน → โหลด marker/polyline ใหม่ทุกครั้ง
+   * → แอปค้างตอนผู้ใช้กดแก้ข้อมูลในการ์ด (เช่น แถว "รถที่ใช้")
+   */
+  const mapStops = useMemo(
+    () =>
+      (day?.stops ?? []).map((s) => ({
+        id: s.id,
+        name: s.name,
+        coords: s.coordinates,
+      })),
+    [day?.stops]
+  );
 
   const fuelSourceText = useMemo(() => {
     const bits: string[] = [];
@@ -326,12 +345,8 @@ export default function TripPlanCard({
             startPoint={day.startPoint}
             endPoint={day.endPoint}
             returnMode={plan.returnMode}
-            stops={day.stops.map((s) => ({
-              id: s.id,
-              name: s.name,
-              coords: s.coordinates,
-            }))}
-            legs={day.legs ?? []}
+            stops={mapStops}
+            legs={day.legs ?? EMPTY_LEGS}
             height={230}
             routeSource={plan.routeSource}
             routeCredit={plan.routeCredit}

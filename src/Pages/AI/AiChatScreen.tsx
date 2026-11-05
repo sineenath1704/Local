@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from "react";
+import React, { useRef, useState, useEffect, useCallback } from "react";
 import {
   View,
   Text,
@@ -234,8 +234,31 @@ export default function AiChatScreen({
 
   const listRef = useRef<FlatList<AiChatMessage>>(null);
   const autoSentRef = useRef(false);
+  /** จำนวนข้อความล่าสุด + กันเลื่อนซ้ำในเฟรมเดียวกัน */
+  const lastMessageCountRef = useRef(0);
+  const scrollToEndRafRef = useRef<number | null>(null);
 
   const thread = getThread(threadId);
+
+  /**
+   * เลื่อนลงล่างเมื่อ "มีข้อความใหม่" เท่านั้น
+   *
+   * เดิมเลื่อนทุกครั้งที่ขนาดเนื้อหาในลิสต์เปลี่ยน — ซึ่งเกิดทันทีที่แถวในการ์ด
+   * ขยาย/หด เช่นตอนเลือกรถแล้วแถว "ชนิดน้ำมัน" โผล่ขึ้นมาใต้แถว "รถที่ใช้"
+   * → เด้งไปมาจนทั้งแอปค้าง (กดอะไรก็ไม่ได้)
+   */
+  const handleContentSizeChange = useCallback(() => {
+    const count = thread?.messages.length ?? 0;
+    const isNewMessage = count !== lastMessageCountRef.current;
+    lastMessageCountRef.current = count;
+    if (!isNewMessage) return; // แถวเดิมขยาย/หด → ไม่ต้องเลื่อน
+    if (scrollToEndRafRef.current != null) return;
+    scrollToEndRafRef.current = requestAnimationFrame(() => {
+      scrollToEndRafRef.current = null;
+      listRef.current?.scrollToEnd({ animated: false });
+    });
+  }, [thread?.messages.length]);
+
   const threadFolder = thread?.folderId ? folders.find((f) => f.id === thread.folderId) : undefined;
   const attachedFolder = attachedFolderId ? folders.find((f) => f.id === attachedFolderId) : undefined;
   const folder = attachedFolder ?? threadFolder;
@@ -1096,7 +1119,8 @@ export default function AiChatScreen({
           keyExtractor={(m) => m.id}
           contentContainerStyle={{ paddingVertical: 14, paddingHorizontal: 14 }}
           showsVerticalScrollIndicator={false}
-          onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
+          onContentSizeChange={handleContentSizeChange}
+          removeClippedSubviews={false}
           renderItem={({ item }) => {
             const mine = item.role === "user";
             const failed = Boolean(item.isError);
