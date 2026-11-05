@@ -65,7 +65,11 @@ import {
 import type { VideoPost } from "../../data/homeFeedData";
 import OriginSelectorModal from "../../components/OriginSelectorModal";
 import MyVideoViewer from "../../components/MyVideoViewer";
-import TripDraftCard, { TripOriginTarget } from "../../components/TripDraftCard";
+import TripDraftCard, {
+  TripOriginTarget,
+  TapReport,
+  renderCounter,
+} from "../../components/TripDraftCard";
 import TripPlanCard from "../../components/TripPlanCard";
 import { parseGoogleMapsUrl } from "../../services/savedPlacesService";
 import { resolvePlaceCoords } from "../../services/placesService";
@@ -166,6 +170,72 @@ function slotsFromTripContext(raw: unknown): TripSlots {
   };
 }
 
+/**
+ * แถบวินิจฉัยการแตะ (ชั่วคราว — ใช้หาสาเหตุอาการ "กดการ์ดแล้วไม่มีอะไรเกิดขึ้น")
+ * ======================================================================
+ * อยู่ **นอก** FlatList และมี state ของตัวเอง → ไม่ทำให้ลิสต์แชท re-render
+ * และยังรายงานผลได้แม้การ์ดในลิสต์จะตายไปแล้ว
+ *
+ * วิธีอ่านผล:
+ *   · ปุ่ม "ทดสอบ" ยังกดได้ แต่ชิปในการ์ดไม่ผ่าน → ตัวการ์ดถูกบัง/ถูกทิ้ง
+ *   · ชิปได้ "แตะลง" แต่ไม่ได้ "กด"           → แตะถูกขโมยไปเป็นการเลื่อน
+ *   · ชิปได้ "กด" แล้วแต่หน้าจอไม่เปลี่ยน    → ปัญหาอยู่ถัดจากการกด
+ */
+function TapDiagStrip({
+  register,
+}: {
+  register: (fn: TapReport) => void;
+}) {
+  const [diag, setDiag] = useState({ down: 0, press: 0, last: "" });
+  /** จำนวนครั้งที่ render ต่อวินาที (0 = ไม่มี render loop) */
+  const [rate, setRate] = useState({ chat: 0, card: 0 });
+  const prevCountRef = useRef({ chat: 0, card: 0 });
+
+  useEffect(() => {
+    register((label, phase) => {
+      setDiag((d) =>
+        phase === "press"
+          ? { down: d.down, press: d.press + 1, last: label }
+          : { down: d.down + 1, press: d.press, last: label }
+      );
+    });
+  }, [register]);
+
+  useEffect(() => {
+    const t = setInterval(() => {
+      const now = { chat: renderCounter.chat, card: renderCounter.card };
+      const prev = prevCountRef.current;
+      prevCountRef.current = now;
+      setRate({
+        chat: Math.max(0, (now.chat - prev.chat) * 2),
+        card: Math.max(0, (now.card - prev.card) * 2),
+      });
+    }, 500);
+    return () => clearInterval(t);
+  }, []);
+
+  return (
+    <View
+      style={{ height: 30 }}
+      className="flex-row items-center bg-amber-50 border-b border-amber-200 px-3"
+    >
+      <TouchableOpacity
+        onPressIn={() => setDiag((d) => ({ ...d, down: d.down + 1, last: "ปุ่มทดสอบ" }))}
+        onPress={() => setDiag((d) => ({ ...d, press: d.press + 1, last: "ปุ่มทดสอบ" }))}
+        activeOpacity={0.8}
+        className="bg-amber-500 px-2.5 py-1 rounded-full mr-2"
+      >
+        <Text className="text-white text-[11px] font-black">ทดสอบ</Text>
+      </TouchableOpacity>
+      <Text className="text-amber-900 text-[11px] font-bold flex-1" numberOfLines={1}>
+        แตะ {diag.down} · กด {diag.press}
+        {diag.last ? ` · "${diag.last}"` : ""}
+        {` · เรนเดอร์/วิ ${rate.chat}/${rate.card}`}
+      </Text>
+    </View>
+  );
+}
+
 export default function AiChatScreen({
   threadId,
   onBack,
@@ -254,6 +324,17 @@ export default function AiChatScreen({
   const nearBottomRef = useRef(true);
   /** ผู้ใช้กำลังลากลิสต์อยู่ → ห้ามเลื่อนล่างเด็ดขาด */
   const draggingRef = useRef(false);
+  /**
+   * ผู้กดรายงานการแตะ (วินิจฉัยอาการ "กดการ์ดแล้วไม่มีอะไรเกิดขึ้น")
+   * → เก็บ callback ไว้ใน ref เพื่อไม่ให้ทั้งหน้าจอแชท re-render ทุกครั้งที่แตะ
+   */
+  const tapReporterRef = useRef<TapReport | null>(null);
+  const registerTapReporter = useCallback((fn: TapReport) => {
+    tapReporterRef.current = fn;
+  }, []);
+  const reportTap = useCallback((label: string, phase: "down" | "press") => {
+    tapReporterRef.current?.(label, phase);
+  }, []);
 
   const thread = getThread(threadId);
 
@@ -280,6 +361,11 @@ export default function AiChatScreen({
       listRef.current?.scrollToEnd({ animated: false });
     });
   }, [thread?.messages.length]);
+
+  // ตัวนับจำนวนครั้งที่หน้าจอแชท render (วินิจฉัย render loop — ชั่วคราว)
+  useEffect(() => {
+    renderCounter.chat += 1;
+  });
 
   /** ผู้ใช้อยู่ห่างจากล่างสุดแค่ไหน → ใช้ตัดสินว่าจะเลื่อนอัตโนมัติไหม */
   const handleScroll = useCallback(
@@ -1098,6 +1184,7 @@ export default function AiChatScreen({
       onCreatePlan={() => void handleCreatePlan(lastDraftMessageId ?? "")}
       creating={planning}
       onRequestOrigin={setCardOriginTarget}
+      onTapReport={reportTap}
     />
   );
 
@@ -1147,6 +1234,9 @@ export default function AiChatScreen({
           </TouchableOpacity>
         )}
       </View>
+
+      {/* แถบวินิจฉัยการแตะ (ชั่วคราว) — อยู่นอกลิสต์ จึงรายงานผลได้แม้การ์ดในลิสต์จะค้าง */}
+      <TapDiagStrip register={registerTapReporter} />
 
       {/* Mode toggle — visible only for hosts. Defaults to the historical
           tourist behaviour; host-self is a JWT-gated advisor that reads the

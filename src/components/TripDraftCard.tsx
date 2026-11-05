@@ -108,15 +108,21 @@ function Chip({
   active,
   onPress,
   sub,
+  onTapReport,
 }: {
   label: string;
   active?: boolean;
   onPress: () => void;
   sub?: string;
+  onTapReport?: TapReport;
 }) {
   return (
     <TouchableOpacity
-      onPress={onPress}
+      onPress={() => {
+        onTapReport?.(label, "press");
+        onPress();
+      }}
+      onPressIn={() => onTapReport?.(label, "down")}
       activeOpacity={0.75}
       accessibilityRole="button"
       accessibilityState={{ selected: !!active }}
@@ -143,6 +149,18 @@ function Chip({
 /** เป้าหมายของตัวเลือกจุด — จุดเริ่มต้น / จุดสิ้นสุดตอนกลับ / จุดจบของแต่ละวัน */
 export type TripOriginTarget = "start" | "end" | { day: number };
 
+/**
+ * รายงานการแตะ (phase = "down" คือนิ้วแตะลง · "press" คือกดสำเร็จ)
+ * ใช้ตรวจอาการ "กดการ์ดแล้วไม่มีอะไรเกิดขึ้น" — ชั่วคราว แก้เสร็จแล้วเอาออก
+ */
+export type TapReport = (label: string, phase: "down" | "press") => void;
+
+/**
+ * ตัวนับจำนวนครั้งที่ render (ชั่วคราว — ใช้วินิจฉัยว่าแอปค้างเพราะ render loop)
+ * · chat = หน้าจอแชท · card = การ์ดช่องข้อมูล
+ */
+export const renderCounter = { chat: 0, card: 0 };
+
 interface TripDraftCardProps {
   slots: TripSlots;
   /** ผู้ใช้แก้ช่องในการ์ด → ส่งค่าใหม่กลับไปเก็บสะสม */
@@ -159,6 +177,8 @@ interface TripDraftCardProps {
    * (เคยเจอจริง: กดอะไรก็ไม่ได้ หน้าจะเหมือนค้าง)
    */
   onRequestOrigin?: (target: TripOriginTarget) => void;
+  /** รายงานการแตะทุกปุ่มในการ์ด (ใช้วินิจฉัยอาการกดไม่ได้ — ชั่วคราว) */
+  onTapReport?: TapReport;
 }
 
 export default function TripDraftCard({
@@ -167,6 +187,7 @@ export default function TripDraftCard({
   onCreatePlan,
   creating,
   onRequestOrigin,
+  onTapReport,
 }: TripDraftCardProps) {
   const [editing, setEditing] = useState<string | null>(null);
   const [fuelPrice, setFuelPrice] = useState<FuelPriceSnapshot | null>(null);
@@ -182,6 +203,10 @@ export default function TripDraftCard({
 
   // ราคาน้ำมันสด — ดึงครั้งเดียวตอนเปิดการ์ด (backend แคป 3 ชม. อยู่แล้ว)
   useEffect(() => {
+    renderCounter.card += 1;
+  });
+
+  useEffect(() => {
     let cancelled = false;
     fetchFuelPrices()
       .then((snap) => {
@@ -196,6 +221,12 @@ export default function TripDraftCard({
   }, []);
 
   const patch = (next: Partial<TripSlots>) => onChange({ ...slots, ...next });
+
+  /** เปิด/ปิดแถวที่กำลังแก้ (พร้อมรายงานการแตะไว้วินิจฉัย) */
+  const toggleRow = (key: string, label: string) => () => {
+    onTapReport?.(label, "press");
+    setEditing((cur) => (cur === key ? null : key));
+  };
 
   const days7 = upcomingDays(14);
   const fuelKey = slots.fuelType ?? (vehKey ? DEFAULT_FUEL_BY_VEHICLE[vehKey] : null);
@@ -223,7 +254,7 @@ export default function TripDraftCard({
           value={slots.startPoint?.label ?? ""}
           emptyHint="ยังไม่ได้เลือก — ต้องมีพิกัด"
           editing={editing === "start"}
-          onToggle={() => setEditing(editing === "start" ? null : "start")}
+          onToggle={toggleRow("start", "จุดเริ่มต้น")}
           badge={
             slots.startPoint?.coords
               ? { text: "มีพิกัด", tone: "green" }
@@ -234,6 +265,7 @@ export default function TripDraftCard({
         >
           <TouchableOpacity
             onPress={() => onRequestOrigin?.("start")}
+            onPressIn={() => onTapReport?.("เลือกจุดเริ่มต้น", "down")}
             activeOpacity={0.8}
             className="flex-row items-center bg-violet-50 border border-violet-200 rounded-xl px-3 py-2.5"
           >
@@ -256,7 +288,7 @@ export default function TripDraftCard({
           }
           emptyHint="ยังไม่ได้เลือก"
           editing={editing === "end"}
-          onToggle={() => setEditing(editing === "end" ? null : "end")}
+          onToggle={toggleRow("end", "จุดสิ้นสุดตอนกลับ")}
           badge={
             returnMode === "custom"
               ? slots.endPoint?.coords
@@ -269,6 +301,7 @@ export default function TripDraftCard({
             <Chip
               label="กลับจุดเดิม"
               active={returnMode === "same_as_start"}
+              onTapReport={onTapReport}
               onPress={() =>
                 patch({ returnMode: "same_as_start", endPoint: null })
               }
@@ -276,12 +309,14 @@ export default function TripDraftCard({
             <Chip
               label="กลับคนละจุดกับจุดเริ่ม"
               active={returnMode === "custom"}
+              onTapReport={onTapReport}
               onPress={() => patch({ returnMode: "custom" })}
             />
           </View>
           {returnMode === "custom" ? (
             <TouchableOpacity
               onPress={() => onRequestOrigin?.("end")}
+              onPressIn={() => onTapReport?.("เลือกจุดสิ้นสุดตอนกลับ", "down")}
               activeOpacity={0.8}
               className="flex-row items-center bg-violet-50 border border-violet-200 rounded-xl px-3 py-2.5"
             >
@@ -306,9 +341,7 @@ export default function TripDraftCard({
                   value={point?.label ?? ""}
                   emptyHint="ยังไม่ได้เลือก — ปล่อยว่างไว้ได้ ระบบจะจัดให้"
                   editing={editing === `day-${i}`}
-                  onToggle={() =>
-                    setEditing(editing === `day-${i}` ? null : `day-${i}`)
-                  }
+                  onToggle={toggleRow(`day-${i}`, `จุดสิ้นสุดของวันที่ ${i + 1}`)}
                   badge={
                     point?.coords
                       ? { text: "มีพิกัด", tone: "green" }
@@ -317,6 +350,9 @@ export default function TripDraftCard({
                 >
                   <TouchableOpacity
                     onPress={() => onRequestOrigin?.({ day: i })}
+                    onPressIn={() =>
+                      onTapReport?.(`เลือกจุดจบของวันที่ ${i + 1}`, "down")
+                    }
                     activeOpacity={0.8}
                     className="flex-row items-center bg-violet-50 border border-violet-200 rounded-xl px-3 py-2.5"
                   >
@@ -338,7 +374,7 @@ export default function TripDraftCard({
           value={slots.date ? formatDate(slots.date) : ""}
           emptyHint="ยังไม่ได้เลือกวันที่"
           editing={editing === "date"}
-          onToggle={() => setEditing(editing === "date" ? null : "date")}
+          onToggle={toggleRow("date", "วันที่")}
         >
           <View className="flex-row flex-wrap">
             {days7.map((d) => (
@@ -346,6 +382,7 @@ export default function TripDraftCard({
                 key={d.iso}
                 label={`${d.dow} ${d.day} ${d.label}`}
                 active={slots.date === d.iso}
+                onTapReport={onTapReport}
                 onPress={() => patch({ date: d.iso })}
               />
             ))}
@@ -360,7 +397,7 @@ export default function TripDraftCard({
           value={slots.startTime ?? ""}
           emptyHint="ยังไม่ได้เลือกเวลา"
           editing={editing === "time"}
-          onToggle={() => setEditing(editing === "time" ? null : "time")}
+          onToggle={toggleRow("time", "เวลาเริ่มต้น")}
         >
           <View className="flex-row flex-wrap">
             {START_TIMES.map((t) => (
@@ -368,6 +405,7 @@ export default function TripDraftCard({
                 key={t}
                 label={t}
                 active={slots.startTime === t}
+                onTapReport={onTapReport}
                 onPress={() => patch({ startTime: t })}
               />
             ))}
@@ -382,7 +420,7 @@ export default function TripDraftCard({
           value={slots.days ? `${slots.days} วัน` : ""}
           emptyHint="ยังไม่ได้เลือก"
           editing={editing === "days"}
-          onToggle={() => setEditing(editing === "days" ? null : "days")}
+          onToggle={toggleRow("days", "จำนวนวัน")}
         >
           <View className="flex-row flex-wrap">
             {[1, 2, 3, 4, 5].map((n) => (
@@ -391,6 +429,7 @@ export default function TripDraftCard({
                 label={`${n} วัน`}
                 sub={n > 1 ? `ค้างคืน ${n - 1}` : "ไป-กลับ"}
                 active={slots.days === n}
+                onTapReport={onTapReport}
                 onPress={() =>
                   patch({
                     days: n,
@@ -411,7 +450,7 @@ export default function TripDraftCard({
           value={vehicleLabel(slots.vehicle)}
           emptyHint="ยังไม่ได้เลือกรถ"
           editing={editing === "vehicle"}
-          onToggle={() => setEditing(editing === "vehicle" ? null : "vehicle")}
+          onToggle={toggleRow("vehicle", "รถที่ใช้")}
         >
           <View className="flex-row flex-wrap">
             {VEHICLE_OPTIONS.map((v) => (
@@ -419,6 +458,7 @@ export default function TripDraftCard({
                 key={v.key}
                 label={v.label}
                 active={vehKey === v.key}
+                onTapReport={onTapReport}
                 onPress={() => {
                   const nextFuel = DEFAULT_FUEL_BY_VEHICLE[v.key] || null;
                   patch({
@@ -440,7 +480,7 @@ export default function TripDraftCard({
             value={fuelLabel(fuelKey)}
             emptyHint="ยังไม่ได้เลือก"
             editing={editing === "fuel"}
-            onToggle={() => setEditing(editing === "fuel" ? null : "fuel")}
+            onToggle={toggleRow("fuel", "ชนิดน้ำมัน")}
             badge={
               livePrice != null
                 ? {
@@ -461,6 +501,7 @@ export default function TripDraftCard({
                       : undefined
                   }
                   active={fuelKey === f.key}
+                  onTapReport={onTapReport}
                   onPress={() => patch({ fuelType: f.key })}
                 />
               ))}
@@ -495,7 +536,7 @@ export default function TripDraftCard({
           value={slots.travelers ? `${slots.travelers} คน` : ""}
           emptyHint="ยังไม่ได้ระบุ"
           editing={editing === "travelers"}
-          onToggle={() => setEditing(editing === "travelers" ? null : "travelers")}
+          onToggle={toggleRow("travelers", "จำนวนผู้เดินทาง")}
         >
           <View className="flex-row flex-wrap">
             {[1, 2, 3, 4, 6, 8].map((n) => (
@@ -503,6 +544,7 @@ export default function TripDraftCard({
                 key={n}
                 label={`${n} คน`}
                 active={slots.travelers === n}
+                onTapReport={onTapReport}
                 onPress={() => patch({ travelers: n })}
               />
             ))}
@@ -521,7 +563,7 @@ export default function TripDraftCard({
           }
           emptyHint="ยังไม่ได้ระบุ"
           editing={editing === "budget"}
-          onToggle={() => setEditing(editing === "budget" ? null : "budget")}
+          onToggle={toggleRow("budget", "งบต่อคน")}
         >
           <View className="flex-row flex-wrap">
             {[1500, 3000, 5000, 8000, 12000].map((n) => (
@@ -529,6 +571,7 @@ export default function TripDraftCard({
                 key={n}
                 label={`${n.toLocaleString("th-TH")} บาท`}
                 active={slots.budgetPerPerson === n}
+                onTapReport={onTapReport}
                 onPress={() => patch({ budgetPerPerson: n })}
               />
             ))}
@@ -550,6 +593,7 @@ export default function TripDraftCard({
         {/* ── ปุ่มสร้างแพลน ────────────────────────────────────── */}
         <TouchableOpacity
           onPress={onCreatePlan}
+          onPressIn={() => onTapReport?.("สร้างแพลนทริป", "down")}
           disabled={!ready || creating}
           activeOpacity={0.85}
           className={`rounded-2xl py-3 items-center justify-center flex-row ${
