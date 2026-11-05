@@ -42,8 +42,7 @@
       ],
       "expo-web-browser",
       "expo-status-bar",
-      "expo-maps",
-      "@react-native-community/datetimepicker"
+      "expo-maps"
     ],
     "extra": {
       "eas": {

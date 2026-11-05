@@ -65,18 +65,6 @@ function fuelLabel(v?: string | null): string {
 /** เป้าหมายของตัวเลือกจุด — จุดเริ่มต้น / จุดสิ้นสุดตอนกลับ / จุดจบของแต่ละวัน */
 export type TripOriginTarget = "start" | "end" | { day: number };
 
-/**
- * รายงานการแตะ (phase = "down" คือนิ้วแตะลง · "press" คือกดสำเร็จ)
- * ใช้ตรวจอาการ "กดการ์ดแล้วไม่มีอะไรเกิดขึ้น" — ชั่วคราว แก้เสร็จแล้วเอาออก
- */
-export type TapReport = (label: string, phase: "down" | "press") => void;
-
-/**
- * ตัวนับจำนวนครั้งที่ render (ชั่วคราว — ใช้วินิจฉัยว่าแอปค้างเพราะ render loop)
- * · chat = หน้าจอแชท · card = การ์ดช่องข้อมูล
- */
-export const renderCounter = { chat: 0, card: 0 };
-
 /** ช่องติ๊ก (ใช้กับ "จุดสิ้นสุดคือที่เดียวกับจุดเริ่มต้นไหม") */
 function CheckBox({
   checked,
@@ -114,21 +102,15 @@ function Chip({
   active,
   onPress,
   sub,
-  onTapReport,
 }: {
   label: string;
   active?: boolean;
   onPress: () => void;
   sub?: string;
-  onTapReport?: TapReport;
 }) {
   return (
     <TouchableOpacity
-      onPress={() => {
-        onTapReport?.(label, "press");
-        onPress();
-      }}
-      onPressIn={() => onTapReport?.(label, "down")}
+      onPress={onPress}
       activeOpacity={0.75}
       accessibilityRole="button"
       accessibilityState={{ selected: !!active }}
@@ -206,8 +188,6 @@ interface TripDraftCardProps {
   onRequestDateRange: () => void;
   /** ขอเปิดล้อเวลาออกเดินทาง */
   onRequestTime: () => void;
-  /** รายงานการแตะทุกปุ่มในการ์ด (ใช้วินิจฉัยอาการกดไม่ได้ — ชั่วคราว) */
-  onTapReport?: TapReport;
 }
 
 function TripDraftCardInner({
@@ -218,7 +198,6 @@ function TripDraftCardInner({
   onRequestOrigin,
   onRequestDateRange,
   onRequestTime,
-  onTapReport,
 }: TripDraftCardProps) {
   const [editing, setEditing] = useState<string | null>(null);
   /**
@@ -236,10 +215,6 @@ function TripDraftCardInner({
   const vehicleClass: VehicleClass | null = vehicleClassOf(slots.vehicle);
   const usesFuel = vehicleClass === "private_car";
   const days = tripRangeDays(slots.startDate, slots.endDate) ?? 1;
-
-  useEffect(() => {
-    renderCounter.card += 1;
-  });
 
   /**
    * ดึงราคาน้ำมันแบบขี้เกียจ
@@ -291,9 +266,8 @@ function TripDraftCardInner({
     );
   };
 
-  /** เปิด/ปิดแถวที่กำลังแก้ (พร้อมรายงานการแตะไว้วินิจฉัย) */
-  const toggleRow = (key: string, label: string) => () => {
-    onTapReport?.(label, "press");
+  /** เปิด/ปิดแถวที่กำลังแก้ */
+  const toggleRow = (key: string) => () => {
     setEditing((cur) => (cur === key ? null : key));
   };
 
@@ -341,7 +315,7 @@ function TripDraftCardInner({
           value={slots.startPoint?.label ?? ""}
           emptyHint="ยังไม่ได้เลือก — ต้องมีพิกัด"
           editing={editing === "start"}
-          onToggle={toggleRow("start", "จุดเริ่มต้น")}
+          onToggle={toggleRow("start")}
           badge={
             slots.startPoint?.coords
               ? { text: "มีพิกัด", tone: "green" }
@@ -352,7 +326,6 @@ function TripDraftCardInner({
         >
           <TouchableOpacity
             onPress={() => requestOrigin("start")}
-            onPressIn={() => onTapReport?.("เลือกจุดเริ่มต้น", "down")}
             activeOpacity={0.8}
             className="flex-row items-center bg-violet-50 border border-violet-200 rounded-xl px-3 py-2.5"
           >
@@ -375,7 +348,7 @@ function TripDraftCardInner({
           }
           emptyHint="ยังไม่ได้เลือก"
           editing={editing === "end"}
-          onToggle={toggleRow("end", "จุดสิ้นสุดตอนกลับ")}
+          onToggle={toggleRow("end")}
           badge={
             returnMode === "custom"
               ? slots.endPoint?.coords
@@ -398,7 +371,6 @@ function TripDraftCardInner({
           {returnMode === "custom" ? (
             <TouchableOpacity
               onPress={() => requestOrigin("end")}
-              onPressIn={() => onTapReport?.("เลือกจุดสิ้นสุดตอนกลับ", "down")}
               activeOpacity={0.8}
               className="flex-row items-center bg-violet-50 border border-violet-200 rounded-xl px-3 py-2.5 mt-2"
             >
@@ -422,7 +394,7 @@ function TripDraftCardInner({
           value={formatThaiDateRange(slots.startDate, slots.endDate)}
           emptyHint="ยังไม่ได้เลือกวันที่"
           editing={editing === "date"}
-          onToggle={toggleRow("date", "วันเดินทาง")}
+          onToggle={toggleRow("date")}
           badge={
             slots.startDate && slots.endDate
               ? { text: `${days} วัน`, tone: "green" }
@@ -431,7 +403,6 @@ function TripDraftCardInner({
         >
           <TouchableOpacity
             onPress={onRequestDateRange}
-            onPressIn={() => onTapReport?.("เลือกช่วงวันที่", "down")}
             activeOpacity={0.8}
             className="flex-row items-center bg-violet-50 border border-violet-200 rounded-xl px-3 py-2.5"
           >
@@ -453,11 +424,10 @@ function TripDraftCardInner({
           value={slots.startTime ?? ""}
           emptyHint="ยังไม่ได้เลือกเวลา"
           editing={editing === "time"}
-          onToggle={toggleRow("time", "เวลาออกเดินทาง")}
+          onToggle={toggleRow("time")}
         >
           <TouchableOpacity
             onPress={onRequestTime}
-            onPressIn={() => onTapReport?.("เลือกเวลาออกเดินทาง", "down")}
             activeOpacity={0.8}
             className="flex-row items-center bg-violet-50 border border-violet-200 rounded-xl px-3 py-2.5"
           >
@@ -480,7 +450,7 @@ function TripDraftCardInner({
           }
           emptyHint="ยังไม่ได้เลือกรถ"
           editing={editing === "vehicle"}
-          onToggle={toggleRow("vehicle", "ประเภทรถ")}
+          onToggle={toggleRow("vehicle")}
           badge={
             slots.vehicleModel?.trim()
               ? { text: slots.vehicleModel.trim(), tone: "blue" }
@@ -493,7 +463,6 @@ function TripDraftCardInner({
                 key={v.key}
                 label={v.label}
                 active={vehicleClass === v.key}
-                onTapReport={onTapReport}
                 onPress={() =>
                   patch(
                     v.key === "public"
@@ -545,16 +514,13 @@ function TripDraftCardInner({
                   value={point?.label ?? ""}
                   emptyHint="ยังไม่ได้เลือก — ปล่อยว่างไว้ได้ ระบบจะจัดให้"
                   editing={editing === `day-${i}`}
-                  onToggle={toggleRow(`day-${i}`, `จุดสิ้นสุดของวันที่ ${i + 1}`)}
+                  onToggle={toggleRow(`day-${i}`)}
                   badge={
                     point?.coords ? { text: "มีพิกัด", tone: "green" } : undefined
                   }
                 >
                   <TouchableOpacity
                     onPress={() => requestOrigin({ day: i })}
-                    onPressIn={() =>
-                      onTapReport?.(`เลือกจุดจบของวันที่ ${i + 1}`, "down")
-                    }
                     activeOpacity={0.8}
                     className="flex-row items-center bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2.5"
                   >
@@ -643,7 +609,7 @@ function TripDraftCardInner({
           value={slots.travelers ? `${slots.travelers} คน` : "1 คน (ค่าเริ่มต้น)"}
           emptyHint="1 คน (ค่าเริ่มต้น)"
           editing={editing === "travelers"}
-          onToggle={toggleRow("travelers", "จำนวนผู้เดินทาง")}
+          onToggle={toggleRow("travelers")}
         >
           <View className="flex-row flex-wrap">
             {[1, 2, 3, 4, 6, 8].map((n) => (
@@ -651,7 +617,6 @@ function TripDraftCardInner({
                 key={n}
                 label={`${n} คน`}
                 active={slots.travelers === n}
-                onTapReport={onTapReport}
                 onPress={() => patch({ travelers: n })}
               />
             ))}
@@ -670,7 +635,7 @@ function TripDraftCardInner({
           }
           emptyHint="ใช้ค่าเริ่มต้น 3,000 บาท"
           editing={editing === "budget"}
-          onToggle={toggleRow("budget", "งบต่อคน")}
+          onToggle={toggleRow("budget")}
         >
           <View className="flex-row flex-wrap">
             {[1500, 3000, 5000, 8000, 12000].map((n) => (
@@ -678,7 +643,6 @@ function TripDraftCardInner({
                 key={n}
                 label={`${n.toLocaleString("th-TH")} บาท`}
                 active={slots.budgetPerPerson === n}
-                onTapReport={onTapReport}
                 onPress={() => patch({ budgetPerPerson: n })}
               />
             ))}
@@ -700,7 +664,6 @@ function TripDraftCardInner({
         {/* ── ปุ่มสร้างแพลน ────────────────────────────────────── */}
         <TouchableOpacity
           onPress={onCreatePlan}
-          onPressIn={() => onTapReport?.("สร้างแพลนทริป", "down")}
           disabled={!ready || creating}
           activeOpacity={0.85}
           className={`rounded-2xl py-3 items-center justify-center flex-row ${

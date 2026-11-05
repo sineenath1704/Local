@@ -1,5 +1,4 @@
 import React, { useRef, useState, useEffect, useCallback } from "react";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   View,
   Text,
@@ -70,8 +69,6 @@ import OriginSelectorModal from "../../components/OriginSelectorModal";
 import MyVideoViewer from "../../components/MyVideoViewer";
 import TripDraftCard, {
   TripOriginTarget,
-  TapReport,
-  renderCounter,
 } from "../../components/TripDraftCard";
 import TripDateRangeSheet from "../../components/TripDateRangeSheet";
 import TripTimeSheet from "../../components/TripTimeSheet";
@@ -179,192 +176,6 @@ function slotsFromTripContext(raw: unknown): TripSlots {
         ? itinerary.slice(0, -1).map((d: any) => d?.endPoint ?? null)
         : null,
   };
-}
-
-/**
- * แถบวินิจฉัยการแตะ (ชั่วคราว — ใช้หาสาเหตุอาการ "กดการ์ดแล้วไม่มีอะไรเกิดขึ้น")
- * ======================================================================
- * อยู่ **นอก** FlatList และมี state ของตัวเอง → ไม่ทำให้ลิสต์แชท re-render
- * และยังรายงานผลได้แม้การ์ดในลิสต์จะตายไปแล้ว
- *
- * ตัวเลขถูก "บันทึกไว้บนเครื่อง" ทุก ½ วินาที → ถ้าแอปตาย/ค้างจริง
- * เปิดแอปใหม่จะเห็นตัวเลขของรอบที่แล้ว (เรนเดอร์กี่ครั้ง · กดอะไรเป็นอันสุดท้าย)
- * → บอกได้ว่าเป็น "render loop" (ตัวเลขพุ่ง) หรือ "crash ฝั่ง native" (ตัวเลขนิ่ง)
- *
- * วิธีอ่านผล:
- *   · ปุ่ม "ทดสอบ" ยังกดได้ แต่ชิปในการ์ดไม่ผ่าน → ตัวการ์ดถูกบัง/ถูกทิ้ง
- *   · ชิปได้ "แตะลง" แต่ไม่ได้ "กด"           → แตะถูกขโมยไปเป็นการเลื่อน
- *   · ชิปได้ "กด" แล้วแต่หน้าจอไม่เปลี่ยน    → ปัญหาอยู่ถัดจากการกด
- */
-
-/** คีย์เก็บตัวเลขวินิจฉัยของรอบก่อน (บนเครื่อง) */
-const DIAG_KEY = "ai-chat-diag-last";
-
-interface DiagSnapshot {
-  chat: number;
-  card: number;
-  down: number;
-  press: number;
-  last: string;
-  at: number;
-  /** เวลาที่เอไaiใช้ตอบรอบล่าสุด (ms) */
-  replyMs?: number;
-  /** จำนวนครั้งที่ผู้ใช้ "กด" หลังเอไaiตอบกลับมาแล้ว */
-  pressAfter?: number;
-}
-
-/**
- * ตัวจับเวลาฝั่งแอป (ระดับโมดูล) — ใช้พิสูจน์ว่า "แอปค้างตอนเอไaiตอบกลับมาพอดี" หรือไม่
- * ------------------------------------------------------------------
- * ทฤษฎี: ผู้ใช้กดกรอกการ์ด → ส่งข้อความไป → ระหว่างรอคำตอบ ผู้ใช้กดชิปไปเรื่อยๆ
- *        → พอเอไaiตอบกลับมา (คำตอบใหม่เข้าลิสต์) = จุดที่การ์ดถูกย้าย/ถูกทับ
- *        → ปุ่มใต้นิ้วหาย → "ค้าง"
- * ตัวเลขที่ต้องดู: replyMs (เอไaiตอบช้าแค่ไหน) + pressAfter (กดไปกี่ครั้งก่อนตอบมา)
- */
-const aiDiag = {
-  /** เวลาที่ส่งข้อความรอบล่าสุด (epoch ms) */
-  sentAt: 0,
-  /** เวลาที่เอไaiตอบกลับมา (epoch ms) */
-  repliedAt: 0,
-  /** ระยะเวลาที่เอไaiใช้ตอบรอบล่าสุด (ms) */
-  lastReplyMs: 0,
-  /** จำนวนครั้งที่ผู้ใช้ "กด" บนการ์ด (นับตั้งแต่แอปเปิด) */
-  pressCount: 0,
-  /** จำนวน "กด" ตอนที่เอไaiเพิ่งตอบกลับมา (ใช้คำนวณว่ากดไปกี่ครั้งก่อนตอบ) */
-  pressAtReply: -1,
-};
-
-async function loadDiagSnapshot(): Promise<DiagSnapshot | null> {
-  try {
-    const raw = await AsyncStorage.getItem(DIAG_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as DiagSnapshot;
-    if (!parsed || typeof parsed.at !== "number") return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-async function saveDiagSnapshot(snap: DiagSnapshot): Promise<void> {
-  try {
-    await AsyncStorage.setItem(DIAG_KEY, JSON.stringify(snap));
-  } catch {
-    // บันทึกไม่สำเร็จก็ปล่อยไป — เป็นแค่ตัววินิจฉัย
-  }
-}
-
-function TapDiagStrip({
-  register,
-}: {
-  register: (fn: TapReport) => void;
-}) {
-  const [diag, setDiag] = useState({ down: 0, press: 0, last: "" });
-  /** จำนวนครั้งที่ render ต่อวินาที (0 = ไม่มี render loop) */
-  const [rate, setRate] = useState({ chat: 0, card: 0 });
-  const prevCountRef = useRef({ chat: 0, card: 0 });
-  /** ตัวเลขของ "รอบก่อน" (ถ้าแอปเพิ่งตายมา แอปใหม่จะเห็นตรงนี้) */
-  const [prevRun, setPrevRun] = useState<DiagSnapshot | null>(null);
-  /** เวลาที่เอไaiใช้ตอบ + จำนวนครั้งที่กดหลังตอบกลับมา */
-  const [timing, setTiming] = useState({ replyMs: 0, pressAfter: -1 });
-  /** เวลาที่หน้าจอนี้เปิด (ใช้แยกว่าตัวเลขที่อ่านมาเป็นของ "รอบก่อน" จริงไหม) */
-  const mountedAtRef = useRef<number | null>(null);
-  useEffect(() => {
-    mountedAtRef.current = Date.now();
-  }, []);
-  // เก็บค่าล่าสุดไว้ใน ref เพื่อไม่ต้องให้ interval ขึ้นใหม่ทุกครั้งที่แตะ
-  const diagRef = useRef(diag);
-  useEffect(() => {
-    diagRef.current = diag;
-  }, [diag]);
-
-  useEffect(() => {
-    register((label, phase) => {
-      setDiag((d) =>
-        phase === "press"
-          ? { down: d.down, press: d.press + 1, last: label }
-          : { down: d.down + 1, press: d.press, last: label }
-      );
-    });
-  }, [register]);
-
-  // อ่านตัวเลขของรอบก่อน (ถ้ามี)
-  useEffect(() => {
-    let cancelled = false;
-    void loadDiagSnapshot().then((snap) => {
-      // เก่ากว่าเวลาที่หน้าจอนี้เปิด = เป็นของรอบก่อนจริง ๆ
-      const mountedAt = mountedAtRef.current ?? 0;
-      if (!cancelled && snap && snap.at < mountedAt) setPrevRun(snap);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    const t = setInterval(() => {
-      const now = { chat: renderCounter.chat, card: renderCounter.card };
-      const prev = prevCountRef.current;
-      prevCountRef.current = now;
-      setRate({
-        chat: Math.max(0, (now.chat - prev.chat) * 2),
-        card: Math.max(0, (now.card - prev.card) * 2),
-      });
-      // เวลาที่เอไaiตอบ + กดไปกี่ครั้งก่อนคำตอบจะมา
-      const pressAfter = aiDiag.pressAtReply >= 0 ? aiDiag.pressCount - aiDiag.pressAtReply : -1;
-      setTiming({ replyMs: aiDiag.lastReplyMs, pressAfter });
-      // บันทึกไว้บนเครื่อง → ถ้าแอปตายจะได้ตัวเลขของรอบนั้นมาดู
-      void saveDiagSnapshot({
-        ...now,
-        down: diagRef.current.down,
-        press: diagRef.current.press,
-        last: diagRef.current.last,
-        at: Date.now(),
-        replyMs: aiDiag.lastReplyMs,
-        pressAfter,
-      });
-    }, 500);
-    return () => clearInterval(t);
-  }, []);
-
-  return (
-    <View
-      style={{ minHeight: 30 }}
-      className="bg-amber-50 border-b border-amber-200 px-3 py-1"
-    >
-      <View className="flex-row items-center">
-        <TouchableOpacity
-          onPressIn={() => setDiag((d) => ({ ...d, down: d.down + 1, last: "ปุ่มทดสอบ" }))}
-          onPress={() => setDiag((d) => ({ ...d, press: d.press + 1, last: "ปุ่มทดสอบ" }))}
-          activeOpacity={0.8}
-          className="bg-amber-500 px-2.5 py-1 rounded-full mr-2"
-        >
-          <Text className="text-white text-[11px] font-black">ทดสอบ</Text>
-        </TouchableOpacity>
-        <Text className="text-amber-900 text-[11px] font-bold flex-1" numberOfLines={1}>
-          {/* เรนเดอร์/วิ ขึ้นก่อน — เพราะเป็นตัวเลขที่สำคัญที่สุด (ถ้าไม่พุ่ง = ไม่ใช่ render loop) */}
-          เรนเดอร์/วิ {rate.chat}/{rate.card} · แตะ {diag.down} · กด {diag.press}
-          {diag.last ? ` · "${diag.last}"` : ""}
-        </Text>
-      </View>
-      {timing.replyMs > 0 ? (
-        <Text className="text-amber-800 text-[10.5px] font-bold" numberOfLines={1}>
-          ตอบกลับ: {(timing.replyMs / 1000).toFixed(1)} วิ · กดหลังตอบ:{" "}
-          {timing.pressAfter < 0 ? "-" : timing.pressAfter}
-        </Text>
-      ) : null}
-      {prevRun ? (
-        <Text className="text-amber-800 text-[10.5px] font-bold" numberOfLines={1}>
-          รอบก่อน: เรนเดอร์ {prevRun.chat}/{prevRun.card} · กด {prevRun.press}
-          {prevRun.last ? ` · "${prevRun.last}"` : ""}
-          {prevRun.replyMs ? ` · ตอบกลับ ${(prevRun.replyMs / 1000).toFixed(1)} วิ` : ""}
-          {prevRun.pressAfter != null && prevRun.pressAfter >= 0
-            ? ` · กดหลังตอบ ${prevRun.pressAfter}`
-            : ""}
-        </Text>
-      ) : null}
-    </View>
-  );
 }
 
 export default function AiChatScreen({
@@ -486,19 +297,6 @@ export default function AiChatScreen({
   const nearBottomRef = useRef(true);
   /** ผู้ใช้กำลังลากลิสต์อยู่ → ห้ามเลื่อนล่างเด็ดขาด */
   const draggingRef = useRef(false);
-  /**
-   * ผู้กดรายงานการแตะ (วินิจฉัยอาการ "กดการ์ดแล้วไม่มีอะไรเกิดขึ้น")
-   * → เก็บ callback ไว้ใน ref เพื่อไม่ให้ทั้งหน้าจอแชท re-render ทุกครั้งที่แตะ
-   */
-  const tapReporterRef = useRef<TapReport | null>(null);
-  const registerTapReporter = useCallback((fn: TapReport) => {
-    tapReporterRef.current = fn;
-  }, []);
-  const reportTap = useCallback((label: string, phase: "down" | "press") => {
-    // นับจำนวนครั้งที่ผู้ใช้ "กด" บนการ์ด (ใช้เทียบกับเวลาที่เอไaiตอบกลับมา)
-    if (phase === "press") aiDiag.pressCount += 1;
-    tapReporterRef.current?.(label, phase);
-  }, []);
 
   const thread = getThread(threadId);
 
@@ -525,11 +323,6 @@ export default function AiChatScreen({
       listRef.current?.scrollToEnd({ animated: false });
     });
   }, [thread?.messages.length]);
-
-  // ตัวนับจำนวนครั้งที่หน้าจอแชท render (วินิจฉัย render loop — ชั่วคราว)
-  useEffect(() => {
-    renderCounter.chat += 1;
-  });
 
   /** ผู้ใช้อยู่ห่างจากล่างสุดแค่ไหน → ใช้ตัดสินว่าจะเลื่อนอัตโนมัติไหม */
   const handleScroll = useCallback(
@@ -1224,8 +1017,6 @@ export default function AiChatScreen({
     }
 
     try {
-      // จับเวลา: เอไaiตอบกลับมาช้าแค่ไหน (ใช้เทียบกับจำนวนครั้งที่ผู้ใช้กดระหว่างรอ)
-      aiDiag.sentAt = Date.now();
       const result = await sendChat(history, {
         folder: folderCtxPayload,
         // ส่งรหัสโฟลเดอร์ → backend โหลดคลิปจริง + จับคู่ทะเบียนสถานที่เอง
@@ -1252,10 +1043,6 @@ export default function AiChatScreen({
         // แผนที่กำลังแก้ → backend แทรกลง system prompt ให้เอไaiอ้างอิงได้
         planContext: opts?.planContext ?? null,
       });
-      // เอไaiตอบกลับมาแล้ว → บันทึกเวลาที่ใช้ + จำนวน "กด" ที่เกิดไประหว่างรอคำตอบ
-      aiDiag.repliedAt = Date.now();
-      aiDiag.lastReplyMs = aiDiag.repliedAt - aiDiag.sentAt;
-      aiDiag.pressAtReply = aiDiag.pressCount;
       // เอไaiสกัดช่องข้อมูลได้ → รวมกับที่ผู้ใช้เคยกรอก (ค่าที่โมเดลไม่รู้จะไม่ทับของเดิม
       // และพิกัดที่ผู้ใช้เลือกเองจะไม่หาย)
       // ── สำคัญ: รวมกับ "ค่าล่าสุด" ไม่ใช่ค่าตอนส่งข้อความ ──
@@ -1435,7 +1222,6 @@ export default function AiChatScreen({
       onRequestOrigin={setCardOriginTarget}
       onRequestDateRange={() => openCardPicker("date")}
       onRequestTime={() => openCardPicker("time")}
-      onTapReport={reportTap}
     />
   );
 
@@ -1485,9 +1271,6 @@ export default function AiChatScreen({
           </TouchableOpacity>
         )}
       </View>
-
-      {/* แถบวินิจฉัยการแตะ (ชั่วคราว) — อยู่นอกลิสต์ จึงรายงานผลได้แม้การ์ดในลิสต์จะค้าง */}
-      <TapDiagStrip register={registerTapReporter} />
 
       {/* Mode toggle — visible only for hosts. Defaults to the historical
           tourist behaviour; host-self is a JWT-gated advisor that reads the
