@@ -266,6 +266,10 @@ export interface TripSlots {
    * (backend ไม่ได้อยู่ใน TRIP_DRAFT แต่รับ dayEndPoints ตอนเรียก /trips/plan)
    */
   dayEndPoints?: (TripPlanPoint | null)[] | null;
+  /**
+   * สถานที่ปลายทางที่ผู้ใช้ต้องการไป (เก็บลง data ฝั่งแอป ไม่ต้องผ่าน AI)
+   */
+  destinations?: TripPlanPoint[] | null;
 }
 
 // ---- ช่วงวันที่ (คำนวณจากสตริง ไม่ผ่าน Date.parse ข้ามเขตเวลา) ----
@@ -484,6 +488,7 @@ export function normalizeTripSlotsShape(
     budgetPerPerson: r.budgetPerPerson ?? null,
     style: r.style ?? null,
     dayEndPoints: Array.isArray(r.dayEndPoints) ? r.dayEndPoints : null,
+    destinations: Array.isArray(r.destinations) ? r.destinations : null,
   };
 }
 

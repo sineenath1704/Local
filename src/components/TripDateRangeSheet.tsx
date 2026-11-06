@@ -321,19 +321,23 @@ export default function TripDateRangeSheet({
             </Pressable>
             <Pressable
               onPress={() => {
-                if (pickStart && pickEnd) onConfirm(pickStart, pickEnd);
+                const end = pickEnd ?? pickStart;
+                if (pickStart && end) {
+                  console.log("[TripDateRangeSheet] confirming dates:", pickStart, end);
+                  onConfirm(pickStart, end);
+                }
               }}
-              disabled={!pickStart || !pickEnd}
+              disabled={!pickStart}
               accessibilityRole="button"
               accessibilityLabel="ตกลง"
               style={({ pressed }) => ({ opacity: pressed ? 0.8 : 1 })}
               className={`flex-1 py-3 rounded-2xl items-center justify-center ml-2 ${
-                pickStart && pickEnd ? "bg-violet-600" : "bg-gray-200"
+                pickStart ? "bg-violet-600" : "bg-gray-200"
               }`}
             >
               <Text
                 className={`text-[14px] font-bold ${
-                  pickStart && pickEnd ? "text-white" : "text-gray-400"
+                  pickStart ? "text-white" : "text-gray-400"
                 }`}
               >
                 ตกลง

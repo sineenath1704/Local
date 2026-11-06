@@ -299,7 +299,10 @@ export default function TripTimeSheet({
               <Text className="text-[14px] font-bold text-gray-600">ยกเลิก</Text>
             </Pressable>
             <Pressable
-              onPress={() => onConfirm(text)}
+              onPress={() => {
+                console.log("[TripTimeSheet] confirming time:", text);
+                onConfirm(text);
+              }}
               accessibilityRole="button"
               accessibilityLabel="ตกลง"
               style={({ pressed }) => ({ opacity: pressed ? 0.8 : 1 })}

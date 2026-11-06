@@ -418,6 +418,11 @@ export default function AiChatScreen({
       applyDraftSlots({ ...prev, endPoint: point, returnMode: "custom" });
       return;
     }
+    if (target === "destination") {
+      const currentDests = prev.destinations ?? [];
+      applyDraftSlots({ ...prev, destinations: [...currentDests, point] });
+      return;
+    }
     const list = [...(prev.dayEndPoints ?? [])];
     list[target.day] = point;
     applyDraftSlots({ ...prev, dayEndPoints: list });
@@ -527,6 +532,7 @@ export default function AiChatScreen({
     }
     if (incoming.style && !userChanged("style")) next.style = incoming.style;
     if (current.dayEndPoints) next.dayEndPoints = current.dayEndPoints;
+    if (current.destinations) next.destinations = current.destinations;
     if (next.returnMode === "same_as_start") next.endPoint = null;
     return next;
   };
@@ -569,10 +575,21 @@ export default function AiChatScreen({
     }
   ): PlanTripRequest => {
     const base = planRequestFromSlots(slots, folder?.id ?? null);
+    const destStops: NonNullable<PlanTripRequest["extraStops"]> = (slots.destinations ?? [])
+      .filter((d) => !!d.coords)
+      .map((d) => ({
+        label: d.label,
+        address: d.address ?? null,
+        coords: d.coords!,
+      }));
+    const combinedExtraStops = [
+      ...destStops,
+      ...(opts?.extraStops ?? []),
+    ];
     return {
       ...base,
       selectedStops: opts?.selectedStops,
-      extraStops: opts?.extraStops,
+      extraStops: combinedExtraStops.length > 0 ? combinedExtraStops : undefined,
       fuelPriceOverride: opts?.fuelPriceOverride ?? undefined,
       save: opts?.save ?? false,
     };
@@ -631,8 +648,23 @@ export default function AiChatScreen({
     // ถ้ากำลังแก้แผนเดิมอยู่ → แผนใหม่ต้องไปทับแผนเดิม ไม่ใช่สร้างการ์ดใหม่
     const targetId = editingPlanMessageId ?? messageId;
     // ใช้ค่าล่าสุดเสมอ (ผู้ใช้อาจแก้การ์ดระหว่างที่รอเอไaiตอบ)
-    const slots = draftSlotsRef.current;
+    const rawSlots = draftSlotsRef.current;
+    console.log("[AiChatScreen] handleCreatePlan called, rawSlots:", rawSlots);
     setPlanning(true);
+
+    // ถ้าผู้ใช้กดข้ามจุดเริ่มต้น หรือจุดยังไม่มีพิกัด ให้เตรียมค่าเริ่มต้นที่ใช้งานได้
+    const slots: TripSlots = {
+      ...rawSlots,
+      startPoint: rawSlots.startPoint?.coords
+        ? rawSlots.startPoint
+        : rawSlots.startPoint?.label
+        ? { label: rawSlots.startPoint.label, coords: { lat: 18.7883, lng: 98.9853 } }
+        : { label: "เชียงใหม่ (จุดเริ่มต้น)", coords: { lat: 18.7883, lng: 98.9853 } },
+      returnMode: rawSlots.returnMode ?? "same_as_start",
+      budgetPerPerson: rawSlots.budgetPerPerson ?? 3000,
+      startTime: rawSlots.startTime ?? "08:00",
+    };
+
     // รถยังไม่ได้ระบุ → การ์ดแผนจะถามอีกรอบตอนสรุปค่าใช้จ่าย
     setVehicleSpecified((prev) => ({
       ...prev,
@@ -1303,6 +1335,10 @@ export default function AiChatScreen({
       onRequestOrigin={setCardOriginTarget}
       onRequestDateRange={() => openCardPicker("date")}
       onRequestTime={() => openCardPicker("time")}
+      onSendToChat={(message, slotsOverride) => {
+        console.log("[AiChatScreen] onSendToChat from card:", message);
+        void send(message, { tripDraftOverride: slotsOverride });
+      }}
     />
   );
 
@@ -1977,6 +2013,19 @@ export default function AiChatScreen({
         visible={cardOriginTarget !== null}
         onClose={() => setCardOriginTarget(null)}
         onSelectOrigin={handleCardOriginSelected}
+        title={
+          cardOriginTarget === "destination"
+            ? "เพิ่มสถานที่ที่ต้องการไป"
+            : cardOriginTarget === "end"
+            ? "เลือกจุดสิ้นสุดตอนกลับ"
+            : "เลือกจุดเริ่มต้นการเดินทาง"
+        }
+        subtitle={
+          cardOriginTarget === "destination"
+            ? "ค้นหาชื่อสถานที่ หรือวางลิงก์ Google Maps เพื่อบันทึกเข้าทริป"
+            : "ระบุตำแหน่งบ้าน หอพัก หรือวางลิงก์ Google Maps"
+        }
+        defaultLabel={cardOriginTarget === "destination" ? "สถานที่ท่องเที่ยว" : "บ้าน"}
       />
 
       {/* ปฏิทินเลือกช่วงวันที่ (วันเริ่ม → วันสิ้นสุด ในหน้าเดียว)

@@ -15,9 +15,7 @@ import {
   HomeIcon,
   BuildingOfficeIcon,
   LinkIcon,
-  BookmarkSquareIcon,
   CheckIcon,
-  PlusIcon,
 } from "react-native-heroicons/outline";
 import {
   getSavedPlaces,
@@ -33,6 +31,9 @@ interface OriginSelectorModalProps {
   onClose: () => void;
   onSelectOrigin: (origin: { label: string; address: string; url?: string; coords?: { lat: number; lng: number } }) => void;
   onOpenMapPicker?: () => void;
+  title?: string;
+  subtitle?: string;
+  defaultLabel?: string;
 }
 
 export default function OriginSelectorModal({
@@ -40,6 +41,9 @@ export default function OriginSelectorModal({
   onClose,
   onSelectOrigin,
   onOpenMapPicker,
+  title,
+  subtitle,
+  defaultLabel = "บ้าน",
 }: OriginSelectorModalProps) {
   const [savedList, setSavedList] = useState<UserSavedPlace[]>([]);
   const [loading, setLoading] = useState(false);
@@ -47,24 +51,26 @@ export default function OriginSelectorModal({
   const [resolvingId, setResolvingId] = useState<string | null>(null);
 
   // Manual input state
-  const [placeLabel, setPlaceLabel] = useState("บ้าน");
+  const [placeLabel, setPlaceLabel] = useState(defaultLabel);
   const [inputAddress, setInputAddress] = useState("");
   const [mapsUrl, setMapsUrl] = useState("");
   const [saveAsFav, setSaveAsFav] = useState(false);
   const [savingFav, setSavingFav] = useState(false);
 
   useEffect(() => {
-    if (visible) {
-      loadSaved();
-    }
+    if (!visible) return;
+    let isMounted = true;
+    (async () => {
+      const list = await getSavedPlaces();
+      if (isMounted) {
+        setSavedList(list);
+        setLoading(false);
+      }
+    })();
+    return () => {
+      isMounted = false;
+    };
   }, [visible]);
-
-  const loadSaved = async () => {
-    setLoading(true);
-    const list = await getSavedPlaces();
-    setSavedList(list);
-    setLoading(false);
-  };
 
   /**
    * บันทึกเป็นที่อยู่ประจำ (ถ้าผู้ใช้ติ๊กไว้) แล้วส่งจุดที่เลือกกลับไป
@@ -104,17 +110,21 @@ export default function OriginSelectorModal({
     }
 
     setSavingFav(true);
+    console.log("[OriginSelectorModal] handleConfirmInput start:", { addr, url, placeLabel });
     const parsed = await resolveGoogleMapsUrl(url);
+    console.log("[OriginSelectorModal] parsed url result:", parsed);
 
     // ยังไม่มีพิกัดในตัวลิงก์ → ให้ backend ช่วย (กางลิงก์สั้น / ค้นชื่อสถานที่)
     let lat = parsed.lat;
     let lng = parsed.lng;
     let placeName = parsed.placeName;
     if ((lat == null || lng == null) && (url || addr)) {
+      console.log("[OriginSelectorModal] resolving coords from backend...");
       const resolved = await resolvePlaceCoords({
         url: url || null,
         text: addr || null,
       });
+      console.log("[OriginSelectorModal] resolved coords result:", resolved);
       if (resolved) {
         lat = resolved.lat;
         lng = resolved.lng;
@@ -124,20 +134,12 @@ export default function OriginSelectorModal({
     setSavingFav(false);
 
     const coords = lat != null && lng != null ? { lat, lng } : undefined;
-    // ผู้ใช้พิมพ์ที่อยู่เอง → ใช้แท็กที่เลือก (บ้าน/หอพัก/…) เป็นชื่อที่บันทึก
-    // ถ้าไม่ได้พิมพ์ (วางลิงก์อย่างเดียว) → ใช้ชื่อสถานที่ที่หาพิกัดได้
-    const placeTitle = addr
-      ? placeLabel
-      : placeName || placeLabel || "จุดเริ่มต้น";
-    const displayAddress = addr
-      ? addr
-      : placeName
-      ? coords
-        ? `${placeName} (พิกัด: ${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)})`
-        : placeName
-      : coords
-      ? `พิกัด (${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)})`
-      : url;
+    // ผู้ใช้พิมพ์ที่อยู่เอง หรือตั้งชื่อแท็กไว้ → ใช้ชื่อที่เขาตั้งเสมอ!
+    // รู้แค่พิกัดพอกับชื่อที่เขาตั้งที่พิกัด ไม่ต้องพึ่งพาชื่อจาก Google Places
+    const userChosenTitle = placeLabel?.trim() || addr || placeName || "จุดที่เลือก";
+    const placeTitle = userChosenTitle;
+    const displayAddress = addr || placeName || (coords ? `พิกัด (${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)})` : url);
+    console.log("[OriginSelectorModal] final selection:", { placeTitle, displayAddress, coords });
 
     // หาพิกัดไม่ได้ → บอกผู้ใช้ก่อน (แผนทริปต้องใช้พิกัดถึงจะคำนวณเส้นทางได้)
     if (!coords) {
@@ -222,9 +224,13 @@ export default function OriginSelectorModal({
         <View className="bg-white rounded-t-3xl p-5 max-h-[85%]">
           {/* Header */}
           <View className="flex-row items-center justify-between pb-3 border-b border-gray-100">
-            <View>
-              <Text className="text-[17px] font-black text-gray-900">เลือกจุดเริ่มต้นการเดินทาง</Text>
-              <Text className="text-[12px] text-gray-400">ระบุตำแหน่งบ้าน หอพัก หรือวางลิงก์ Google Maps</Text>
+            <View className="flex-1 mr-2">
+              <Text className="text-[17px] font-black text-gray-900" numberOfLines={1}>
+                {title ?? "เลือกจุดเริ่มต้นการเดินทาง"}
+              </Text>
+              <Text className="text-[12px] text-gray-400" numberOfLines={1}>
+                {subtitle ?? "ระบุตำแหน่งบ้าน หอพัก หรือวางลิงก์ Google Maps"}
+              </Text>
             </View>
             <TouchableOpacity onPress={onClose} className="p-1.5 bg-gray-100 rounded-full">
               <XMarkIcon size={20} color="#4B5563" />
@@ -351,9 +357,14 @@ export default function OriginSelectorModal({
               className="bg-violet-600 rounded-2xl py-3.5 items-center justify-center mb-6 shadow-md shadow-violet-200"
             >
               {savingFav ? (
-                <ActivityIndicator size="small" color="#FFFFFF" />
+                <View className="flex-row items-center">
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                  <Text className="text-white text-[13.5px] font-bold ml-2">กำลังตรวจสอบพิกัด...</Text>
+                </View>
               ) : (
-                <Text className="text-white text-[14px] font-bold">ใช้จุดเริ่มต้นนี้ 🚗</Text>
+                <Text className="text-white text-[14px] font-bold">
+                  {title?.includes("สถานที่") ? "เพิ่มสถานที่นี้ 📍" : "ใช้จุดนี้ 🚗"}
+                </Text>
               )}
             </TouchableOpacity>
           </ScrollView>
