@@ -81,6 +81,15 @@ export const FALLBACK_FUEL_PRICES: Record<string, number> = {
 
 export const FALLBACK_EFFECTIVE_DATE = "29 ต.ค. 2569";
 
+/**
+ * ราคาไฟฟ้า (บาท/หน่วย = บาท/kWh) ที่ใช้เป็นค่าเริ่มต้นของรถไฟฟ้า
+ * -------------------------------------------------------------
+ * ไม่มีเว็บราคาไฟที่ดึงมาได้ (ราคาไฟขึ้นกับหน่วยงาน/โรงไฟฟ้า/ค่า ฟี.)
+ * → ใช้ค่ากลางของค่าไฟฟ้าบ้านเรื่อนไทย แล้วติดป้าย "ประมาณการ" เสมอ
+ * ผู้ใช้แก้เองได้ในการ์ดแผน (ช่อง "ราคาไฟ") → ค่าที่ผู้ใช้ระบุชนะเสมอ
+ */
+export const ELECTRICITY_PRICE_PER_KWH = 3.98;
+
 export type FuelPriceSource = "pttor.com" | "cache" | "fallback";
 
 export interface FuelPriceTable {

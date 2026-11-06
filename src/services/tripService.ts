@@ -369,14 +369,16 @@ export function planRequestFromSlots(
   const rangeDays = tripRangeDays(slots.startDate, slots.endDate);
   const days = Math.min(TRIP_MAX_DAYS, Math.max(1, rangeDays ?? 1));
 
-  // รถ: 2 คลาส (ส่วนตัว / สาธารณะ) → backend รู้จัก key เดิม
+  // รถ: 3 คลาส (ส่วนตัว / ไฟฟ้า / สาธารณะ) → backend รู้จัก key เดิม
+  // รถไฟฟ้าต้องบอก `fuelType: "electric"` ด้วย → backend จะได้คิดเป็นค่าไฟ ไม่ใช่ค่าน้ำมัน
   const vehicleClass = vehicleClassOf(slots.vehicle);
-  const vehicle =
-    slots.fuelType === "electric"
-      ? "ev"
-      : vehicleClass === "public"
-      ? "public"
-      : slots.vehicle ?? "private_car";
+  const isEv = vehicleClass === "ev" || slots.fuelType === "electric";
+  const vehicle = isEv
+    ? "ev"
+    : vehicleClass === "public"
+    ? "public"
+    : slots.vehicle ?? "private_car";
+  const fuelType = isEv ? "electric" : slots.fuelType ?? null;
 
   return {
     folderId: folderId ?? null,
@@ -389,7 +391,7 @@ export function planRequestFromSlots(
     dayEndPoints: slots.dayEndPoints ?? undefined,
     vehicle,
     vehicleModel: slots.vehicleModel ?? null,
-    fuelType: slots.fuelType ?? null,
+    fuelType,
     travelers: Math.max(1, Number(slots.travelers) || 1),
     budgetPerPerson: Number(slots.budgetPerPerson) || 3000,
     style: slots.style || "ท่องเที่ยวธรรมชาติและชุมชนท้องถิ่น",

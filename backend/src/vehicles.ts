@@ -47,6 +47,8 @@ export interface VehicleProfile {
   label: string;
   /** กิโลเมตรต่อลิตร · null = ไม่ใช้น้ำมัน (ไฟฟ้า / ขนส่งสาธารณะ) */
   kmPerLitre: number | null;
+  /** กิโลวัตต์ต่อ 100 กม. (รถไฟฟ้าเท่านั้น) */
+  energyPer100km?: number;
   /** ชนิดน้ำมันที่ตั้งเป็นค่าเริ่มต้นของรถ (ผู้ใช้เปลี่ยนได้) */
   defaultFuelType: FuelType | null;
   /** true = คิดค่าเดินทางแยก ไม่คิดค่าน้ำมัน */
@@ -93,6 +95,8 @@ export const VEHICLES: VehicleProfile[] = [
     key: "ev",
     label: "รถไฟฟ้า",
     kmPerLitre: null,
+    // ค่ากลางของรถไฟฟ้าในไทย (~15–20 kWh/100 กม.) → ใช้ 18 เป็นค่าประมาณการ
+    energyPer100km: 18,
     defaultFuelType: "electric",
     usesFuel: false,
   },
@@ -149,4 +153,22 @@ export function evCost(
   if (!Number.isFinite(km) || km <= 0) return 0;
   const kwh = (km / 100) * kwhPer100km;
   return Math.round(kwh * pricePerKwh * 100) / 100;
+}
+
+/**
+ * ค่าเดินทางตามพลังงานของรถ (หน่วยของ `pricePerUnit` ขึ้นกับประเภทรถ)
+ * -------------------------------------------------------------
+ * · รถน้ำมัน  → กม. ÷ (กม./ลิตร) × บาท/ลิตร
+ * · รถไฟฟ้า → (กม./100) × kWh/100 กม. × บาท/หน่วย
+ * · รถสาธารณะ → 0 (ไม่มีค่าเดินทางในแผน)
+ */
+export function vehicleEnergyCost(
+  km: number,
+  vehicle: VehicleProfile,
+  pricePerUnit: number | null
+): number {
+  if (vehicle.key === "ev") {
+    return evCost(km, vehicle.energyPer100km ?? null, pricePerUnit);
+  }
+  return fuelCost(km, vehicle, pricePerUnit);
 }

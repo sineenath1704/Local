@@ -30,7 +30,11 @@ import {
   FUEL_TYPE_LABELS,
   type FuelType,
 } from "../vehicles";
-import { fetchFuelPrices, resolveFuelPrice } from "../fuelPrice";
+import {
+  ELECTRICITY_PRICE_PER_KWH,
+  fetchFuelPrices,
+  resolveFuelPrice,
+} from "../fuelPrice";
 import { findLodging } from "../lodging";
 import { config, isPlacesConfigured } from "../config";
 
@@ -972,15 +976,25 @@ router.post("/plan", async (req: Request, res: Response) => {
   const startTime = /^\d{1,2}:\d{2}$/.test(startTimeStr)
     ? startTimeStr.padStart(5, "0")
     : "08:00";
-  const vehicle = getVehicle(String(b.vehicle ?? ""));
+  const rawVehicle = getVehicle(String(b.vehicle ?? ""));
   // ชื่อ/รุ่นรถที่ผู้ใช้กรอก (เช่น "Isuzu D-Max") — ใช้เป็นตัวช่วยเดาชนิดน้ำมัน
   const vehicleModelRaw = String(b.vehicleModel ?? "").trim().slice(0, 80);
   const vehicleModel = vehicleModelRaw || null;
   // ลำดับชนิดน้ำมัน: ที่เอไai/ผู้ใช้ระบุไว้ → เดาจากชื่อรถ → ค่าเริ่มต้นของโปรไฟล์รถ
-  const fuelType =
-    normalizeFuelType(b.fuelType) ??
-    inferFuelTypeFromVehicleModel(vehicleModel) ??
-    vehicle.defaultFuelType;
+  const requestedFuelType =
+    normalizeFuelType(b.fuelType) ?? inferFuelTypeFromVehicleModel(vehicleModel);
+  /**
+   * รถไฟฟ้าได้ 2 ทาง
+   *   · เลือกคลาส "รถไฟฟ้า" มา → vehicle = "ev"
+   *   · เลือก "รถยนต์ส่วนตัว" แต่พิมพ์รุ่นที่เป็นไฟฟ้า (เช่น "BYD Atto 3")
+   *     → เดาจากชื่อรถได้ fuelType = "electric"
+   * ทั้งสองทางต้องคิดเป็น **ค่าไฟ** ไม่ใช่ค่าน้ำมัน → ใช้โปรไฟล์ EV
+   */
+  const isEv =
+    rawVehicle.key !== "public" &&
+    (rawVehicle.key === "ev" || requestedFuelType === "electric");
+  const vehicle = isEv ? getVehicle("ev") : rawVehicle;
+  const fuelType = requestedFuelType ?? vehicle.defaultFuelType;
   // รถสาธารณะ = ไม่มีค่าน้ำมันในแผน
   const finalFuelType = vehicle.key === "public" ? null : fuelType;
   const travelers = Math.max(1, Math.round(Number(b.travelers) || 1));
@@ -1092,11 +1106,15 @@ router.post("/plan", async (req: Request, res: Response) => {
     }))
     .filter((s) => s.id || s.name);
 
-  // ── ราคาน้ำมันสด (ต้องมีเสมอ ห้ามให้โมเดลเดา) ─────────────────────
-  const fuelTable = await fetchFuelPrices();
-  const resolvedFuel = finalFuelType
-    ? resolveFuelPrice(fuelTable, finalFuelType, fuelPriceOverride)
-    : null;
+  // ── ราคาพลังงาน (ห้ามให้โมเดลเดา) ─────────────────────────────────────
+  // รถน้ำมัน → ดึงราคาน้ำมันสดจากเว็บ (ต้องมีเสมอ)
+  // รถไฟฟ้า → ไม่มี "ราคาน้ำมัน" → ใช้ราคาไฟต่อหน่วย (บาท/kWh) แทน
+  // รถสาธารณะ → ไม่มีค่าเดินทางในแผน
+  const fuelTable = vehicle.usesFuel ? await fetchFuelPrices() : null;
+  const resolvedFuel =
+    finalFuelType && fuelTable
+      ? resolveFuelPrice(fuelTable, finalFuelType, fuelPriceOverride)
+      : null;
 
   // ── ให้ AI เลือกจุด + จัดวัน ───────────────────────────────────────
   const tripReq: TripRequest = {
@@ -1129,13 +1147,25 @@ router.post("/plan", async (req: Request, res: Response) => {
       userAdded: c.userAdded ?? false,
     })),
   };
-  if (finalFuelType && resolvedFuel) {
+  if (isEv) {
+    // รถไฟฟ้า → ส่ง "ราคาไฟ" ให้โมเดล (หน่วย บาท/kWh ไม่ใช่ บาท/ลิตร)
+    tripReq.fuel = {
+      fuelType: "electric",
+      pricePerLitre: fuelPriceOverride ?? ELECTRICITY_PRICE_PER_KWH,
+      kmPerLitre: undefined,
+      source: fuelPriceOverride ? "ผู้ใช้ระบุเอง" : "ค่าประมาณการ (ราคาไฟฟ้า)",
+      unit: "บาท/kWh",
+      note:
+        "รถไฟฟ้า — คิดเป็นค่าไฟ (ไม่ใช่ค่าน้ำมัน) ใช้ประมาณ 18 kWh/100 กม. ถ้าไม่มีข้อมูลอื่น",
+    };
+  } else if (finalFuelType && resolvedFuel) {
     tripReq.fuel = {
       fuelType: finalFuelType,
       pricePerLitre: resolvedFuel.pricePerLitre ?? undefined,
       kmPerLitre: vehicle.kmPerLitre ?? undefined,
       source: resolvedFuel.sourceLabel,
       asOf: resolvedFuel.effectiveDate,
+      unit: "บาท/ลิตร",
     };
   }
 

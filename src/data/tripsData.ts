@@ -363,13 +363,20 @@ export function formatThaiDateRange(
   return `${span} · ${days} วัน${nights > 0 ? ` ${nights} คืน` : " · ไป-กลับ"}`;
 }
 
-// ---- ประเภทรถ (2 แบบ) ----
+// ---- ประเภทรถ (3 แบบ) ----
 
-/** รถที่ผู้ใช้เลือกได้มีแค่ 2 คลาส */
-export type VehicleClass = "private_car" | "public";
+/**
+ * รถที่ผู้ใช้เลือกได้มี 3 คลาส
+ * -------------------------------------------------------------
+ * · private_car — รถยนต์ส่วนตัว (น้ำมัน/ไฟฟ้า ขึ้นกับรุ่นที่ผู้ใช้ระบุ)
+ * · ev         — รถไฟฟ้า (คิดค่าไฟ ไม่ใช่ค่าน้ำมัน)
+ * · public     — ขนส่งสาธารณะ (ไม่คิดค่าเดินทาง)
+ */
+export type VehicleClass = "private_car" | "ev" | "public";
 
 export const VEHICLE_CLASS_OPTIONS: { key: VehicleClass; label: string }[] = [
-  { key: "private_car", label: "รถส่วนตัว" },
+  { key: "private_car", label: "รถยนต์ส่วนตัว" },
+  { key: "ev", label: "รถไฟฟ้า" },
   { key: "public", label: "รถสาธารณะ" },
 ];
 
@@ -391,7 +398,7 @@ const PUBLIC_VEHICLE_WORDS = [
 ];
 
 /**
- * จัดค่าที่ได้ (key หรือชื่อรถ) → เป็นคลาสรถ 2 แบบ
+ * จัดค่าที่ได้ (key หรือชื่อรถ) → เป็นคลาสรถ 3 แบบ
  * → null = ยังไม่ได้เลือกรถ
  */
 export function vehicleClassOf(v?: string | null): VehicleClass | null {
@@ -403,7 +410,11 @@ export function vehicleClassOf(v?: string | null): VehicleClass | null {
   );
   if (opt) return opt.key;
   const hit = VEHICLE_OPTIONS.find((o) => o.key === raw || o.label === raw);
-  if (hit) return hit.key === "public" ? "public" : "private_car";
+  if (hit) {
+    if (hit.key === "public") return "public";
+    if (hit.key === "ev") return "ev";
+    return "private_car";
+  }
   const lower = raw.toLowerCase();
   if (PUBLIC_VEHICLE_WORDS.some((w) => lower.includes(w.toLowerCase()))) {
     return "public";
@@ -503,11 +514,15 @@ export function slotsFromWire(wire?: TripSlotsWire | null): TripSlots {
 /**
  * ข้อมูลที่ยังขาด — คำนวณแบบ deterministic ฝั่งแอป
  * -------------------------------------------------------------
- * ต้องมี: จุดเริ่ม(พร้อมพิกัด) · จุดสิ้นสุดตอนกลับ (เมื่อกลับคนละจุด)
- * · ช่วงวันที่ที่ถูกต้อง · เวลาออกเดินทาง · ประเภทรถ
- * และ "ชื่อ/รุ่นรถ" เมื่อเป็นรถส่วนตัว
+ * รอบแรก (การ์ดช่องข้อมูล) ขอแค่ 5 อย่าง:
+ *   จุดเริ่ม(พร้อมพิกัด) · จุดสิ้นสุดตอนกลับ (เมื่อกลับคนละจุด)
+ *   · ช่วงวันที่ที่ถูกต้อง · เวลาออกเดินทาง
  *
- * งบ / จำนวนคน / จุดสิ้นสุดรายวัน / สไตล์ → **ไม่บังคับ** (มีค่าเริ่มต้นของระบบ)
+ * **ประเภทรถ / ชื่อรุ่นรถ / จำนวนคน / จุดสิ้นสุดรายวัน → ไม่บังคับ**
+ *   ย้ายไปถามอีกรอบตอนสรุปค่าใช้จ่าย (หลังจัดการเส้นทางเสร็จ) แทนการบังคับกรอกตอนแรก
+ *   → ผู้ใช้ที่ไม่รู้ว่ารถตัวเองเป็นรุ่นอะไร ยังกดส่งข้อมูลได้
+ *
+ * งบ / สไตล์ → **ไม่บังคับ** (มีค่าเริ่มต้นของระบบ)
  */
 export function computeTripMissing(slots: TripSlots): string[] {
   const missing: string[] = [];
@@ -543,13 +558,6 @@ export function computeTripMissing(slots: TripSlots): string[] {
   }
 
   if (!slots.startTime) missing.push("เวลาออกเดินทาง");
-
-  const vehicleClass = vehicleClassOf(slots.vehicle);
-  if (!vehicleClass) {
-    missing.push("ประเภทรถ");
-  } else if (vehicleClass === "private_car" && !slots.vehicleModel?.trim()) {
-    missing.push("ชื่อ/รุ่นรถ");
-  }
 
   return missing;
 }

@@ -21,10 +21,11 @@ import {
   describeVerdict,
   type OpenVerdict,
 } from "./openHours";
-import { fuelCost, type VehicleProfile, type FuelType } from "./vehicles";
+import { vehicleEnergyCost, type VehicleProfile, type FuelType } from "./vehicles";
 import {
   resolveFuelPrice,
   describeFuelPrice,
+  ELECTRICITY_PRICE_PER_KWH,
   type FuelPriceTable,
   type ResolvedFuelPrice,
 } from "./fuelPrice";
@@ -530,6 +531,7 @@ export async function buildTripPlan(
   // ── ราคาน้ำมัน (เฉพาะรถที่ใช้น้ำมัน — รถสาธารณะ/รถไฟฟ้าไม่มีค่าน้ำมัน) ──
   // รถสาธารณะ → ไม่ต้องดึงราคา · ไม่มีชนิดน้ำมัน · ไม่มีค่าน้ำมันในแผน
   const usesFuel = input.vehicle.usesFuel;
+  const isEv = input.vehicle.key === "ev";
   const fuelTable = usesFuel ? await deps.fuelPrices() : null;
   // รถไฟฟ้ายังมีชนิดพลังงาน (electric) แต่ไม่มี "ราคาน้ำมัน" → เก็บชนิดไว้ ค่าไฟคิดแยก
   const fuelType: FuelType | null =
@@ -538,6 +540,19 @@ export async function buildTripPlan(
     usesFuel && fuelTable && fuelType
       ? resolveFuelPrice(fuelTable, fuelType, input.fuelPriceOverride)
       : null;
+  /**
+   * รถไฟฟ้า → คิดค่าไฟ (บาท/kWh) แทนค่าน้ำมัน
+   * ราคาที่ผู้ใช้ระบุเอง (fuelPriceOverride) ชนะค่าประมาณการเสมอ
+   */
+  const electricityPrice: number | null = isEv
+    ? input.fuelPriceOverride ?? ELECTRICITY_PRICE_PER_KWH
+    : null;
+  if (isEv) {
+    assumptions.push(
+      `ราคาไฟ ${electricityPrice?.toFixed(2)} บาท/หน่วย · ค่าประมาณการ ` +
+        `(รถไฟฟ้าใช้พลังงาน ${input.vehicle.energyPer100km ?? 18} kWh/100 กม.)`
+    );
+  }
   if (resolvedFuel) {
     if (!resolvedFuel.pricePerLitre) {
       warnings.push(
@@ -596,7 +611,7 @@ export async function buildTripPlan(
   // ── รอบที่ 1: คำนวณเส้นทาง + ไทม์ไลน์ของทุกวัน ──
   const fuelInfo = {
     vehicle: input.vehicle,
-    pricePerLitre: resolvedFuel?.pricePerLitre ?? null,
+    pricePerLitre: resolvedFuel?.pricePerLitre ?? electricityPrice,
   };
   for (const st of states) {
     await computeDayState(st, deps, fuelInfo);
@@ -696,10 +711,10 @@ export async function buildTripPlan(
 
   // ── งบประมาณ ──
   const totalKm = builtDays.reduce((s, d) => s + d.totalKm, 0);
-  const totalFuel = fuelCost(
+  const totalFuel = vehicleEnergyCost(
     totalKm,
     input.vehicle,
-    resolvedFuel?.pricePerLitre ?? null
+    resolvedFuel?.pricePerLitre ?? electricityPrice
   );
   const food = Number(input.aiBudget?.food ?? 0) || 0;
   const activities = Number(input.aiBudget?.activities ?? 0) || 0;
@@ -765,13 +780,17 @@ export async function buildTripPlan(
       model: input.vehicleModel ?? null,
       kmPerLitre: input.vehicle.kmPerLitre,
       fuelType,
-      fuelPricePerLitre: resolvedFuel?.pricePerLitre ?? null,
-      fuelPriceSource: resolvedFuel?.sourceLabel ?? "ไม่มีค่าน้ำมัน",
+      fuelPricePerLitre: resolvedFuel?.pricePerLitre ?? electricityPrice,
+      fuelPriceSource:
+        resolvedFuel?.sourceLabel ??
+        (isEv ? "ราคาไฟโดยประมาณ" : "ไม่มีค่าน้ำมัน"),
       fuelPriceEffectiveDate: resolvedFuel?.effectiveDate,
       fuelPriceFetchedAt: resolvedFuel?.fetchedAt,
-      fuelPriceIsEstimate: resolvedFuel?.isEstimate ?? false,
+      fuelPriceIsEstimate: resolvedFuel?.isEstimate ?? isEv,
       fuelPriceText: resolvedFuel
         ? describeFuelPrice(resolvedFuel)
+        : isEv
+        ? `ราคาไฟ ${electricityPrice?.toFixed(2)} บาท/หน่วย · ค่าประมาณการ`
         : `${input.vehicle.label} — ไม่มีค่าน้ำมัน`,
     },
   };
@@ -881,7 +900,7 @@ async function computeDayState(
     legs: route.legs,
     totalKm: round1(route.km),
     totalDriveMinutes: route.minutes,
-    fuelCost: fuelCost(route.km, fuel.vehicle, fuel.pricePerLitre),
+    fuelCost: vehicleEnergyCost(route.km, fuel.vehicle, fuel.pricePerLitre),
     warnings: [...st.notes, ...dayWarnings, ...timeline.warnings],
   };
 }

@@ -284,6 +284,13 @@ export default function AiChatScreen({
   const [nearbyLoading, setNearbyLoading] = useState(false);
   /** ที่พักที่ผู้ใช้เลือกจากข้อเสนอ — key = id ข้อความ */
   const [selectedLodging, setSelectedLodging] = useState<Record<string, string>>({});
+  /**
+   * ผู้ใช้/เอไai ระบุรถเองหรือยัง — key = id ข้อความที่มีแผน
+   * -------------------------------------------------------------
+   * false = ยังไม่ได้ระบุ (backend ใช้ค่าเริ่มต้น) → การ์ดแผนจะถามอีกรอบตอนสรุปค่าใช้จ่าย
+   * รอบแรก (การ์ดฟอร์ม) ไม่บังคับรถ → ค่านี้บอกว่าต้องถามเพิ่มหรือไม่
+   */
+  const [vehicleSpecified, setVehicleSpecified] = useState<Record<string, boolean>>({});
 
   const listRef = useRef<FlatList<AiChatMessage>>(null);
   const autoSentRef = useRef(false);
@@ -619,15 +626,22 @@ export default function AiChatScreen({
     }
   };
 
-  /** กด "สร้างแพลนทริป" ในการ์ดข้อมูล */
+  /** กด "ส่งข้อมูล" ในการ์ดช่องข้อมูล → นำค่าที่กรอกไปคำนวณแผน */
   const handleCreatePlan = async (messageId: string) => {
     // ถ้ากำลังแก้แผนเดิมอยู่ → แผนใหม่ต้องไปทับแผนเดิม ไม่ใช่สร้างการ์ดใหม่
     const targetId = editingPlanMessageId ?? messageId;
+    // ใช้ค่าล่าสุดเสมอ (ผู้ใช้อาจแก้การ์ดระหว่างที่รอเอไaiตอบ)
+    const slots = draftSlotsRef.current;
     setPlanning(true);
+    // รถยังไม่ได้ระบุ → การ์ดแผนจะถามอีกรอบตอนสรุปค่าใช้จ่าย
+    setVehicleSpecified((prev) => ({
+      ...prev,
+      [targetId]: !!slots.vehicle?.trim(),
+    }));
     try {
       const plan = await runPlan(
         targetId,
-        buildPlanRequest(draftSlots, {
+        buildPlanRequest(slots, {
           extraStops: extraStops[targetId] ?? [],
           fuelPriceOverride: fuelOverride[targetId] ?? null,
         })
@@ -639,6 +653,68 @@ export default function AiChatScreen({
     } finally {
       setPlanning(false);
     }
+  };
+
+  /**
+   * ผู้ใช้ระบุรถตอนสรุปค่าใช้จ่าย (การ์ดแผน) → คำนวณแผนใหม่
+   * ค่าน้ำมัน/ค่าไฟในแผนจะเปลี่ยนตามรถที่เลือก
+   */
+  const handleVehicleChange = async (
+    messageId: string,
+    plan: TripPlan,
+    vehicle: string,
+    vehicleModel: string | null
+  ) => {
+    setVehicleSpecified((prev) => ({ ...prev, [messageId]: true }));
+    /**
+     * หน่วยของราคาพลังงานต่างกัน: รถไฟฟ้า = บาท/kWh · รถน้ำมัน = บาท/ลิตร
+     * → ถ้าผู้ใช้เคยกรอกราคาไฟแล้วสลับกลับไปใช้รถน้ำมัน ค่านั้นใช้ไม่ได้
+     *   (และกลับกัน) → ล้างทิ้ง ให้ระบบใช้ค่าประมาณการของหน่วยที่ถูกต้อง
+     */
+    const wasEv =
+      plan.vehicle?.key === "ev" || plan.vehicle?.fuelType === "electric";
+    const isEv = vehicle === "ev";
+    const prevOverride = fuelOverride[messageId] ?? null;
+    const nextOverride = wasEv !== isEv ? null : prevOverride;
+    if (nextOverride !== prevOverride) {
+      setFuelOverride((prev) => ({ ...prev, [messageId]: nextOverride }));
+    }
+    await runPlan(
+      messageId,
+      buildPlanRequest(
+        {
+          ...slotsFromPlan(plan),
+          vehicle,
+          vehicleModel,
+          // รถไฟฟ้า → บอก backend ให้คิดเป็นค่าไฟ (ไม่ใช่ค่าน้ำมัน)
+          fuelType: vehicle === "ev" ? "electric" : null,
+        },
+        {
+          selectedStops: collectSelectedStops(plan.days),
+          extraStops: extraStops[messageId] ?? [],
+          fuelPriceOverride: nextOverride,
+        }
+      )
+    );
+  };
+
+  /** ผู้ใช้ระบุจำนวนผู้เดินทางตอนสรุปค่าใช้จ่าย → คำนวณแผนใหม่ (ต่อคนเปลี่ยนตาม) */
+  const handleTravelersChange = async (
+    messageId: string,
+    plan: TripPlan,
+    travelers: number
+  ) => {
+    await runPlan(
+      messageId,
+      buildPlanRequest(
+        { ...slotsFromPlan(plan), travelers },
+        {
+          selectedStops: collectSelectedStops(plan.days),
+          extraStops: extraStops[messageId] ?? [],
+          fuelPriceOverride: fuelOverride[messageId] ?? null,
+        }
+      )
+    );
   };
 
   /** ลบจุดแวะ → คำนวณเส้นทาง/เวลา/ค่าน้ำมันใหม่ */
@@ -1209,6 +1285,11 @@ export default function AiChatScreen({
       selectedLodgingName={selectedLodging[messageId] ?? null}
       onFuelPriceOverride={(price) => handleFuelOverride(messageId, plan, price)}
       fuelPriceOverride={fuelOverride[messageId] ?? null}
+      vehicleSpecified={vehicleSpecified[messageId] ?? true}
+      onVehicleChange={(vehicle, vehicleModel) =>
+        void handleVehicleChange(messageId, plan, vehicle, vehicleModel)
+      }
+      onTravelersChange={(n) => void handleTravelersChange(messageId, plan, n)}
     />
   );
 

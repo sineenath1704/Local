@@ -27,6 +27,9 @@ import {
   TripPlanDay,
   TripPlanLodging,
   TripPlanOpenHours,
+  VEHICLE_CLASS_OPTIONS,
+  vehicleClassOf,
+  type VehicleClass,
 } from "../data/tripsData";
 import TripRouteMap from "./TripRouteMap";
 import EditableValueRow from "./EditableValueRow";
@@ -124,6 +127,16 @@ interface TripPlanCardProps {
   /** แก้ราคาน้ำมันเอง (ชนะราคาสดเสมอ) */
   onFuelPriceOverride?: (price: number | null) => void;
   fuelPriceOverride?: number | null;
+  /**
+   * ผู้ใช้/เอไai ระบุรถเองหรือยัง
+   * -------------------------------------------------------------
+   * false = ยังไม่ได้ระบุ (backend ใช้ค่าเริ่มต้น) → ต้องถามอีกรอบตอนสรุปค่าใช้จ่าย
+   */
+  vehicleSpecified?: boolean;
+  /** เปลี่ยนรถที่ใช้ → คำนวณแผนใหม่ (ค่าน้ำมัน/ค่าไฟเปลี่ยนตาม) */
+  onVehicleChange?: (vehicle: string, vehicleModel: string | null) => void;
+  /** เปลี่ยนจำนวนผู้เดินทาง → คำนวณแผนใหม่ (ต่อคนเปลี่ยนตาม) */
+  onTravelersChange?: (travelers: number) => void;
 }
 
 export default function TripPlanCard({
@@ -141,10 +154,17 @@ export default function TripPlanCard({
   selectedLodgingName,
   onFuelPriceOverride,
   fuelPriceOverride,
+  vehicleSpecified = true,
+  onVehicleChange,
+  onTravelersChange,
 }: TripPlanCardProps) {
   const [dayIndex, setDayIndex] = useState(0);
   const [editingFuel, setEditingFuel] = useState(false);
   const [fuelText, setFuelText] = useState("");
+  const [editingVehicle, setEditingVehicle] = useState(false);
+  const [vehicleChoice, setVehicleChoice] = useState<VehicleClass | null>(null);
+  const [vehicleModelText, setVehicleModelText] = useState("");
+  const [editingTravelers, setEditingTravelers] = useState(false);
 
   const days = plan.days ?? [];
   const day: TripPlanDay | undefined = days[dayIndex] ?? days[0];
@@ -152,18 +172,25 @@ export default function TripPlanCard({
   const budget = plan.budget;
   const isCustomEnd = plan.returnMode === "custom";
 
+  /** คลาสรถที่ใช้จริง (รถยนต์ส่วนตัว / รถไฟฟ้า / รถสาธารณะ) */
+  const vehicleClass: VehicleClass | null = vehicleClassOf(veh?.key ?? null);
+  /** รถไฟฟ้า → ค่าใช้จ่ายเดินทางคือค่าไฟ ไม่ใช่ค่าน้ำมัน */
+  const isEv = vehicleClass === "ev";
+  const travelers = plan.travelers ?? 1;
+
   const warnings = useMemo(
     () => [...(plan.warnings ?? []), ...(aiWarnings ?? [])],
     [plan.warnings, aiWarnings]
   );
 
   const fuelPriceText = useMemo(() => {
-    if (fuelPriceOverride != null) return `${fuelPriceOverride.toFixed(2)} ฿/ลิตร`;
+    const unit = isEv ? " ฿/หน่วย" : " ฿/ลิตร";
+    if (fuelPriceOverride != null) return `${fuelPriceOverride.toFixed(2)}${unit}`;
     if (veh?.fuelPricePerLitre != null) {
-      return `${veh.fuelPricePerLitre.toFixed(2)} ฿/ลิตร`;
+      return `${veh.fuelPricePerLitre.toFixed(2)}${unit}`;
     }
     return veh?.fuelPriceText ?? "ไม่ทราบราคา";
-  }, [fuelPriceOverride, veh]);
+  }, [fuelPriceOverride, veh, isEv]);
 
   /**
    * จุดหยุดสำหรับแผนที่ — ต้องคงตัวอ้างเดิมไว้เสมอ
@@ -212,6 +239,19 @@ export default function TripPlanCard({
     }
     onFuelPriceOverride?.(n);
     setEditingFuel(false);
+  };
+
+  /**
+   * บันทึกรถที่ผู้ใช้ระบุ → คำนวณแผนใหม่ (ค่าน้ำมัน/ค่าไฟเปลี่ยนตามรถ)
+   * - รถสาธารณะ → ไม่มีค่าน้ำมัน/ค่าไฟในแผน
+   * - รถไฟฟ้า → บอก backend ให้คิดเป็นค่าไฟ (fuelType = electric)
+   */
+  const commitVehicle = (next: VehicleClass) => {
+    const model =
+      next === "public" ? null : vehicleModelText.trim() || null;
+    const vehicle = next === "ev" ? "ev" : next;
+    onVehicleChange?.(vehicle, model);
+    setEditingVehicle(false);
   };
 
   return (
@@ -358,7 +398,7 @@ export default function TripPlanCard({
             </Text>
             {day.fuelCost ? (
               <Text className="text-[12px] text-gray-600 mr-3">
-                ค่าน้ำมัน {money(day.fuelCost)}
+                {isEv ? "ค่าไฟ" : "ค่าน้ำมัน"} {money(day.fuelCost)}
               </Text>
             ) : null}
             <Text className="text-[12px] text-gray-500">
@@ -586,8 +626,151 @@ export default function TripPlanCard({
         <Text className="text-gray-900 text-[13.5px] font-black mb-1.5">
           ค่าใช้จ่ายโดยประมาณ
         </Text>
+
+        {/* ── ถามอีกรอบตอนสรุปค่าใช้จ่าย: รถ + จำนวนคน ─────────── */}
+        {!vehicleSpecified ? (
+          <View className="bg-amber-50 border border-amber-200 rounded-2xl px-3 py-2.5 mb-3">
+            <View className="flex-row items-start">
+              <ExclamationTriangleIcon size={14} color="#B45309" />
+              <Text className="text-amber-800 text-[12.5px] font-bold ml-1.5 flex-1 leading-4">
+                ยังไม่ได้ระบุว่าใช้รถอะไร — ค่าเดินทางตอนนี้คิดจากค่าเริ่มต้น
+                ระบุรถด้านล่างเพื่อให้ค่าน้ำมัน/ค่าไฟตรงกับของจริง
+              </Text>
+            </View>
+          </View>
+        ) : null}
+
+        <EditableValueRow
+          label="รถที่ใช้"
+          icon="🚙"
+          tone="amber"
+          value={
+            // ยังไม่ได้ระบุ → อย่าโชว์ค่าเริ่มต้นของ backend เหมือนผู้ใช้เลือกเอง
+            !vehicleSpecified
+              ? ""
+              : vehicleClass
+              ? `${VEHICLE_CLASS_OPTIONS.find((o) => o.key === vehicleClass)?.label ?? ""}${
+                  veh?.model ? ` · ${veh.model}` : ""
+                }`
+              : ""
+          }
+          emptyHint="ยังไม่ได้ระบุ — ระบุได้ด้านล่าง"
+          editing={editingVehicle}
+          onToggle={() => {
+            setVehicleChoice(vehicleClass);
+            setVehicleModelText(veh?.model ?? "");
+            setEditingVehicle((v) => !v);
+          }}
+          badge={
+            vehicleSpecified
+              ? veh?.model
+                ? { text: veh.model, tone: "blue" }
+                : undefined
+              : { text: "ยังไม่ระบุ", tone: "amber" }
+          }
+        >
+          <View className="flex-row flex-wrap">
+            {VEHICLE_CLASS_OPTIONS.map((v) => (
+              <TouchableOpacity
+                key={v.key}
+                onPress={() => setVehicleChoice(v.key)}
+                activeOpacity={0.75}
+                accessibilityRole="button"
+                accessibilityState={{ selected: vehicleChoice === v.key }}
+                className={`px-3 py-1.5 rounded-xl border mr-2 mb-2 ${
+                  vehicleChoice === v.key
+                    ? "bg-violet-600 border-violet-600"
+                    : "bg-white border-gray-200"
+                }`}
+              >
+                <Text
+                  className={`text-[13px] font-bold ${
+                    vehicleChoice === v.key ? "text-white" : "text-gray-700"
+                  }`}
+                >
+                  {v.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          {vehicleChoice && vehicleChoice !== "public" ? (
+            <View className="mt-1">
+              <Text className="text-[12.5px] font-bold text-gray-700 mb-1">
+                ชื่อ/รุ่นรถ (ถ้าจำได้)
+              </Text>
+              <TextInput
+                value={vehicleModelText}
+                onChangeText={setVehicleModelText}
+                placeholder="เช่น Toyota Corolla Altis"
+                placeholderTextColor="#9CA3AF"
+                className="bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 text-[14px] text-gray-900"
+                accessibilityLabel="ชื่อหรือรุ่นรถ"
+              />
+            </View>
+          ) : null}
+
+          <View className="flex-row items-center mt-2">
+            <TouchableOpacity
+              onPress={() =>
+                commitVehicle(vehicleChoice ?? vehicleClass ?? "private_car")
+              }
+              activeOpacity={0.85}
+              className="bg-violet-600 px-4 py-2.5 rounded-xl"
+            >
+              <Text className="text-white text-[13px] font-bold">
+                ตกลง · คำนวณใหม่
+              </Text>
+            </TouchableOpacity>
+            <Text className="text-gray-500 text-[12px] ml-2 flex-1 leading-4">
+              ระบบจะรู้ว่าใช้น้ำมันหรือไฟฟ้า และคิดราคาจากระยะทางในแผน
+            </Text>
+          </View>
+        </EditableValueRow>
+
+        <EditableValueRow
+          label="จำนวนผู้เดินทาง"
+          icon="👥"
+          tone="green"
+          value={`${travelers} คน`}
+          emptyHint="1 คน (ค่าเริ่มต้น)"
+          editing={editingTravelers}
+          onToggle={() => setEditingTravelers((v) => !v)}
+        >
+          <View className="flex-row flex-wrap">
+            {[1, 2, 3, 4, 6, 8].map((n) => (
+              <TouchableOpacity
+                key={n}
+                onPress={() => {
+                  onTravelersChange?.(n);
+                  setEditingTravelers(false);
+                }}
+                activeOpacity={0.75}
+                accessibilityRole="button"
+                accessibilityState={{ selected: travelers === n }}
+                className={`px-3 py-1.5 rounded-xl border mr-2 mb-2 ${
+                  travelers === n
+                    ? "bg-emerald-700 border-emerald-700"
+                    : "bg-white border-gray-200"
+                }`}
+              >
+                <Text
+                  className={`text-[13px] font-bold ${
+                    travelers === n ? "text-white" : "text-gray-700"
+                  }`}
+                >
+                  {n} คน
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </EditableValueRow>
+
         <View className="bg-gray-50 border border-gray-100 rounded-2xl px-3 py-2.5">
-          <CostRow label="ค่าน้ำมัน" value={money(budget?.fuel)} />
+          <CostRow
+            label={isEv ? "ค่าไฟฟ้า" : "ค่าน้ำมัน"}
+            value={money(budget?.fuel)}
+          />
           <CostRow label="ค่าที่พัก" value={money(budget?.lodging)} />
           <CostRow label="ค่าอาหาร" value={money(budget?.food)} />
           {budget?.activities ? (
@@ -620,7 +803,7 @@ export default function TripPlanCard({
         {/* ราคาน้ำมัน + ที่มา */}
         <View className="mt-2">
           <EditableValueRow
-            label="ราคาน้ำมัน"
+            label={isEv ? "ราคาไฟ" : "ราคาน้ำมัน"}
             icon="⛽"
             tone="green"
             value={fuelPriceText}
@@ -650,7 +833,9 @@ export default function TripPlanCard({
                 value={fuelText}
                 onChangeText={setFuelText}
                 keyboardType="decimal-pad"
-                placeholder="ราคาต่อลิตรที่ปั๊ม"
+                placeholder={
+                  isEv ? "ราคาไฟต่อหน่วย (บาท/kWh)" : "ราคาต่อลิตรที่ปั๊ม"
+                }
                 placeholderTextColor="#9CA3AF"
                 className="flex-1 bg-white border border-gray-200 rounded-xl px-3 py-2 text-[14px] text-gray-900"
               />
