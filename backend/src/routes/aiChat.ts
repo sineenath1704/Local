@@ -4,6 +4,7 @@ import {
   buildChatSystemPrompt,
   buildClipContextBlock,
   buildPlanContextBlock,
+  buildSearchContextBlock,
   buildTripDraftBlock,
   buildTripDraftResult,
   mergeTripSlots,
@@ -14,6 +15,13 @@ import {
   PlaceContext,
   TripSlots,
 } from "../tripPrompt";
+import {
+  searchTravelInfo,
+  shouldSearchTravel,
+  topicTagFromCategory,
+  TravelSource,
+  TravelTopicTag,
+} from "../geminiSearch";
 import {
   formatCommunityContext,
   loadCommunityBundle,
@@ -115,6 +123,55 @@ function toHostSelfContext(
     likesReceived: Number(userRow.total_likes_received ?? 0),
     followersCount: Number(userRow.followers_count ?? 0),
   };
+}
+
+/**
+ * เช็คว่าชื่อสถานที่นี้อยู่ในทะเบียน OTOP ของระบบไหม
+ * -------------------------------------------------------------
+ * กฎของผู้ใช้: "นำชื่อไปค้นว่าเป็นสถานที่ OTOP ไหมก่อบ
+ * ถ้าใช่ก็ติดทะเบียน OTOP ถ้าไม่ใช่ก็ท่องเที่ยวทั่วไป"
+ *
+ * ทะเบียน OTOP ของระบบ = ตาราง `community_places`
+ * → เจอ = ติดทะเบียน OTOP · ไม่เจอ = ท่องเที่ยวทั่วไป
+ */
+async function isRegisteredOtopPlace(placeName: string): Promise<boolean> {
+  const admin = getSupabaseAdmin();
+  if (!admin) return false;
+  const name = placeName.trim();
+  if (!name) return false;
+  try {
+    // `_` และ `%` ในชื่อจะกลายเป็น wildcard ของ SQL → ตัดออกจากรูปแบบค้น
+    const pattern = name.replace(/[%_]/g, " ").trim();
+    if (!pattern) return false;
+    const { data, error } = await admin
+      .from("community_places")
+      .select("place_name")
+      .ilike("place_name", `%${pattern}%`)
+      .limit(20);
+    if (error || !data?.length) return false;
+
+    const rows = data as { place_name?: string | null }[];
+    return rows.some((r) => {
+      const rn = (r.place_name ?? "").trim();
+      if (!rn) return false;
+      const a = foldPlaceName(name);
+      const b = foldPlaceName(rn);
+      if (!a || !b) return false;
+      if (a === b) return true;
+      // ชื่อคล้ายกัน (บ้านปาย vs บ้านปายใหม่) → ถือว่าคนละที่
+      // แต่ต้องยาวพอสมควร ไม่งั้น "บ้าน" จะไปโดนทุกชื่อที่มีคำว่า บ้าน
+      const shorter = a.length <= b.length ? a : b;
+      const longer = a.length <= b.length ? b : a;
+      return longer.includes(shorter) && shorter.length >= longer.length * 0.6;
+    });
+  } catch {
+    return false;
+  }
+}
+
+/** ตัดช่องว่าง/เครื่องหมายออก เพื่อเทียบชื่อสถานที่ */
+function foldPlaceName(value: string): string {
+  return value.toLowerCase().replace(/[\s\-_/()ฯๆ.,"'`]/g, "");
 }
 
 const router = Router();
@@ -552,6 +609,8 @@ router.post("/", async (req: Request, res: Response) => {
   let placeCandidates: PlaceChoice[] | undefined;
   /** หมายเหตุให้โมเดลตอบตรง ๆ เมื่อ "ค้นแล้วไม่เจอ" (แยนจาก "ยังไม่มีข้อมูล") */
   let placeLookupNote = "";
+  /** ชื่อที่ backend ไปค้นจริง (ใช้ตัดสินว่าเป็น OTOP ไหม + ให้ Gemini ค้นต่อ) */
+  let lookupQueriedName: string | null = null;
   if (mode === "tourist") {
     try {
       const lastUser = [...messages].reverse().find((m) => m.role === "user");
@@ -583,6 +642,7 @@ router.post("/", async (req: Request, res: Response) => {
       });
       if (lookup.context) resolvedPlace = lookup.context;
       if (lookup.candidates.length > 0) placeCandidates = lookup.candidates;
+      lookupQueriedName = lookup.queriedName ?? null;
       // ค้นชื่อแล้วไม่เจอ → บอกโมเดลให้ตอบตรง ๆ ว่าไม่พบ
       // (เดิมโมเดลตอบกว้าง ๆ ว่า "ยังไม่มีข้อมูล" → แยกไม่ออกว่าไม่เคยค้นหรือค้นแล้วไม่เจอ)
       if (!lookup.context && lookup.queriedName && lookup.candidates.length === 0) {
@@ -602,13 +662,100 @@ router.post("/", async (req: Request, res: Response) => {
     console.log("[ai-chat] ข้ามการค้นสถานที่ (โหมด host-self)");
   }
 
+  // ── แท็กสถานที่ (OTOP / ท่องเที่ยวทั่วไป) + ค้นเว็บเพิ่ม ─────────────────
+  /**
+   * กฎของผู้ใช้: นำชื่อไปค้นว่าเป็นสถานที่ OTOP ไหมก่อบ
+   * ถ้าใช่ก็ติดทะเบียน OTOP · ถ้าไม่ใช่ก็ท่องเที่ยวทั่วไป
+   * → เช็คกับทะเบียนสถานที่ของระบบ (community_places) ก่อนเสมอ
+   */
+  const tagPlaceName =
+    resolvedPlace?.placeName?.trim() ||
+    lookupQueriedName?.trim() ||
+    clipPlaceName?.trim() ||
+    chosenPlaceName?.trim() ||
+    resolvedHostSelf?.businessPlaceName?.trim() ||
+    null;
+
+  let placeTag: "otop" | "tourism" | undefined;
+  if (tagPlaceName) {
+    placeTag = (await isRegisteredOtopPlace(tagPlaceName)) ? "otop" : "tourism";
+  }
+
+  /**
+   * ค้นเว็บจริง (Gemini + Google Search) — อุดช่องว่างที่เอไaiเดิมตอบไม่ได้
+   * เช่น "มีที่พักใกล้ๆไหม" "อะไรน่าไปบ้าง" "วัดนี้อยู่ที่ไหน"
+   */
+  const lastUserText =
+    [...messages].reverse().find((m) => m.role === "user")?.content?.trim() ?? "";
+  /** มีข้อมูลที่เชื่อถือได้จากระบบของเราแล้วหรือยัง (ทะเบียน/โฟลเดอร์/ชุมชน) */
+  const hasInAppData =
+    (!!resolvedPlace && resolvedPlace.source !== "google") ||
+    !!resolvedFolder?.detail?.trim() ||
+    (resolvedFolder?.places?.length ?? 0) > 0 ||
+    !!communityBlock.trim();
+
+  let searchBlock = "";
+  let sources: TravelSource[] = [];
+  let topicTags: TravelTopicTag[] = [];
+
+  if (
+    mode === "tourist" &&
+    shouldSearchTravel({ question: lastUserText, hasInAppData })
+  ) {
+    try {
+      const search = await searchTravelInfo({
+        question: lastUserText,
+        placeName: tagPlaceName,
+        placeAddress: resolvedPlace?.address ?? null,
+      });
+      if (search) {
+        searchBlock = buildSearchContextBlock({
+          answer: search.answer,
+          placeName: search.placeName,
+          sources: search.sources,
+        });
+        sources = search.sources;
+        topicTags = search.tags;
+        console.log(
+          `[ai-chat] ค้นเว็บแล้ว · คำค้น="${lastUserText.slice(0, 80)}" · ` +
+            `แหล่งที่มา=${sources.length} · แท็ก=${topicTags.join(",") || "-"}`
+        );
+      }
+    } catch (err: any) {
+      console.warn("[ai-chat] ค้นเว็บไม่สำเร็จ:", err?.message);
+    }
+  }
+
+  // ไม่ได้ค้นเว็บ → เดาแท็กหมวดหมู่จากประเภทสถานที่ที่มีอยู่แล้ว (ข้อมูลจริง)
+  if (topicTags.length === 0) {
+    const tag = topicTagFromCategory(resolvedPlace?.category);
+    if (tag) topicTags = [tag];
+  }
+
   const system =
     buildChatSystemPrompt(resolvedFolder, resolvedPlace, resolvedHostSelf) +
     communityBlock +
     clipBlock +
     planBlock +
+    searchBlock +
     buildTripDraftBlock(clientSlots) +
-    placeLookupNote;
+    // ถ้าค้นเว็บเจอข้อมูลแล้ว ห้ามบอกผู้ใช้ว่า "ไม่พบสถานที่" (สองบล็อกขัดกัน)
+    (searchBlock ? "" : placeLookupNote);
+
+  /** ข้อมูลแท็กที่ส่งกลับฝั่งแอป (ไม่มี = ไม่ต้องแสดงอะไร) */
+  const tagPayload =
+    placeTag || topicTags.length > 0
+      ? {
+          ...(placeTag ? { placeTag } : {}),
+          ...(topicTags.length > 0 ? { tags: topicTags } : {}),
+        }
+      : null;
+
+  /** ข้อมูลเสริมที่ติดไปกับคำตอบทุกทาง (แท็ก + ลิงก์แหล่งที่มา) */
+  const replyMeta: Record<string, unknown> = {
+    ...(tagPayload ?? {}),
+    ...(sources.length > 0 ? { sources } : {}),
+  };
 
   if (!isAiConfigured()) {
     // Graceful stub so the app works before the token is set.
@@ -629,6 +776,7 @@ router.post("/", async (req: Request, res: Response) => {
         reply:
           "เจอสถานที่ชื่อเหมือนกันหลายแห่ง — เลือกอันที่ถูกที่สุดได้เลยครับ",
         placeCandidates,
+        ...replyMeta,
       });
     }
     // งบ 4096: บล็อกข้อมูลโฟลเดอร์ยาวกว่าเดิม (รายชื่อ + ราคา + ที่อยู่ + คลิปย่อ)
@@ -642,7 +790,7 @@ router.post("/", async (req: Request, res: Response) => {
     const parsed = parseTripDraftLine(reply);
     const cleanReply = parsed.reply.trim() || "ได้ค่ะ อยากให้ช่วยเรื่องอะไรต่อคะ";
     if (!parsed.slots) {
-      return res.json({ reply: cleanReply });
+      return res.json({ reply: cleanReply, ...replyMeta });
     }
 
     const merged = mergeTripSlots(clientSlots, parsed.slots);
@@ -650,12 +798,13 @@ router.post("/", async (req: Request, res: Response) => {
       (v) => v !== undefined && v !== null
     );
     if (!hasAnySlot) {
-      return res.json({ reply: cleanReply });
+      return res.json({ reply: cleanReply, ...replyMeta });
     }
 
     return res.json({
       reply: cleanReply,
       tripDraft: buildTripDraftResult(merged),
+      ...replyMeta,
     });
   } catch (err: any) {
     return sendError(res, err, req);

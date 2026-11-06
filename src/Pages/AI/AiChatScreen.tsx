@@ -5,6 +5,7 @@ import {
   TextInput,
   TouchableOpacity,
   TouchableWithoutFeedback,
+  Pressable,
   FlatList,
   Modal,
   KeyboardAvoidingView,
@@ -60,6 +61,7 @@ import {
   TripPlanPoint,
   TripSlots,
   computeTripMissing,
+  formatPlanSummary,
   isTripPlanReady,
   normalizeTripSlotsShape,
   slotsToWire,
@@ -67,14 +69,17 @@ import {
 import type { VideoPost } from "../../data/homeFeedData";
 import OriginSelectorModal from "../../components/OriginSelectorModal";
 import MyVideoViewer from "../../components/MyVideoViewer";
-import TripDraftCard, {
+import FolderClipBrowser from "../../components/FolderClipBrowser";
+import ChatTagChips from "../../components/ChatTagChips";
+import TripQuestionFlow, {
   TripOriginTarget,
-} from "../../components/TripDraftCard";
+} from "../../components/TripQuestionFlow";
 import TripDateRangeSheet from "../../components/TripDateRangeSheet";
 import TripTimeSheet from "../../components/TripTimeSheet";
 import TripPlanCard from "../../components/TripPlanCard";
 import { parseGoogleMapsUrl } from "../../services/savedPlacesService";
 import { resolvePlaceCoords } from "../../services/placesService";
+import { loadSavedVideos } from "../../services/interactionService";
 
 interface AiChatScreenProps {
   threadId: string;
@@ -216,6 +221,21 @@ export default function AiChatScreen({
   const [chosenPlaces, setChosenPlaces] = useState<Record<string, string>>({});
   // คลิปที่แตะในแชท → เปิดผู้ดูคลิปเต็มจอ (แบบเดียวกับหน้าแรก)
   const [viewerPost, setViewerPost] = useState<VideoPost | null>(null);
+  /**
+   * โฟลเดอร์ที่กดการ์ดในแชท → เปิดหน้าดูคลิปข้างในโฟลเดอร์ (ข้อ 2.2)
+   */
+  const [browserFolder, setBrowserFolder] = useState<{
+    id: string;
+    name: string;
+    clipCount: number;
+  } | null>(null);
+  /**
+   * โฟลเดอร์ที่แสดงเป็นการ์ดในแชทไปแล้วหรือยัง
+   * -------------------------------------------------------------
+   * โฟลเดอร์ยัง "ติดอยู่" ตลอดเธอร์ (ให้ backend ได้บริบททุกข้อความ)
+   *   แต่การ์ดโฟลเดอร์ในแชทโผล่ครั้งเดียวต่อการแนบ ไม่ใช่ทุกข้อความ
+   */
+  const announcedFolderRef = useRef<string | null>(null);
 
   // ── ระบบวางแผนทริป ──────────────────────────────────────────────
   /**
@@ -372,6 +392,13 @@ export default function AiChatScreen({
   const folderCtx =
     folderCtxState && folderCtxState.folderId === folderId ? folderCtxState.ctx : null;
 
+  /**
+   * ผู้ใช้เลือกจุดเริ่มต้นจากรายการที่บันทึกไว้
+   * -------------------------------------------------------------
+   * เลือก = กรอกช่องข้อมูลจุดเริ่มต้นของแผนทริป เท่านั้น
+   * → **ไม่ส่งข้อความเข้าแชท** (ผู้ใช้แค่เลือกจุด ไม่ได้ถามเอไai)
+   *   จุดเริ่มต้นจะถูกส่งไปพร้อมข้อความถัดไปผ่าน `tripDraft` อยู่แล้ว
+   */
   const handleSelectOrigin = (origin: { label: string; address: string; url?: string; coords?: { lat: number; lng: number } }) => {
     setCurrentOrigin(origin);
     // จุดเริ่มต้นที่ผู้ใช้เลือก = ช่องข้อมูลจุดเริ่มต้นของแผนทริป (ไม่ต้องพิมพ์ซ้ำ)
@@ -385,10 +412,6 @@ export default function AiChatScreen({
       },
     };
     applyDraftSlots(nextSlots);
-    const msg = `🚗 จุดเริ่มต้นเดินทางของฉัน: ${origin.label} (${origin.address})${origin.url ? `\nลิงก์: ${origin.url}` : ""}`;
-    // ส่ง "ช่องข้อมูลที่เพิ่งได้" ไปด้วย — ถ้าใช้ค่าเดิมใน state จะเป็นข้อมูลเก่า
-    // (ปิด state ไว้ก่อนหน้านี้) → เซิร์ฟเวอร์ไม่ได้พิกัดที่ผู้ใช้เพิ่งเลือก
-    void send(msg, { tripDraftOverride: nextSlots });
   };
 
   /**
@@ -681,6 +704,12 @@ export default function AiChatScreen({
       if (plan) {
         clearDraftCards();
         setEditingPlanMessageId(null);
+        // สรุปแผนทั้งหมดกลับให้ผู้ใช้ในแชท (ข้อ 2.3)
+        // → การ์ดแพลนดูรายละเอียด แต่ในแชทต้องมีภาพรวมทั้งทริปด้วย
+        appendMessage(threadId, {
+          role: "assistant",
+          content: formatPlanSummary(plan),
+        });
       }
     } finally {
       setPlanning(false);
@@ -1071,17 +1100,34 @@ export default function AiChatScreen({
     // ช่องข้อมูลแผนทริปที่จะส่งไปรอบนี้ (ค่าที่เพิ่งได้ใหม่ ถ้ามี → ใช้ค่านั้น)
     const slotsForRequest = opts?.tripDraftOverride ?? draftSlots;
 
-    // If a folder is attached, make it visible in the transcript too.
-    const visibleContent = attachedFolder
-      ? `📁 แนบโฟลเดอร์ "${attachedFolder.name}" (${attachedFolder.videoIds.length} คลิป)\n${body}`
-      : body;
+    // โฟลเดอร์ที่แนบ → เก็บเป็น "ออบเจกต์" ในข้อความ ไม่ใช่แปะเป็นข้อความ
+    // → ผู้ใช้กดการ์ดโฟลเดอร์ในแชทแล้วเข้าไปดูคลิปข้างในได้ (ข้อ 2.2)
+    // การ์ดโฟลเดอร์โผล่ครั้งเดียวต่อการแนบ (ไม่ใช่ทุกข้อความ)
+    //   แต่โฟลเดอร์ยัง "ติดอยู่" ตลอดเธอร์ → backend ได้บริบทโฟลเดอร์ทุกข้อความ
+    const shouldAnnounceFolder = !!attachedFolder && announcedFolderRef.current !== attachedFolder.id;
+    const folderAttachment =
+      shouldAnnounceFolder && attachedFolder
+        ? {
+            id: attachedFolder.id,
+            name: attachedFolder.name,
+            clipCount: attachedFolder.videoIds.length,
+          }
+        : undefined;
+    if (attachedFolder) announcedFolderRef.current = attachedFolder.id;
+    // ฝั่งที่ส่งให้โมเดล → บอกโมเดลว่าคลิปมาจากโฟลเดอร์ไหน (โมเดลต้องรู้)
+    // บรรทัดนี้ผูกกับ "ข้อความที่แนบโฟลเดอร์" → เวลาส่งรอบถัดไป ประวัติที่ประกอบกลับ
+    //   จะเติมบรรทัดเดียวกันให้เอง (ดูโค้ด history ด้านล่าง) → ตรงกันเสมอ
+    const aiFolderLine = folderAttachment
+      ? `📁 แนบโฟลเดอร์ "${folderAttachment.name}" (${folderAttachment.clipCount} คลิป)\n`
+      : "";
     // ผู้ใช้เลือกสถานที่จากรายการ → บอกโมเดลด้วยว่าเลือกอันไหน (คำถามเดิมยังอยู่ข้างบน)
     const selectionNote = opts?.placeLabel ? `\n📍 เลือกสถานที่: ${opts.placeLabel}` : "";
 
     appendMessage(threadId, {
       role: "user",
-      content: visibleContent + selectionNote,
+      content: body + selectionNote,
       video: opts?.video ?? undefined,
+      folder: folderAttachment,
     });
     setDraft("");
     setSending(true);
@@ -1092,7 +1138,7 @@ export default function AiChatScreen({
     setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 50);
 
     // If the user typed or pasted a Google Maps URL, pre-parse it so AI understands immediately
-    let processedForAi = visibleContent + selectionNote;
+    let processedForAi = aiFolderLine + body + selectionNote;
     const gmapsMatch = body.match(/https?:\/\/(?:maps\.app\.goo\.gl\/[^\s]+|www\.google\.com\/maps[^\s]+)/i);
     if (gmapsMatch) {
       const url = gmapsMatch[0];
@@ -1105,16 +1151,26 @@ export default function AiChatScreen({
         }
       }
       if (parsed.lat && parsed.lng) {
-        processedForAi = `${visibleContent + selectionNote}\n[ข้อมูลพิกัดจากลิงก์: ละติจูด ${parsed.lat.toFixed(4)}, ลองจิจูด ${parsed.lng.toFixed(4)}]`;
+        processedForAi = `${aiFolderLine + body + selectionNote}\n[ข้อมูลพิกัดจากลิงก์: ละติจูด ${parsed.lat.toFixed(4)}, ลองจิจูด ${parsed.lng.toFixed(4)}]`;
       } else {
-        processedForAi = `${visibleContent + selectionNote}\n[หมายเหตุ: ลิงก์จุดเริ่มต้นการเดินทางของผู้ใช้ ให้เริ่มวางแผนจากจุดนี้ได้ทันที ไม่ต้องกดเปิดลิงก์ภายนอก]`;
+        processedForAi = `${aiFolderLine + body + selectionNote}\n[หมายเหตุ: ลิงก์จุดเริ่มต้นการเดินทางของผู้ใช้ ให้เริ่มวางแผนจากจุดนี้ได้ทันที ไม่ต้องกดเปิดลิงก์ภายนอก]`;
       }
     }
 
-    const history = [...thread.messages.map((m) => ({ role: m.role, content: m.content })), {
-      role: "user" as const,
-      content: processedForAi,
-    }];
+    // ประวัติที่ส่งให้โมเดล → ข้อความที่แนบโฟลเดอร์ ต้องเติมบรรทัดโฟลเดอร์กลับเข้าไป
+    // (ในแชทที่เห็นเป็นการ์ดโฟลเดอร์ แต่โมเดลต้องรู้ว่าคลิปมาจากโฟลเดอร์ไหน)
+    const history = [
+      ...thread.messages.map((m) => ({
+        role: m.role,
+        content: m.folder
+          ? `📁 แนบโฟลเดอร์ "${m.folder.name}" (${m.folder.clipCount} คลิป)\n${m.content}`
+          : m.content,
+      })),
+      {
+        role: "user" as const,
+        content: processedForAi,
+      },
+    ];
 
     // บริบทโฟลเดอร์ — ส่งรหัสโฟลเดอร์ไปให้ backend อ่านข้อมูลจริงเอง
     // (ถ้าโหลดไม่ได้ ค่อยส่งชื่อสถานที่ดิบไปเป็นทางสำรอง)
@@ -1173,6 +1229,10 @@ export default function AiChatScreen({
         content: result.reply,
         placeCandidates: result.placeCandidates,
         planMeta: linkedPlanId ? { planId: linkedPlanId } : undefined,
+        // แท็กประเภทสถานที่ (OTOP / ท่องเที่ยวทั่วไป) + หมวดหมู่ + ลิงก์แหล่งที่มา
+        placeTag: result.placeTag,
+        tags: result.tags,
+        sources: result.sources,
         tripDraft: mergedSlots
           ? {
               slots: mergedSlots,
@@ -1181,7 +1241,9 @@ export default function AiChatScreen({
             }
           : undefined,
       });
-      setAttachedFolderId(null); // attachment is one-shot per send
+      // โฟลเดอร์ไม่ถูกถอดออกหลังส่งแล้ว → ยัง "ติดอยู่" ตลอดเธอร์
+      //   → ข้อความถัดไปยังได้บริบทโฟลเดอร์ไปให้ backend ทุกครั้ง (ข้อ 2.3)
+      //   → ผู้ใช้ถอดเองได้ด้วยปุ่ม X บนชิปโฟลเดอร์ในช่องพิมพ์
     } catch (err) {
       // Previously this fell through and appended the failure as an assistant
       // message, so a 401 looked exactly like a real answer. Mark it instead.
@@ -1298,10 +1360,71 @@ export default function AiChatScreen({
     !!lastDraftMessageId &&
     !thread?.messages.find((m) => m.id === lastDraftMessageId)?.plan;
 
+  /**
+   * คลิปของแต่ละจุดแวะในแผน (ข้อ 2.3)
+   * -------------------------------------------------------------
+   * จุดแวะที่มาจากโฟลเดอร์มี `id` = key ของสถานที่ในโฟลเดอร์
+   * → จับคู่ด้วย id ก่อน ถ้าไม่ตรงจะ fallback ด้วยชื่อสถานที่
+   * → ผู้ใช้เห็นคลิปของจุดนั้น → ตัดสินใจว่าจะลบ/เพิ่มจุดได้
+   */
+  const buildStopClips = (plan: TripPlan) => {
+    type StopClip = {
+      videoId: string;
+      thumbnailUrl: string | null;
+      caption: string | null;
+    };
+    const out: Record<string, StopClip[]> = {};
+    const places = folderCtx?.places ?? [];
+    const clipById = new Map((folderCtx?.clips ?? []).map((c) => [c.videoId, c]));
+    const norm = (name?: string | null) =>
+      (name ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+    /** คลิปของสถานที่หนึ่งในโฟลเดอร์ */
+    const clipsOf = (videoIds: string[]): StopClip[] =>
+      videoIds
+        .map((id) => clipById.get(id))
+        .filter((c): c is NonNullable<typeof c> => Boolean(c))
+        .map((c) => ({
+          videoId: c.videoId,
+          thumbnailUrl: c.thumbnailUrl ?? null,
+          caption: c.caption ?? null,
+        }));
+
+    const byName = new Map<string, StopClip[]>();
+    for (const place of places) {
+      const list = clipsOf(place.videoIds ?? []);
+      if (list.length === 0) continue;
+      out[place.key] = list;
+      byName.set(norm(place.name), list);
+    }
+    // จุดแวะที่ id ไม่ตรงกับ key ของโฟลเดอร์ → จับคู่ด้วยชื่อแทน
+    for (const day of plan.days ?? []) {
+      for (const stop of day.stops ?? []) {
+        if (out[stop.id]) continue;
+        const list = byName.get(norm(stop.name));
+        if (list) out[stop.id] = list;
+      }
+    }
+    return out;
+  };
+
+  /** กดคลิปของจุดแวะในแผน → เปิดดูคลิปเต็มจอ (แบบหน้าโฮม) */
+  const openClipFromStop = async (videoId: string) => {
+    try {
+      const posts = await loadSavedVideos([videoId]);
+      const post = posts[0];
+      if (post) setViewerPost(post);
+    } catch (err: any) {
+      console.warn("[AiChatScreen] เปิดคลิปของจุดแวะไม่สำเร็จ:", err?.message ?? err);
+      Alert.alert("เปิดคลิปไม่สำเร็จ", "ลองใหม่อีกครั้ง");
+    }
+  };
+
   /** การ์ดแผนที่คำนวณเสร็จแล้ว (ผูกกับข้อความที่สร้างมัน) */
   const renderPlanCard = (messageId: string, plan: TripPlan) => (
     <TripPlanCard
       plan={plan}
+      stopClips={buildStopClips(plan)}
+      onOpenClip={(videoId) => void openClipFromStop(videoId)}
       notSelected={thread?.messages.find((m) => m.id === messageId)?.planMeta?.notSelected}
       aiWarnings={thread?.messages.find((m) => m.id === messageId)?.planMeta?.aiWarnings}
       folderWarning={
@@ -1325,20 +1448,21 @@ export default function AiChatScreen({
     />
   );
 
-  /** การ์ดช่องข้อมูล (ก่อนสร้างแพลน) — ผู้ใช้แก้ช่องว่างได้ตรงนี้ */
-  const renderDraftCard = () => (
-    <TripDraftCard
+  /**
+   * การ์ด "ถามทีละคำถาม" (ข้อ 2.3) — แทนการ์ดฟอร์ม 4 ขั้นตอนเดิม
+   * → ถามทีละอย่าง ตอบได้ทั้งพิมพ์เองและกดเลือกตัวเลือก
+   * → วันที่/เวลาใช้ตัวเลือกของแอปเอง (ปฏิทิน + ล้อเวลา) ที่เปิดจากระดับหน้าจอ
+   */
+  const renderQuestionFlow = () => (
+    <TripQuestionFlow
       slots={draftSlots}
       onChange={applyDraftSlots}
+      onSubmitText={(text) => void send(text)}
       onCreatePlan={() => void handleCreatePlan(lastDraftMessageId ?? "")}
       creating={planning}
       onRequestOrigin={setCardOriginTarget}
       onRequestDateRange={() => openCardPicker("date")}
       onRequestTime={() => openCardPicker("time")}
-      onSendToChat={(message, slotsOverride) => {
-        console.log("[AiChatScreen] onSendToChat from card:", message);
-        void send(message, { tripDraftOverride: slotsOverride });
-      }}
     />
   );
 
@@ -1350,6 +1474,20 @@ export default function AiChatScreen({
         initialVideoId={viewerPost.id}
         posts={[viewerPost]}
         onBack={() => setViewerPost(null)}
+      />
+    );
+  }
+
+  // กดการ์ดโฟลเดอร์ในแชท → เปิดหน้าดูคลิปข้างในโฟลเดอร์ (ข้อ 2.2)
+  // คลิปในโฟลเดอร์เล่นเต็มจอแบบหน้าโฮม (MyVideoViewer)
+  if (browserFolder) {
+    return (
+      <FolderClipBrowser
+        folderId={browserFolder.id}
+        folderName={browserFolder.name}
+        clipCount={browserFolder.clipCount}
+        videoIds={folders.find((f) => f.id === browserFolder.id)?.videoIds}
+        onClose={() => setBrowserFolder(null)}
       />
     );
   }
@@ -1493,6 +1631,34 @@ export default function AiChatScreen({
                   </View>
                 )}
                 <View className="max-w-[88%]">
+                  {/* โฟลเดอร์ที่ผู้ใช้แนบ → การ์ดที่กดเข้าไปดูคลิปข้างในได้ (ข้อ 2.2) */}
+                  {mine && item.folder ? (
+                    <TouchableOpacity
+                      onPress={() =>
+                        setBrowserFolder({
+                          id: item.folder!.id,
+                          name: item.folder!.name,
+                          clipCount: item.folder!.clipCount,
+                        })
+                      }
+                      activeOpacity={0.85}
+                      className="mb-1.5 self-end flex-row items-center bg-amber-50 border border-amber-200 rounded-2xl px-3 py-2"
+                    >
+                      <View className="w-8 h-8 rounded-xl bg-amber-100 items-center justify-center">
+                        <FolderIcon size={16} color="#D47A3A" />
+                      </View>
+                      <View className="ml-2 flex-1">
+                        <Text className="text-amber-800 text-[13px] font-bold" numberOfLines={1}>
+                          {item.folder.name}
+                        </Text>
+                        <Text className="text-amber-600 text-[11.5px]">
+                          {item.folder.clipCount} คลิป · แตะเพื่อดูข้างใน
+                        </Text>
+                      </View>
+                      <ChevronRightIcon size={16} color="#B45309" />
+                    </TouchableOpacity>
+                  ) : null}
+
                   {/* คลิปที่ผู้ใช้แนบมาพร้อมข้อความ → แตะแล้วเปิดดูเต็มจอ (แบบหน้าแรก) */}
                   {mine && item.video ? (
                     <>
@@ -1588,6 +1754,15 @@ export default function AiChatScreen({
                       {item.content}
                     </Text>
                   </View>
+
+                  {/* แท็กประเภทสถานที่ (OTOP / ท่องเที่ยวทั่วไป) + หมวดหมู่ + ลิงก์แหล่งที่มา */}
+                  {!mine && !failed ? (
+                    <ChatTagChips
+                      placeTag={item.placeTag}
+                      tags={item.tags}
+                      sources={item.sources}
+                    />
+                  ) : null}
 
                   {failed ? (
                     <TouchableOpacity
@@ -1715,7 +1890,7 @@ export default function AiChatScreen({
               {/* การ์ดช่องข้อมูลอยู่ที่ footer ของ FlatList
                   → footer ไม่ถูก recycle (RN ดันเข้า cells หลังข้อมูลที่แสดง)
                   → การ์ดไม่ถูกถอด/เข้าใหม่ตอนเอไaiตอบ → ไม่ค้าง ไม่หลุดแอป */}
-              {showDraftCard ? <View className="ml-9 mr-1">{renderDraftCard()}</View> : null}
+              {showDraftCard ? <View className="ml-9 mr-1">{renderQuestionFlow()}</View> : null}
             </>
           }
         />
@@ -1727,23 +1902,37 @@ export default function AiChatScreen({
         {currentOrigin && (
           <View className="flex-row items-center mx-3 mt-1.5 bg-violet-50 border border-violet-200 rounded-xl px-3 py-1.5">
             <MapPinIcon size={14} color="#7C3AED" />
-            <Text className="flex-1 text-violet-800 text-[11.5px] font-semibold ml-1.5" numberOfLines={1}>
-              เริ่มจาก: {currentOrigin.label} ({currentOrigin.address})
-            </Text>
+            <Pressable
+              onPress={() => setOriginModalOpen(true)}
+              accessibilityRole="button"
+              accessibilityLabel="ดูและแก้ไขจุดเริ่มต้น"
+              className="flex-1"
+            >
+              <Text className="text-violet-800 text-[11.5px] font-semibold ml-1.5" numberOfLines={1}>
+                เริ่มจาก: {currentOrigin.label} ({currentOrigin.address})
+              </Text>
+            </Pressable>
             <TouchableOpacity onPress={() => setCurrentOrigin(null)} className="p-0.5">
               <XMarkIcon size={14} color="#7C3AED" />
             </TouchableOpacity>
           </View>
         )}
 
-        {/* Attached-folder chip (only for a per-message attachment) */}
+        {/* ชิปโฟลเดอร์ที่แนบอยู่ (โฟลเดอร์ยัง "ติด" กับเธอร์นี้ → backend ได้บริบททุกข้อความ) */}
         {attachedFolder && (
           <View className="flex-row items-center mx-3 mt-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
             <FolderIcon size={16} color="#D47A3A" />
             <Text className="flex-1 text-amber-800 text-[12px] font-semibold ml-2" numberOfLines={1}>
               {attachedFolder.name} • {attachedFolder.videoIds.length} คลิป
             </Text>
-            <TouchableOpacity onPress={() => setAttachedFolderId(null)} className="p-0.5">
+            <TouchableOpacity
+              onPress={() => {
+                setAttachedFolderId(null);
+                // ถอดออกแล้วแนบใหม่ → ให้การ์ดโฟลเดอร์โผล่ใหม่ได้
+                announcedFolderRef.current = null;
+              }}
+              className="p-0.5"
+            >
               <XMarkIcon size={16} color="#B45309" />
             </TouchableOpacity>
           </View>
@@ -1868,6 +2057,8 @@ export default function AiChatScreen({
               <TouchableOpacity
                 onPress={() => {
                   setAttachedFolderId(item.id);
+                  // เพิ่งแนบโฟลเดอร์ใหม่ → ให้การ์ดโฟลเดอร์โผล่ในแชทอีกครั้ง
+                  announcedFolderRef.current = null;
                   setPickerOpen(false);
                 }}
                 activeOpacity={0.8}

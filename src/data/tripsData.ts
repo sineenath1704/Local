@@ -106,6 +106,32 @@ export interface ClipContext {
   narration?: string | null;
 }
 
+/**
+ * แท็กประเภทสถานที่
+ * - `otop` = ติดทะเบียน OTOP ของระบบ (เจอใน community_places)
+ * - `tourism` = ท่องเที่ยวทั่วไป (ไม่ได้ติดทะเบียน)
+ */
+export type PlaceTag = "otop" | "tourism";
+
+/** ลิงก์แหล่งที่มาจากการค้นเว็บ (Gemini + Google Search) */
+export interface ChatSource {
+  title: string;
+  url: string;
+}
+
+/**
+ * โฟลเดอร์ที่ผู้ใช้แนบไปกับข้อความ
+ * -------------------------------------------------------------
+ * ส่งเป็น "ออบเจกต์" ไม่ใช่ข้อความธรรมดา → ในแชทแสดงเป็นการ์ดโฟลเดอร์
+ * ที่กดเข้าไปดูคลิปข้างในได้ และคลิปในโฟลเดอร์เล่นเต็มจอแบบหน้าโฮม
+ */
+export interface ChatFolderAttachment {
+  id: string;
+  name: string;
+  /** จำนวนคลิปในโฟลเดอร์ตอนแนบ */
+  clipCount: number;
+}
+
 export interface AiChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -138,6 +164,20 @@ export interface AiChatMessage {
   plan?: TripPlan;
   /** ข้อมูลเสริมของแพลน (จุดที่ยังไม่ได้ไป · คำเตือน · รหัสแผนที่บันทึกไว้) */
   planMeta?: TripPlanMeta;
+  /**
+   * แท็กประเภทสถานที่ — backend ตรวจจากทะเบียน OTOP ของระบบ
+   * (ตามกฎ: เจอในทะเบียน = OTOP · ไม่เจอ = ท่องเที่ยวทั่วไป)
+   */
+  placeTag?: PlaceTag;
+  /** หมวดหมู่ของสถานที่ (ที่พัก · ร้านอาหาร · คาเฟ่ · แหล่งท่องเที่ยว ...) */
+  tags?: string[];
+  /** ลิงก์แหล่งที่มา — มีเมื่อคำตอบนี้มาจากการค้นเว็บ */
+  sources?: ChatSource[];
+  /**
+   * โฟลเดอร์ที่ผู้ใช้แนบมาพร้อมข้อความนี้
+   * → แสดงเป็นการ์ดโฟลเดอร์ที่กดเข้าไปดูคลิปข้างในได้ (ไม่ใช่ส่งเป็นข้อความ)
+   */
+  folder?: ChatFolderAttachment;
 }
 
 /** ข้อมูลเสริมที่มาคู่กับ `AiChatMessage.plan` */
@@ -572,6 +612,79 @@ export function isTripPlanReady(slots: TripSlots): boolean {
   return computeTripMissing(slots).length === 0;
 }
 
+// ── flow "ถามทีละคำถาม" ────────────────────────────────────────────────
+
+/**
+ * คำถามที่แอปถามทีละข้อ (ข้อ 2.3)
+ * -------------------------------------------------------------
+ * ผู้ใช้ตอบได้ทั้งแบบ "พิมพ์" และแบบ "เลือกตัวเลือก"
+ * → ลำดับนี้ต้องตรงกับที่ backend คิด "ขาดอะไร" (computeTripMissing)
+ */
+export type TripQuestionKey =
+  | "startPoint"
+  | "startPointCoords"
+  | "returnMode"
+  | "endPoint"
+  | "endPointCoords"
+  | "startDate"
+  | "endDate"
+  | "startTime";
+
+/**
+ * รายการคำถามที่ "ต้องถาม" ตามคำตอบที่ผู้ใช้ให้มาตอนนี้
+ * -------------------------------------------------------------
+ * · จุดเริ่มต้นยังไม่มี → ถามชื่อก่อน (ยังไม่ถามพิกัด)
+ * · เลือก "กลับคนละจุด" → เพิ่มคำถามจุดสิ้นสุด
+ * · จุดที่มีแล้วแต่ยังไม่มีพิกัด → ถามหาพิกัดต่อ
+ */
+export function tripQuestionList(slots: TripSlots): TripQuestionKey[] {
+  const list: TripQuestionKey[] = ["startPoint"];
+  if (slots.startPoint && !slots.startPoint.coords) list.push("startPointCoords");
+  list.push("returnMode");
+  if (slots.returnMode === "custom") {
+    list.push("endPoint");
+    if (slots.endPoint && !slots.endPoint.coords) list.push("endPointCoords");
+  }
+  list.push("startDate", "endDate", "startTime");
+  return list;
+}
+
+/** คำถามนี้ตอบไปแล้วหรือยัง */
+function isQuestionAnswered(key: TripQuestionKey, slots: TripSlots): boolean {
+  switch (key) {
+    case "startPoint":
+      return !!slots.startPoint?.label;
+    case "startPointCoords":
+      return !!slots.startPoint?.coords;
+    case "returnMode":
+      return slots.returnMode === "same_as_start" || slots.returnMode === "custom";
+    case "endPoint":
+      return !!slots.endPoint?.label;
+    case "endPointCoords":
+      return !!slots.endPoint?.coords;
+    case "startDate":
+      return !!slots.startDate && slots.startDate >= tripTodayIso();
+    case "endDate": {
+      if (!slots.endDate) return false;
+      const days = tripRangeDays(slots.startDate, slots.endDate);
+      return days != null && days <= TRIP_MAX_DAYS;
+    }
+    case "startTime":
+      return !!slots.startTime;
+  }
+}
+
+/**
+ * คำถามถัดไปที่ต้องถาม (null = ข้อมูลครบ พร้อมสรุปและสร้างแพลน)
+ * → คำนวณแบบ deterministic ฝั่งแอป (ไม่ให้โมเดลตัดสิน)
+ */
+export function nextTripQuestion(slots: TripSlots): TripQuestionKey | null {
+  for (const key of tripQuestionList(slots)) {
+    if (!isQuestionAnswered(key, slots)) return key;
+  }
+  return null;
+}
+
 /** สถานะแผนทริปที่ backend ส่งกลับมา (ข้อมูลที่ได้แล้ว · ที่ยังขาด · พร้อมวางแผนไหม) */
 export interface TripDraft {
   slots: TripSlots;
@@ -709,6 +822,112 @@ export interface TripPlan {
   vehicle?: TripPlanVehicle;
   aiUsed?: boolean;
   droppedStops?: { name: string; day: number; reason: string }[];
+}
+
+// ── สรุปแผนทั้งหมดกลับให้ผู้ใช้ (ข้อ 2.3) ───────────────────────────────
+
+/** จัดตัวเลขให้มีจุลภาค (ไม่พึ่ง Intl — Hermes บางเวอร์ชันไม่ครบ) */
+function formatBaht(n: number | null | undefined): string {
+  const v = Math.round(Number(n ?? 0));
+  return v.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/**
+ * สรุปแพลนทั้งหมดเป็นข้อความสั้น ๆ ให้ผู้ใช้อ่านในแชท
+ * -------------------------------------------------------------
+ * การ์ดแพลนดูรายละเอียด (แผนที่ ต้นทุน จุดแวะ) แต่แชทควรมี "ภาพรวม"
+ * ของทั้งทริปอยู่บ้าง ไม่งั้นผู้ใช้ต้องเลื่อนการ์ดขึ้นไปดูเอง
+ */
+export function formatPlanSummary(plan: TripPlan): string {
+  const days = plan.days ?? [];
+  const lines: string[] = [];
+
+  const title = plan.title?.trim() || "แผนทริป";
+  lines.push(`📋 สรุปแผนทริป — ${title}`);
+
+  // ── เส้นทางรวม ────────────────────────────────────────────────
+  const startLabel = plan.startPoint?.label ?? "จุดเริ่มต้น";
+  const endLabel =
+    plan.returnMode === "custom" && plan.endPoint?.label
+      ? plan.endPoint.label
+      : "จุดเดิม";
+  lines.push(
+    `📍 ${startLabel} → ${endLabel} · ${days.length || 1} วัน` +
+      (plan.startTime ? ` · ออกเดินทาง ${plan.startTime}` : "")
+  );
+
+  // ── รถ / คน / งบ ─────────────────────────────────────────────
+  const vehicleText = plan.vehicle
+    ? `${plan.vehicle.label}${plan.vehicle.model ? ` (${plan.vehicle.model})` : ""}`
+    : "ไม่ระบุ";
+  const travelers = plan.travelers ?? 1;
+  const budgetPer = plan.budgetPerPerson ?? plan.budget?.perPerson ?? 0;
+  lines.push(
+    `🚗 รถ: ${vehicleText} · ผู้เดินทาง ${travelers} คน` +
+      (budgetPer ? ` · งบ ${formatBaht(budgetPer)} บาท/คน` : "")
+  );
+
+  // ── ค่าใช้จ่าย ───────────────────────────────────────────────
+  const budget = plan.budget;
+  if (budget) {
+    const parts: string[] = [];
+    if (budget.lodging) parts.push(`ที่พัก ${formatBaht(budget.lodging)}`);
+    if (budget.fuel) parts.push(`น้ำมัน/ค่าไฟ ${formatBaht(budget.fuel)}`);
+    if (budget.food) parts.push(`อาหาร ${formatBaht(budget.food)}`);
+    if (budget.activities) parts.push(`กิจกรรม ${formatBaht(budget.activities)}`);
+    lines.push(
+      `💰 รวม ${formatBaht(budget.total)} บาท (คนละ ${formatBaht(
+        budget.perPerson
+      )} บาท)` + (parts.length ? ` · ${parts.join(" · ")}` : "")
+    );
+  }
+
+  // ── รายวัน ───────────────────────────────────────────────────
+  for (const day of days) {
+    lines.push("");
+    lines.push(
+      `วันที่ ${day.day} · ${formatThaiDate(day.date)}` +
+        (day.title ? ` — ${day.title}` : "")
+    );
+    const stops = day.stops ?? [];
+    if (stops.length === 0) {
+      lines.push("  (ไม่มีจุดแวะในวันนี้)");
+      continue;
+    }
+    for (const stop of stops) {
+      const time = stop.arriveTime ? `${stop.arriveTime} ` : "";
+      const bits: string[] = [];
+      if (stop.activity) bits.push(stop.activity);
+      if (stop.stayHours) bits.push(`อยู่ ${stop.stayHours} ชม.`);
+      if (stop.distanceFromPrevKm != null && stop.distanceFromPrevKm > 0) {
+        bits.push(
+          `เดินทาง ${stop.distanceFromPrevKm.toFixed(1)} กม.` +
+            (stop.driveToNextMins != null ? ` (${Math.round(stop.driveToNextMins)} นาที)` : "")
+        );
+      }
+      if (stop.estimatedCost) bits.push(`ค่าใช้จ่าย ${formatBaht(stop.estimatedCost)} บาท`);
+      lines.push(
+        `  • ${time}${stop.name}` + (bits.length ? ` — ${bits.join(" · ")}` : "")
+      );
+    }
+    if (day.totalKm) {
+      lines.push(
+        `  🚗 วันนี้รวม ${day.totalKm.toFixed(1)} กม. · เวลาเดินทาง ${Math.round(
+          day.totalDriveMinutes
+        )} นาที`
+      );
+    }
+  }
+
+  // ── ข้อควรรู้ ────────────────────────────────────────────────
+  const notes = [...(plan.warnings ?? []), ...(plan.assumptions ?? [])].slice(0, 4);
+  if (notes.length) {
+    lines.push("");
+    lines.push("ข้อควรรู้:");
+    for (const n of notes) lines.push(`  • ${n}`);
+  }
+
+  return lines.join("\n");
 }
 
 // ---- Trips ----

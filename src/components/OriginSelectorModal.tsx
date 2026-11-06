@@ -21,10 +21,10 @@ import {
   getSavedPlaces,
   saveUserPlace,
   resolveGoogleMapsUrl,
-  updateSavedPlaceCoords,
   UserSavedPlace,
 } from "../services/savedPlacesService";
 import { resolvePlaceCoords } from "../services/placesService";
+import SavedPlaceEditorSheet from "./SavedPlaceEditorSheet";
 
 interface OriginSelectorModalProps {
   visible: boolean;
@@ -47,8 +47,13 @@ export default function OriginSelectorModal({
 }: OriginSelectorModalProps) {
   const [savedList, setSavedList] = useState<UserSavedPlace[]>([]);
   const [loading, setLoading] = useState(false);
-  /** กำลังหาพิกัดให้ที่อยู่ที่บันทึกไว้ตัวไหน (ตัวที่กำลังรอ) */
-  const [resolvingId, setResolvingId] = useState<string | null>(null);
+  /**
+   * ที่อยู่ที่กำลัง "เปิดดู/แก้ไข/ลบ" (ไม่ใช่การเลือก)
+   * -------------------------------------------------------------
+   * กดชิปที่อยู่ = เปิดหน้าดูบนแผนที่ + แก้ไข + ลบ ได้
+   *   (ไม่ใช่ส่งข้อความเข้าแชท และไม่ใช่เลือกเป็นจุดเริ่มต้นทันที)
+   */
+  const [editingPlace, setEditingPlace] = useState<UserSavedPlace | null>(null);
 
   // Manual input state
   const [placeLabel, setPlaceLabel] = useState(defaultLabel);
@@ -56,6 +61,13 @@ export default function OriginSelectorModal({
   const [mapsUrl, setMapsUrl] = useState("");
   const [saveAsFav, setSaveAsFav] = useState(false);
   const [savingFav, setSavingFav] = useState(false);
+
+  /** โหลดรายการที่อยู่ที่บันทึกไว้ (ใช้ตอนเปิด modal + หลังแก้ไข/ลบ) */
+  const refreshSaved = async () => {
+    const list = await getSavedPlaces();
+    setSavedList(list);
+    setLoading(false);
+  };
 
   useEffect(() => {
     if (!visible) return;
@@ -71,6 +83,12 @@ export default function OriginSelectorModal({
       isMounted = false;
     };
   }, [visible]);
+
+  /** ปิด modal = ปิดทั้งหน้ารายการและหน้าแก้ไข */
+  const handleClose = () => {
+    setEditingPlace(null);
+    onClose();
+  };
 
   /**
    * บันทึกเป็นที่อยู่ประจำ (ถ้าผู้ใช้ติ๊กไว้) แล้วส่งจุดที่เลือกกลับไป
@@ -164,64 +182,51 @@ export default function OriginSelectorModal({
     await applySelection({ placeTitle, displayAddress, url, coords });
   };
 
-  const handlePickSaved = async (item: UserSavedPlace) => {
-    let coords =
-      item.lat && item.lng ? { lat: item.lat, lng: item.lng } : undefined;
-
-    // ที่อยู่ที่บันทึกไว้ก่อนหน้านี้อาจไม่มีพิกัด (ตอนที่ยังหาไม่ได้)
-    // → หาใหม่แล้วเขียนกลับลงฐานข้อมูล จะได้ไม่ต้องรอทุกครั้ง
-    if (!coords) {
-      setResolvingId(item.id);
-      const resolved = await resolvePlaceCoords({
-        url: item.google_maps_url ?? null,
-        text: item.address_text ?? null,
-      });
-      setResolvingId(null);
-      if (resolved) {
-        coords = { lat: resolved.lat, lng: resolved.lng };
-        void updateSavedPlaceCoords(item.id, resolved.lat, resolved.lng);
-      }
-    }
-
-    // ยังหาพิกัดไม่ได้ → บอกผู้ใช้ก่อน (แผนทริปต้องใช้พิกัดถึงจะคำนวณเส้นทางได้)
-    if (!coords) {
-      Alert.alert(
-        "หาพิกัดไม่ได้",
-        `ที่อยู่ "${item.label}" ยังไม่มีพิกัด และค้นจาก Google ก็ไม่สำเร็จ\n\n` +
-          "แผนทริปต้องใช้พิกัด จึงคำนวณเส้นทางไม่ได้\n" +
-          "เลือกจากแผนที่ในแอปแทน หรือกลับไปกำหนดจุดใหม่",
-        [
-          { text: "ยกเลิก", style: "cancel" },
-          {
-            text: "ใช้จุดนี้ต่อ (ยังไม่มีพิกัด)",
-            onPress: () => {
-              onSelectOrigin({
-                label: item.label,
-                address: item.address_text,
-                url: item.google_maps_url,
-                coords: undefined,
-              });
-              onClose();
-            },
-          },
-        ]
-      );
-      return;
-    }
-
+  /**
+   * ผู้ใช้กด "ใช้จุดนี้" ในหน้าแก้ไข
+   * -------------------------------------------------------------
+   * ส่งค่าที่แก้แล้วกลับไปใช้ (ชื่อ/ที่อยู่/พิกัด ตามที่บันทึกจริง)
+   * → ไม่ส่งข้อความเข้าแชท (ผู้ใช้เลือกจุด ไม่ได้ถามเอไai)
+   */
+  const handleUseSaved = (item: UserSavedPlace) => {
+    const coords =
+      item.lat != null && item.lng != null ? { lat: item.lat, lng: item.lng } : undefined;
     onSelectOrigin({
       label: item.label,
       address: item.address_text,
       url: item.google_maps_url,
       coords,
     });
-    onClose();
+    handleClose();
   };
 
   return (
-    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+    <Modal
+      visible={visible}
+      animationType="slide"
+      transparent
+      onRequestClose={handleClose}
+    >
       <View className="flex-1 justify-end bg-black/60">
-        <View className="bg-white rounded-t-3xl p-5 max-h-[85%]">
+        <View className="bg-white rounded-t-3xl max-h-[92%]">
+          {/* ── หน้าแก้ไขที่อยู่ที่บันทึกไว้ (เปิดจากการกดชิป) ─────────────
+              อยู่ใน Modal เดียวกัน ไม่ซ้อน Modal (บน iOS ถ้าซ้อนแล้วปุ่มกดไม่ติด) */}
+          {editingPlace ? (
+            <SavedPlaceEditorSheet
+              place={editingPlace}
+              onClose={() => setEditingPlace(null)}
+              onUsePlace={handleUseSaved}
+              useLabel={
+                title?.includes("สถานที่")
+                  ? "เลือกสถานที่นี้"
+                  : "ใช้เป็นจุดเริ่มต้น"
+              }
+              onChanged={() => {
+                void refreshSaved();
+              }}
+            />
+          ) : (
+            <View className="p-5">
           {/* Header */}
           <View className="flex-row items-center justify-between pb-3 border-b border-gray-100">
             <View className="flex-1 mr-2">
@@ -232,7 +237,7 @@ export default function OriginSelectorModal({
                 {subtitle ?? "ระบุตำแหน่งบ้าน หอพัก หรือวางลิงก์ Google Maps"}
               </Text>
             </View>
-            <TouchableOpacity onPress={onClose} className="p-1.5 bg-gray-100 rounded-full">
+            <TouchableOpacity onPress={handleClose} className="p-1.5 bg-gray-100 rounded-full">
               <XMarkIcon size={20} color="#4B5563" />
             </TouchableOpacity>
           </View>
@@ -247,8 +252,10 @@ export default function OriginSelectorModal({
                 {savedList.map((item) => (
                   <TouchableOpacity
                     key={item.id}
-                    onPress={() => handlePickSaved(item)}
+                    onPress={() => setEditingPlace(item)}
                     activeOpacity={0.7}
+                    accessibilityRole="button"
+                    accessibilityLabel={`เปิดดูและแก้ไข ${item.label}`}
                     className="flex-row items-center bg-violet-50 border border-violet-200 px-3.5 py-2 rounded-xl"
                   >
                     {item.label === "บ้าน" ? (
@@ -262,8 +269,8 @@ export default function OriginSelectorModal({
                       <Text className="text-[13px] font-bold text-violet-900">{item.label}</Text>
                       <Text className="text-[11px] text-violet-600" numberOfLines={1}>{item.address_text}</Text>
                     </View>
-                    {resolvingId === item.id ? (
-                      <ActivityIndicator size="small" color="#7C3AED" className="ml-2" />
+                    {item.is_default ? (
+                      <Text className="text-[10px] text-amber-700 font-bold ml-2">จุดหลัก</Text>
                     ) : item.lat && item.lng ? null : (
                       <Text className="text-[10px] text-amber-600 ml-2">ยังไม่มีพิกัด</Text>
                     )}
@@ -368,6 +375,8 @@ export default function OriginSelectorModal({
               )}
             </TouchableOpacity>
           </ScrollView>
+            </View>
+          )}
         </View>
       </View>
     </Modal>

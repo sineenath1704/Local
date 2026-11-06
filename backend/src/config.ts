@@ -85,6 +85,15 @@ export const config = {
     apiKey: required("GEMINI_API_KEY"),
     model: process.env.GEMINI_MODEL?.trim() || "gemini-3.8-flash",
     timeoutMs: num("GEMINI_TIMEOUT_MS", 120000),
+    /**
+     * ค้นข้อมูลท่องเที่ยวจากเว็บ (Google Search grounding) — `geminiSearch.ts`
+     * -------------------------------------------------------------
+     * ปิดด้วย env `GEMINI_SEARCH=off` → ระบบทำงานเหมือนเดิมทุกอย่าง
+     * (เอไaiตอบจากข้อมูลในระบบอย่างเดียว)
+     */
+    searchEnabled: flag("GEMINI_SEARCH", true),
+    /** ค้นเว็บคิดเงินต่อคำค้น → รอไม่นานเกินจำเป็น (ค่าเริ่มต้น 25 วิ) */
+    searchTimeoutMs: num("GEMINI_SEARCH_TIMEOUT_MS", 25000),
   },
 
   // OTOP นวัตวิถี registry (CDD) — verify a community by its Village_ID.

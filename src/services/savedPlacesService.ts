@@ -257,6 +257,130 @@ export async function saveUserPlace(place: Omit<UserSavedPlace, "id" | "user_id"
 }
 
 /**
+ * แก้ไขที่อยู่ที่บันทึกไว้ (ชื่อ · ที่อยู่ · พิกัด · ลิงก์ · จุดหลัก)
+ * -------------------------------------------------------------
+ * ค่าที่แก้จะถูกเขียนกลับเป็นจริงทันที (ไม่ใช่แค่จำไว้ในแอป)
+ * → ถ้าบันทึกไม่สำเร็จ จะโยน error ให้ผู้เรียกจัดการ (แสดง Alert)
+ *   ไม่กลืน error เงียบ ๆ เหมือนโค้ดเดิม เพราะผู้ใช้กด "ยืนยันบันทึก" แล้วต้องเห็นผล
+ */
+export async function updateSavedPlace(
+  id: string,
+  patch: Partial<
+    Pick<
+      UserSavedPlace,
+      "label" | "address_text" | "google_maps_url" | "lat" | "lng" | "is_default"
+    >
+  >
+): Promise<void> {
+  // ตัดค่า undefined ออก (Supabase อาจแปลงเป็น null ทำให้ช่องที่ไม่ได้แก้ถูกล้าง)
+  const clean: Record<string, unknown> = {};
+  Object.entries(patch).forEach(([k, v]) => {
+    if (v !== undefined) clean[k] = v;
+  });
+  if (!Object.keys(clean).length) return;
+
+  if (!isSupabaseConfigured) {
+    inMemoryPlaces = inMemoryPlaces.map((p) =>
+      p.id === id ? { ...p, ...(clean as Partial<UserSavedPlace>) } : p
+    );
+    return;
+  }
+
+  try {
+    const { data: authData } = await supabase.auth.getUser();
+    const uid = authData.user?.id;
+    if (!uid) throw new Error("ยังไม่ได้เข้าสู่ระบบ");
+
+    const { error } = await supabase
+      .from("user_saved_places")
+      .update(clean)
+      .eq("id", id)
+      .eq("user_id", uid);
+    if (error) throw new Error(error.message);
+
+    inMemoryPlaces = inMemoryPlaces.map((p) =>
+      p.id === id ? { ...p, ...(clean as Partial<UserSavedPlace>) } : p
+    );
+  } catch (err) {
+    console.warn("updateSavedPlace error:", err);
+    throw err;
+  }
+}
+
+/**
+ * ตั้ง "จุดหลัก" (ที่เริ่มต้นประจำ)
+ * -------------------------------------------------------------
+ * ผู้ใช้มีจุดหลักได้ครั้งละ 1 จุด → เคลียร์ของตัวอื่นก่อน แล้วค่อยตั้งของจุดนี้
+ * (ทำในฐานข้อมูล ไม่ใช่แค่ในแอป → เปิดแอปใหม่ก็ยังเหมือนเดิม)
+ */
+export async function setDefaultSavedPlace(id: string): Promise<void> {
+  if (!isSupabaseConfigured) {
+    inMemoryPlaces = inMemoryPlaces.map((p) => ({
+      ...p,
+      is_default: p.id === id,
+    }));
+    return;
+  }
+
+  try {
+    const { data: authData } = await supabase.auth.getUser();
+    const uid = authData.user?.id;
+    if (!uid) throw new Error("ยังไม่ได้เข้าสู่ระบบ");
+
+    const { error: clearErr } = await supabase
+      .from("user_saved_places")
+      .update({ is_default: false })
+      .eq("user_id", uid);
+    if (clearErr) throw new Error(clearErr.message);
+
+    const { error: setErr } = await supabase
+      .from("user_saved_places")
+      .update({ is_default: true })
+      .eq("id", id)
+      .eq("user_id", uid);
+    if (setErr) throw new Error(setErr.message);
+
+    inMemoryPlaces = inMemoryPlaces.map((p) => ({
+      ...p,
+      is_default: p.id === id,
+    }));
+  } catch (err) {
+    console.warn("setDefaultSavedPlace error:", err);
+    throw err;
+  }
+}
+
+/**
+ * ลบที่อยู่ที่บันทึกไว้
+ * -------------------------------------------------------------
+ * ลบแล้วมีผลจริงในฐานข้อมูล + หายจากรายการในแอปทันที
+ */
+export async function deleteSavedPlace(id: string): Promise<void> {
+  if (!isSupabaseConfigured) {
+    inMemoryPlaces = inMemoryPlaces.filter((p) => p.id !== id);
+    return;
+  }
+
+  try {
+    const { data: authData } = await supabase.auth.getUser();
+    const uid = authData.user?.id;
+    if (!uid) throw new Error("ยังไม่ได้เข้าสู่ระบบ");
+
+    const { error } = await supabase
+      .from("user_saved_places")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", uid);
+    if (error) throw new Error(error.message);
+
+    inMemoryPlaces = inMemoryPlaces.filter((p) => p.id !== id);
+  } catch (err) {
+    console.warn("deleteSavedPlace error:", err);
+    throw err;
+  }
+}
+
+/**
  * บันทึกพิกัดที่เพิ่งหาได้กลับลงที่อยู่ที่บันทึกไว้
  * -------------------------------------------------------------
  * ที่อยู่ที่ผู้ใช้บันทึกไว้ก่อนหน้านี้ (ตอนที่ยังหาพิกัดไม่ได้) จะไม่มี lat/lng

@@ -6,6 +6,8 @@ import {
   TextInput,
   Linking,
   ActivityIndicator,
+  Image,
+  ScrollView,
 } from "react-native";
 import {
   MapPinIcon,
@@ -21,6 +23,7 @@ import {
   SparklesIcon,
   CalendarDaysIcon,
   BanknotesIcon,
+  PlayIcon,
 } from "react-native-heroicons/outline";
 import {
   TripPlan,
@@ -33,6 +36,10 @@ import {
 } from "../data/tripsData";
 import TripRouteMap from "./TripRouteMap";
 import EditableValueRow from "./EditableValueRow";
+import {
+  vehicleModelSuggestions,
+  type VehicleCategory,
+} from "../data/vehicleData";
 
 /**
  * การ์ด "แผนทริปที่คำนวณแล้ว"
@@ -64,6 +71,13 @@ function mins(n?: number | null): string {
 
 /** ขาเส้นทางว่าง — ใช้ค่าเดียวทั้งแอป ไม่สร้าง array ใหม่ทุกครั้งที่ re-render */
 const EMPTY_LEGS: TripPlanDay["legs"] = [];
+
+/** คลิปว่าง — ค่าเดียวทั้งแอป (ไม่สร้าง array ใหม่ทุกครั้งที่ re-render) */
+const EMPTY_STOP_CLIPS: {
+  videoId: string;
+  thumbnailUrl: string | null;
+  caption: string | null;
+}[] = [];
 
 /** แปลงวันที่ ISO (2026-11-08) เป็นข้อความไทยอ่านง่าย */
 const THAI_MONTHS = [
@@ -137,6 +151,16 @@ interface TripPlanCardProps {
   onVehicleChange?: (vehicle: string, vehicleModel: string | null) => void;
   /** เปลี่ยนจำนวนผู้เดินทาง → คำนวณแผนใหม่ (ต่อคนเปลี่ยนตาม) */
   onTravelersChange?: (travelers: number) => void;
+  /**
+   * คลิปของแต่ละจุดแวะ (key = id ของจุด) — มาจากโฟลเดอร์ที่แนบ
+   * → ให้ผู้ใช้เห็นว่าจุดนี้มีคลิปอะไรบ้าง ก่อนตัดสินใจลบ/เพิ่มจุด (ข้อ 2.3)
+   */
+  stopClips?: Record<
+    string,
+    { videoId: string; thumbnailUrl: string | null; caption: string | null }[]
+  >;
+  /** กดคลิปของจุดแวะ → เปิดดูคลิปเต็มจอ */
+  onOpenClip?: (videoId: string) => void;
 }
 
 export default function TripPlanCard({
@@ -157,6 +181,8 @@ export default function TripPlanCard({
   vehicleSpecified = true,
   onVehicleChange,
   onTravelersChange,
+  stopClips,
+  onOpenClip,
 }: TripPlanCardProps) {
   const [dayIndex, setDayIndex] = useState(0);
   const [editingFuel, setEditingFuel] = useState(false);
@@ -207,6 +233,23 @@ export default function TripPlanCard({
       })),
     [day?.stops]
   );
+
+  /**
+   * หมวดรถที่เลือก → ใช้กรองรุ่นรถที่แนะนำ (พิมพ์แบรนด์ → เลือกรุ่น)
+   */
+  const vehicleCategory: VehicleCategory | null = useMemo(() => {
+    if (vehicleChoice === "ev") return "ev";
+    if (vehicleChoice === "private_car") return "car";
+    return null;
+  }, [vehicleChoice]);
+
+  const modelOptions = useMemo(
+    () => vehicleModelSuggestions(vehicleModelText, vehicleCategory),
+    [vehicleModelText, vehicleCategory]
+  );
+
+  /** คลิปของจุดแวะนี้ (จากโฟลเดอร์ที่แนบ) */
+  const clipsOfStop = (stopId: string) => stopClips?.[stopId] ?? EMPTY_STOP_CLIPS;
 
   const fuelSourceText = useMemo(() => {
     const bits: string[] = [];
@@ -491,6 +534,45 @@ export default function TripPlanCard({
                   ) : null}
                 </View>
 
+                {/* คลิปของจุดนี้ในโฟลเดอร์ (ข้อ 2.3)
+                    → ผู้ใช้เห็นคลิปของจุดนี้ก่อนตัดสินใจว่าจะลบ/เพิ่มจุด */}
+                {clipsOfStop(stop.id).length > 0 ? (
+                  <View className="mt-2">
+                    <Text className="text-[11.5px] font-bold text-gray-500 mb-1">
+                      คลิปในโฟลเดอร์ ({clipsOfStop(stop.id).length})
+                    </Text>
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      contentContainerStyle={{ paddingRight: 4 }}
+                    >
+                      {clipsOfStop(stop.id).map((clip) => (
+                        <TouchableOpacity
+                          key={clip.videoId}
+                          onPress={() => onOpenClip?.(clip.videoId)}
+                          activeOpacity={0.85}
+                          accessibilityRole="button"
+                          accessibilityLabel={`เปิดคลิป ${clip.caption ?? "ในโฟลเดอร์"}`}
+                          style={{ width: 46, height: 62, marginRight: 6 }}
+                          className="rounded-lg overflow-hidden bg-gray-800"
+                        >
+                          {clip.thumbnailUrl ? (
+                            <Image
+                              source={{ uri: clip.thumbnailUrl }}
+                              style={{ width: "100%", height: "100%" }}
+                              resizeMode="cover"
+                            />
+                          ) : (
+                            <View className="flex-1 items-center justify-center">
+                              <PlayIcon size={16} color="#FFFFFF" />
+                            </View>
+                          )}
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
+                  </View>
+                ) : null}
+
                 {/* วิธีจอง / ติดต่อ */}
                 {stop.booking ? (
                   <View className="mt-2 bg-white border border-gray-200 rounded-xl px-2.5 py-2">
@@ -702,11 +784,34 @@ export default function TripPlanCard({
               <TextInput
                 value={vehicleModelText}
                 onChangeText={setVehicleModelText}
-                placeholder="เช่น Toyota Corolla Altis"
+                placeholder="พิมพ์แบรนด์ เช่น Toyota"
                 placeholderTextColor="#9CA3AF"
                 className="bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 text-[14px] text-gray-900"
                 accessibilityLabel="ชื่อหรือรุ่นรถ"
               />
+              {/* รุ่นที่แนะนำ — เลือกแล้วยังไม่คำนวณ ต้องกด "ตกลง · คำนวณใหม่" (ข้อ 2.3) */}
+              {vehicleModelText.trim() && modelOptions.length > 0 ? (
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  className="mt-2"
+                  contentContainerStyle={{ paddingRight: 4 }}
+                >
+                  {modelOptions.map((m) => (
+                    <TouchableOpacity
+                      key={`${m.category}-${m.name}`}
+                      onPress={() => setVehicleModelText(m.name)}
+                      activeOpacity={0.75}
+                      className="mr-2 px-3 py-1.5 rounded-xl border border-violet-200 bg-violet-50"
+                    >
+                      <Text className="text-[12.5px] font-bold text-violet-800">
+                        {m.name}
+                      </Text>
+                      <Text className="text-[10.5px] text-gray-500">{m.fuelLabel}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              ) : null}
             </View>
           ) : null}
 

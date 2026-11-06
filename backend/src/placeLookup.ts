@@ -1092,6 +1092,11 @@ export function contextFromCandidate(c: PlaceCandidate): PlaceContext {
   if (c.district) ctx.district = c.district;
   if (c.subdistrict) ctx.subdistrict = c.subdistrict;
   if (c.googleMapsUri) ctx.googleMapsUrl = c.googleMapsUri;
+  // พิกัด — เอาไว้ให้เอไaiตอบ "อยู่ตรงไหน" และให้ฝั่งแอปทำแผนที่/เส้นทางต่อได้
+  if (c.latitude != null && c.longitude != null) {
+    ctx.latitude = c.latitude;
+    ctx.longitude = c.longitude;
+  }
   if (c.rating != null) ctx.rating = c.rating;
   if (c.userRatingCount != null) ctx.userRatingsTotal = c.userRatingCount;
   const price = priceLevelLabel(c.priceLevel);
@@ -1151,6 +1156,8 @@ export function mergePlaceContext(
   if (!merged.subdistrict && google.subdistrict) merged.subdistrict = google.subdistrict;
   if (!merged.village && google.village) merged.village = google.village;
   if (!merged.googleMapsUrl && google.googleMapsUrl) merged.googleMapsUrl = google.googleMapsUrl;
+  if (merged.latitude == null && google.latitude != null) merged.latitude = google.latitude;
+  if (merged.longitude == null && google.longitude != null) merged.longitude = google.longitude;
 
   // ── ฟิลด์ที่ Google เป็นเจ้าของ ──
   if (google.rating != null) merged.rating = google.rating;

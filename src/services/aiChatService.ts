@@ -5,6 +5,8 @@ import type {
   ClipContext,
   TripDraft,
   TripSlotsWire,
+  PlaceTag,
+  ChatSource,
 } from "../data/tripsData";
 import { slotsFromWire } from "../data/tripsData";
 
@@ -30,6 +32,15 @@ export interface ChatReply {
    * (ไม่มี = ข้อความธรรมดา → ห้ามแสดงปุ่มแผน)
    */
   tripDraft?: TripDraft;
+  /**
+   * แท็กประเภทสถานที่ — backend ตรวจจากทะเบียน OTOP ของระบบ
+   * (เจอ = "otop" · ไม่เจอ = "tourism")
+   */
+  placeTag?: PlaceTag;
+  /** หมวดหมู่ของสถานที่ (ที่พัก · ร้านอาหาร · คาเฟ่ ...) */
+  tags?: string[];
+  /** ลิงก์แหล่งที่มา — มีเมื่อคำตอบนี้มาจากการค้นเว็บ */
+  sources?: ChatSource[];
 }
 
 /**
@@ -78,8 +89,42 @@ function parsePlaceCandidates(raw: unknown): PlaceChoice[] | undefined {
   return list.length > 0 ? list : undefined;
 }
 
-/** Every call raises a toast on failure, then rethrows for the caller to render. */
-function withToast<T>(opts: AiFetchOptions): Promise<T> {
+/**
+ * แปลงแท็กประเภทสถานที่จาก backend
+ * ค่าที่ไม่รู้จัก → ทิ้ง (ไม่ทำให้แชทพัง)
+ */
+function parsePlaceTag(raw: unknown): PlaceTag | undefined {
+  return raw === "otop" || raw === "tourism" ? raw : undefined;
+}
+
+/** แปลงรายการแท็กหมวดหมู่ — เก็บแค่ค่าที่เป็นข้อความจริง */
+function parseTopicTags(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const list = raw
+    .filter((t): t is string => typeof t === "string")
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+  return list.length > 0 ? list.slice(0, 4) : undefined;
+}
+
+/** แปลงลิงก์แหล่งที่มา — ข้ามรายการที่ไม่มี url */
+function parseSources(raw: unknown): ChatSource[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const list: ChatSource[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const s = item as Record<string, unknown>;
+    if (typeof s.url !== "string" || !s.url.trim()) continue;
+    list.push({
+      title: typeof s.title === "string" && s.title.trim() ? s.title.trim() : s.url.trim(),
+      url: s.url.trim(),
+    });
+    if (list.length >= 5) break;
+  }
+  return list.length > 0 ? list : undefined;
+}
+
+/** Every call raises a toast on failure, then rethrows for the caller to render. */function withToast<T>(opts: AiFetchOptions): Promise<T> {
   return aiFetch<T>({
     ...opts,
     onSettled: (ok, error) => {
@@ -185,6 +230,9 @@ export async function sendChat(
     reply?: unknown;
     placeCandidates?: unknown;
     tripDraft?: unknown;
+    placeTag?: unknown;
+    tags?: unknown;
+    sources?: unknown;
   }>({
     label: "ai-chat",
     path: "/ai-chat",
@@ -219,9 +267,15 @@ export async function sendChat(
   }
   const placeCandidates = parsePlaceCandidates(data.placeCandidates);
   const tripDraft = parseTripDraft(data.tripDraft);
+  const placeTag = parsePlaceTag(data.placeTag);
+  const tags = parseTopicTags(data.tags);
+  const sources = parseSources(data.sources);
   return {
     reply: data.reply,
     ...(placeCandidates ? { placeCandidates } : {}),
     ...(tripDraft ? { tripDraft } : {}),
+    ...(placeTag ? { placeTag } : {}),
+    ...(tags ? { tags } : {}),
+    ...(sources ? { sources } : {}),
   };
 }
