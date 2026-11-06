@@ -1,9 +1,8 @@
 import React, { useRef, useState } from "react";
 import {
   Modal,
+  Pressable,
   ScrollView,
-  TouchableOpacity,
-  TouchableWithoutFeedback,
   View,
   Text,
   type NativeScrollEvent,
@@ -24,6 +23,15 @@ import { XMarkIcon } from "react-native-heroicons/outline";
  * → ไม่มี native module ใหม่ · ไม่ต้อง build ใหม่ · ไม่พัง
  *
  * เลือกได้ทีละ 5 นาที · เก็บค่าเป็น "HH:mm" (24 ชั่วโมง) เสมอ
+ *
+ * โครง Modal (สำคัญมากบน iOS)
+ * -------------------------------------------------------------
+ * โครงเดิมเป็น "พี่คู่" 2 อัน: backdrop (`flex-1`) + การ์ด (`absolute bottom-0`)
+ * → ปุ่มในการ์ดกดไม่ติด (เลื่อนล้อได้ แต่ยกเลิก/ตกลง/ปิดไม่ทำงาน)
+ *   เพราะทั้งครอบสีดำและการ์ดชนกันในโครงเดียว
+ * → เปลี่ยนเป็นโครงเดียวเหมือน `OriginSelectorModal` ที่ใช้ได้ปกติ:
+ *   root = View (flex-1) → backdrop (flex-1) → การ์ด (ลูกธรรมดา อยู่ล่างสุด)
+ *   (ไม่มี position:absolute ปนอนอีกแล้ว)
  */
 
 /** ความสูง 1 แถวของล้อ */
@@ -97,13 +105,27 @@ function Wheel({
     scrollToSelected();
   };
 
+  /** ตำแหน่งที่เลื่อนไป → ช่องที่ไฮไลต์ */
+  const indexOf = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const idx = Math.round(e.nativeEvent.contentOffset.y / ITEM_H);
+    return Math.max(0, Math.min(values.length - 1, idx));
+  };
+
   /**
    * ค่าที่เลื่อนไปตอนนี้ → ช่องที่ไฮไลต์
    * (เลื่อนจะทำให้ iOS snap หลังปล่อย → ค่าสดเสมอตรงกับตำแหน่งจริง)
    */
   const handleScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const idx = Math.round(e.nativeEvent.contentOffset.y / ITEM_H);
-    const clamped = Math.max(0, Math.min(values.length - 1, idx));
+    const clamped = indexOf(e);
+    if (clamped !== selectedIndex) onCommit(clamped);
+  };
+
+  /**
+   * ปล่อยนิ้ว / หยุดเลื่อน → ล็อกค่าที่ snap ไว้เป็นค่าที่เลือกจริง
+   * (กันเคส onScroll สุดท้ายมาไม่ทันตอนหยุด → เวลาที่เห็นไม่ถูกล็อค)
+   */
+  const handleSettle = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const clamped = indexOf(e);
     if (clamped !== selectedIndex) onCommit(clamped);
   };
 
@@ -124,6 +146,8 @@ function Wheel({
         onLayout={handleLayout}
         onContentSizeChange={handleContentSizeChange}
         onScroll={handleScroll}
+        onMomentumScrollEnd={handleSettle}
+        onScrollEndDrag={handleSettle}
         scrollEventThrottle={16}
         contentContainerStyle={{ paddingVertical: ITEM_H }}
       >
@@ -155,6 +179,13 @@ interface TripTimeSheetProps {
   visible: boolean;
   /** ค่าเวลาปัจจุบัน ("HH:mm") */
   value?: string | null;
+  /**
+   * เลขรอบการเปิด — เปลี่ยนเมื่อเปิดล้อใหม่
+   * ใช้เป็น key ของ "ล้อ" เพื่อย้ายล้อกลับไปค่าที่เลือกไว้
+   * (โค้ดเดิมใช้ key ที่ Modal → เปลี่ยน key ของ Modal ที่ยังเปิดอยู่
+   *   ทำให้ iOS ค้าง native modal เดิมไว้บนจอ → ล้อเลื่อนได้แต่กดปุ่มไม่ได้)
+   */
+  resetKey?: number;
   onCancel: () => void;
   /** ยืนยันเวลาที่เลือก */
   onConfirm: (time: string) => void;
@@ -163,17 +194,26 @@ interface TripTimeSheetProps {
 export default function TripTimeSheet({
   visible,
   value,
+  resetKey = 0,
   onCancel,
   onConfirm,
 }: TripTimeSheetProps) {
   const insets = useSafeAreaInsets();
   /**
    * เริ่มจากค่าที่ส่งเข้ามา
-   * (แม่เรียก mount ใหม่ทุกครั้งที่เปิดล้อ → ได้ค่าล่าสุดเสมอ ไม่ต้องมี effect)
+   * (ค่านอกอาจเปลี่ยนระหว่างที่ล้อยังเปิดอยู่ เช่น เอไaiไปกำหนดเวลาให้
+   *   → ปรับ state ตอน render ไม่ใช้ effect ตามวิธีของ React)
    */
   const initial = parseHhMm(value);
   const [hour, setHour] = useState<number>(initial.h);
   const [minute, setMinute] = useState<number>(initial.m);
+  const [lastValue, setLastValue] = useState<string | null | undefined>(value);
+  if (value !== lastValue) {
+    setLastValue(value);
+    const p = parseHhMm(value);
+    setHour(p.h);
+    setMinute(p.m);
+  }
 
   const hourIndex = Math.max(0, Math.min(23, hour));
   const minuteIndex = Math.max(
@@ -189,67 +229,85 @@ export default function TripTimeSheet({
       animationType="slide"
       onRequestClose={onCancel}
     >
-      <TouchableWithoutFeedback onPress={onCancel}>
-        <View className="flex-1 bg-black/40" />
-      </TouchableWithoutFeedback>
-      <View
-        className="absolute left-0 right-0 bottom-0 bg-white rounded-t-3xl"
-        style={{ paddingBottom: Math.max(insets.bottom, 12) }}
-      >
-        <View className="items-center pt-2.5 pb-1">
-          <View className="w-10 h-1.5 rounded-full bg-gray-300" />
-        </View>
+      {/* โครงเดียว: พื้นหลังกดปิดได้ (บน) + การ์ดล้อเวลา (ล่าง) */}
+      <View className="flex-1">
+        <Pressable
+          className="flex-1 bg-black/40"
+          onPress={onCancel}
+          accessibilityRole="button"
+          accessibilityLabel="ปิดตัวเลือกเวลา"
+        />
+        <View
+          className="bg-white rounded-t-3xl"
+          style={{ paddingBottom: Math.max(insets.bottom, 12) }}
+        >
+          <View className="items-center pt-2.5 pb-1">
+            <View className="w-10 h-1.5 rounded-full bg-gray-300" />
+          </View>
 
-        <View className="px-5 pt-1 pb-3 flex-row items-center justify-between border-b border-gray-100">
-          <Text className="text-[16px] font-black text-gray-900">
-            เวลาออกเดินทาง
-          </Text>
-          <TouchableOpacity onPress={onCancel} className="p-1">
-            <XMarkIcon size={22} color="#6B7280" />
-          </TouchableOpacity>
-        </View>
+          <View className="px-5 pt-1 pb-3 flex-row items-center justify-between border-b border-gray-100">
+            <Text className="text-[16px] font-black text-gray-900">
+              เวลาออกเดินทาง
+            </Text>
+            <Pressable
+              onPress={onCancel}
+              hitSlop={10}
+              accessibilityRole="button"
+              accessibilityLabel="ปิด"
+              className="p-1"
+            >
+              <XMarkIcon size={22} color="#6B7280" />
+            </Pressable>
+          </View>
 
-        {/* ── ค่าที่เลือก (ใหญ่) ─────────────────────────────── */}
-        <View className="px-5 pt-3 items-center">
-          <Text className="text-[34px] font-black text-gray-900">{text}</Text>
-          <Text className="text-[12px] text-gray-400 mt-0.5">
-            เลื่อนล้อเพื่อเลือกชั่วโมงและนาที (ทีละ 5 นาที)
-          </Text>
-        </View>
+          {/* ── ค่าที่เลือก (ใหญ่) ─────────────────────────────── */}
+          <View className="px-5 pt-3 items-center">
+            <Text className="text-[34px] font-black text-gray-900">{text}</Text>
+            <Text className="text-[12px] text-gray-400 mt-0.5">
+              เลื่อนล้อเพื่อเลือกชั่วโมงและนาที (ทีละ 5 นาที)
+            </Text>
+          </View>
 
-        {/* ── ล้อ 2 อัน: ชั่วโมง · นาที ───────────────────────── */}
-        <View className="flex-row px-4 pt-2" style={{ height: WHEEL_H }}>
-          <Wheel
-            values={HOURS}
-            selectedIndex={hourIndex}
-            onCommit={setHour}
-            format={pad2}
-          />
-          <View className="w-px bg-gray-200 mx-2" />
-          <Wheel
-            values={MINUTES}
-            selectedIndex={minuteIndex}
-            onCommit={(i) => setMinute(MINUTES[i])}
-            format={pad2}
-          />
-        </View>
+          {/* ── ล้อ 2 อัน: ชั่วโมง · นาที ───────────────────────── */}
+          <View className="flex-row px-4 pt-2" style={{ height: WHEEL_H }}>
+            <Wheel
+              key={`hour-${resetKey}`}
+              values={HOURS}
+              selectedIndex={hourIndex}
+              onCommit={setHour}
+              format={pad2}
+            />
+            <View className="w-px bg-gray-200 mx-2" />
+            <Wheel
+              key={`minute-${resetKey}`}
+              values={MINUTES}
+              selectedIndex={minuteIndex}
+              onCommit={(i) => setMinute(MINUTES[i])}
+              format={pad2}
+            />
+          </View>
 
-        {/* ── ปุ่ม ──────────────────────────────────────────── */}
-        <View className="flex-row px-5 pt-3 pb-1">
-          <TouchableOpacity
-            onPress={onCancel}
-            activeOpacity={0.85}
-            className="flex-1 py-3 rounded-2xl border border-gray-200 items-center justify-center mr-2"
-          >
-            <Text className="text-[14px] font-bold text-gray-600">ยกเลิก</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            onPress={() => onConfirm(text)}
-            activeOpacity={0.85}
-            className="flex-1 py-3 rounded-2xl items-center justify-center ml-2 bg-violet-600"
-          >
-            <Text className="text-[14px] font-bold text-white">ตกลง</Text>
-          </TouchableOpacity>
+          {/* ── ปุ่ม ──────────────────────────────────────────── */}
+          <View className="flex-row px-5 pt-3 pb-1">
+            <Pressable
+              onPress={onCancel}
+              accessibilityRole="button"
+              accessibilityLabel="ยกเลิก"
+              style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1 })}
+              className="flex-1 py-3 rounded-2xl border border-gray-200 items-center justify-center mr-2"
+            >
+              <Text className="text-[14px] font-bold text-gray-600">ยกเลิก</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => onConfirm(text)}
+              accessibilityRole="button"
+              accessibilityLabel="ตกลง"
+              style={({ pressed }) => ({ opacity: pressed ? 0.8 : 1 })}
+              className="flex-1 py-3 rounded-2xl items-center justify-center ml-2 bg-violet-600"
+            >
+              <Text className="text-[14px] font-bold text-white">ตกลง</Text>
+            </Pressable>
+          </View>
         </View>
       </View>
     </Modal>

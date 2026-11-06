@@ -2,8 +2,6 @@ import React, { useMemo, useState } from "react";
 import {
   Modal,
   Pressable,
-  TouchableOpacity,
-  TouchableWithoutFeedback,
   View,
   Text,
 } from "react-native";
@@ -74,6 +72,8 @@ interface TripDateRangeSheetProps {
   startDate?: string | null;
   /** วันสิ้นสุดที่เลือกไว้แล้ว (ถ้ามี) */
   endDate?: string | null;
+  /** เลขรอบการเปิด — เปลี่ยนเมื่อเปิดปฏิทินใหม่ (ใช้รีเซ็ตเดือนที่แสดง) */
+  resetKey?: number;
   onCancel: () => void;
   /** ยืนยันช่วงวันที่ที่เลือก */
   onConfirm: (startDate: string, endDate: string) => void;
@@ -83,6 +83,7 @@ export default function TripDateRangeSheet({
   visible,
   startDate,
   endDate,
+  resetKey = 0,
   onCancel,
   onConfirm,
 }: TripDateRangeSheetProps) {
@@ -101,6 +102,26 @@ export default function TripDateRangeSheet({
   );
   const [pickStart, setPickStart] = useState<string | null>(startDate ?? null);
   const [pickEnd, setPickEnd] = useState<string | null>(endDate ?? null);
+
+  /**
+   * ค่าจากข้างนอกอาจเปลี่ยน (เช่น เอไaiไปแก้วันที่ในการ์ด หรือผู้ใช้เพิ่งยืนยัน)
+   * → ปรับ state ตอน render (วิธีที่ React แนะนำ) ไม่ใช้ effect
+   */
+  const [lastStart, setLastStart] = useState<string | null>(startDate ?? null);
+  const [lastEnd, setLastEnd] = useState<string | null>(endDate ?? null);
+  if ((startDate ?? null) !== lastStart || (endDate ?? null) !== lastEnd) {
+    setLastStart(startDate ?? null);
+    setLastEnd(endDate ?? null);
+    setPickStart(startDate ?? null);
+    setPickEnd(endDate ?? null);
+    setMonth((startDate ?? today).slice(0, 7));
+  }
+  /** เปิดใหม่ → กลับไปเดือนของวันเริ่มต้นเสมอ */
+  const [lastReset, setLastReset] = useState(resetKey);
+  if (resetKey !== lastReset) {
+    setLastReset(resetKey);
+    setMonth((startDate ?? today).slice(0, 7));
+  }
 
   const cells = useMemo(() => buildMonthGrid(month), [month]);
 
@@ -143,161 +164,182 @@ export default function TripDateRangeSheet({
       animationType="slide"
       onRequestClose={onCancel}
     >
-      <TouchableWithoutFeedback onPress={onCancel}>
-        <View className="flex-1 bg-black/40" />
-      </TouchableWithoutFeedback>
-      <View
-        className="absolute left-0 right-0 bottom-0 bg-white rounded-t-3xl"
-        style={{ paddingBottom: Math.max(insets.bottom, 12) }}
-      >
-        <View className="items-center pt-2.5 pb-1">
-          <View className="w-10 h-1.5 rounded-full bg-gray-300" />
-        </View>
+      {/* โครงเดียว: พื้นหลังกดปิดได้ (บน) + ปฏิทิน (ล่าง) — เหมือน OriginSelectorModal
+          (โครงเดิมเป็นพี่คู่ 2 อัน + absolute → ปุ่มในการ์ดกดไม่ติดบน iOS) */}
+      <View className="flex-1">
+        <Pressable
+          className="flex-1 bg-black/40"
+          onPress={onCancel}
+          accessibilityRole="button"
+          accessibilityLabel="ปิดปฏิทิน"
+        />
+        <View
+          className="bg-white rounded-t-3xl"
+          style={{ paddingBottom: Math.max(insets.bottom, 12) }}
+        >
+          <View className="items-center pt-2.5 pb-1">
+            <View className="w-10 h-1.5 rounded-full bg-gray-300" />
+          </View>
 
-        <View className="px-5 pt-1 pb-3 flex-row items-center justify-between border-b border-gray-100">
-          <Text className="text-[16px] font-black text-gray-900">
-            เลือกช่วงวันที่
-          </Text>
-          <TouchableOpacity onPress={onCancel} className="p-1">
-            <XMarkIcon size={22} color="#6B7280" />
-          </TouchableOpacity>
-        </View>
-
-        {/* ── เดือน ─────────────────────────────────────────── */}
-        <View className="flex-row items-center justify-between px-4 pt-3">
-          <TouchableOpacity
-            onPress={() => setMonth((m) => shiftMonth(m, -1))}
-            disabled={!canGoPrev}
-            className={`p-2 rounded-full ${
-              canGoPrev ? "bg-gray-100" : "bg-transparent"
-            }`}
-          >
-            <ChevronLeftIcon
-              size={20}
-              color={canGoPrev ? "#374151" : "#D1D5DB"}
-            />
-          </TouchableOpacity>
-          <Text className="text-[15px] font-bold text-gray-900">
-            {THAI_MONTHS_FULL[Number(monthIndex) - 1]} {Number(yearText) + 543}
-          </Text>
-          <TouchableOpacity
-            onPress={() => setMonth((m) => shiftMonth(m, 1))}
-            disabled={!canGoNext}
-            className={`p-2 rounded-full ${
-              canGoNext ? "bg-gray-100" : "bg-transparent"
-            }`}
-          >
-            <ChevronRightIcon
-              size={20}
-              color={canGoNext ? "#374151" : "#D1D5DB"}
-            />
-          </TouchableOpacity>
-        </View>
-
-        {/* ── หัวตาราง ─────────────────────────────────────── */}
-        <View className="flex-row px-2 pt-2 pb-1">
-          {THAI_WEEKDAYS.map((w) => (
-            <View key={w} className="flex-1 items-center">
-              <Text className="text-[11.5px] font-bold text-gray-400">{w}</Text>
-            </View>
-          ))}
-        </View>
-
-        {/* ── วันที่ ───────────────────────────────────────── */}
-        <View className="flex-row flex-wrap px-2">
-          {cells.map((cell, idx) => {
-            if (!cell.iso) {
-              return <View key={`blank-${idx}`} className="w-[14.285%] h-11" />;
-            }
-            const disabled = cell.iso < today || cell.iso > maxDate;
-            const isStart = cell.iso === pickStart;
-            const isEnd = cell.iso === pickEnd;
-            const inRange =
-              !!pickStart && !!pickEnd && cell.iso > pickStart && cell.iso < pickEnd;
-            const band = inRange || isStart || isEnd;
-            const isToday = cell.iso === today;
-
-            return (
-              <View key={cell.iso} className="w-[14.285%] h-11">
-                <Pressable
-                  onPress={() => !disabled && handlePressDay(cell.iso as string)}
-                  disabled={disabled}
-                  accessibilityRole="button"
-                  accessibilityLabel={`วันที่ ${cell.day}`}
-                  className={`h-11 w-full items-center justify-center flex-row ${
-                    band ? "bg-violet-100" : ""
-                  } ${isStart ? "rounded-l-2xl" : ""} ${
-                    isEnd ? "rounded-r-2xl" : ""
-                  }`}
-                >
-                  <View
-                    className={`w-8 h-8 rounded-full items-center justify-center ${
-                      isStart || isEnd ? "bg-violet-600" : ""
-                    }`}
-                  >
-                    <Text
-                      className={`text-[13.5px] ${
-                        disabled
-                          ? "text-gray-300"
-                          : isStart || isEnd
-                          ? "text-white font-bold"
-                          : isToday
-                          ? "text-violet-600 font-bold"
-                          : "text-gray-800"
-                      }`}
-                    >
-                      {cell.day}
-                    </Text>
-                  </View>
-                </Pressable>
-              </View>
-            );
-          })}
-        </View>
-
-        {/* ── สรุปช่วงที่เลือก ──────────────────────────────── */}
-        <View className="px-5 pt-3">
-          <Text
-            className={`text-[13px] font-bold ${
-              pickStart && pickEnd ? "text-violet-800" : "text-gray-500"
-            }`}
-          >
-            {summaryText}
-          </Text>
-          {pickStart && !pickEnd ? (
-            <Text className="text-[11.5px] text-gray-400 mt-0.5">
-              เลือกได้ไม่เกิน {TRIP_MAX_DAYS} วันนับจากวันเริ่มต้น
+          <View className="px-5 pt-1 pb-3 flex-row items-center justify-between border-b border-gray-100">
+            <Text className="text-[16px] font-black text-gray-900">
+              เลือกช่วงวันที่
             </Text>
-          ) : null}
-        </View>
+            <Pressable
+              onPress={onCancel}
+              hitSlop={10}
+              accessibilityRole="button"
+              accessibilityLabel="ปิด"
+              className="p-1"
+            >
+              <XMarkIcon size={22} color="#6B7280" />
+            </Pressable>
+          </View>
 
-        {/* ── ปุ่ม ─────────────────────────────────────────── */}
-        <View className="flex-row px-5 pt-3 pb-1">
-          <TouchableOpacity
-            onPress={onCancel}
-            activeOpacity={0.85}
-            className="flex-1 py-3 rounded-2xl border border-gray-200 items-center justify-center mr-2"
-          >
-            <Text className="text-[14px] font-bold text-gray-600">ยกเลิก</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            onPress={() => {
-              if (pickStart && pickEnd) onConfirm(pickStart, pickEnd);
-            }}
-            disabled={!pickStart || !pickEnd}
-            activeOpacity={0.85}
-            className={`flex-1 py-3 rounded-2xl items-center justify-center ml-2 ${
-              pickStart && pickEnd ? "bg-violet-600" : "bg-gray-200"
-            }`}
-          >
-            <Text
-              className={`text-[14px] font-bold ${
-                pickStart && pickEnd ? "text-white" : "text-gray-400"
+          {/* ── เดือน ─────────────────────────────────────────── */}
+          <View className="flex-row items-center justify-between px-4 pt-3">
+            <Pressable
+              onPress={() => setMonth((m) => shiftMonth(m, -1))}
+              disabled={!canGoPrev}
+              accessibilityRole="button"
+              accessibilityLabel="เดือนก่อนหน้า"
+              className={`p-2 rounded-full ${
+                canGoPrev ? "bg-gray-100" : "bg-transparent"
               }`}
             >
-              ตกลง
+              <ChevronLeftIcon
+                size={20}
+                color={canGoPrev ? "#374151" : "#D1D5DB"}
+              />
+            </Pressable>
+            <Text className="text-[15px] font-bold text-gray-900">
+              {THAI_MONTHS_FULL[Number(monthIndex) - 1]} {Number(yearText) + 543}
             </Text>
-          </TouchableOpacity>
+            <Pressable
+              onPress={() => setMonth((m) => shiftMonth(m, 1))}
+              disabled={!canGoNext}
+              accessibilityRole="button"
+              accessibilityLabel="เดือนถัดไป"
+              className={`p-2 rounded-full ${
+                canGoNext ? "bg-gray-100" : "bg-transparent"
+              }`}
+            >
+              <ChevronRightIcon
+                size={20}
+                color={canGoNext ? "#374151" : "#D1D5DB"}
+              />
+            </Pressable>
+          </View>
+
+          {/* ── หัวตาราง ─────────────────────────────────────── */}
+          <View className="flex-row px-2 pt-2 pb-1">
+            {THAI_WEEKDAYS.map((w) => (
+              <View key={w} className="flex-1 items-center">
+                <Text className="text-[11.5px] font-bold text-gray-400">{w}</Text>
+              </View>
+            ))}
+          </View>
+
+          {/* ── วันที่ ───────────────────────────────────────── */}
+          <View className="flex-row flex-wrap px-2">
+            {cells.map((cell, idx) => {
+              if (!cell.iso) {
+                return <View key={`blank-${idx}`} className="w-[14.285%] h-11" />;
+              }
+              const disabled = cell.iso < today || cell.iso > maxDate;
+              const isStart = cell.iso === pickStart;
+              const isEnd = cell.iso === pickEnd;
+              const inRange =
+                !!pickStart && !!pickEnd && cell.iso > pickStart && cell.iso < pickEnd;
+              const band = inRange || isStart || isEnd;
+              const isToday = cell.iso === today;
+
+              return (
+                <View key={cell.iso} className="w-[14.285%] h-11">
+                  <Pressable
+                    onPress={() => !disabled && handlePressDay(cell.iso as string)}
+                    disabled={disabled}
+                    accessibilityRole="button"
+                    accessibilityLabel={`วันที่ ${cell.day}`}
+                    className={`h-11 w-full items-center justify-center flex-row ${
+                      band ? "bg-violet-100" : ""
+                    } ${isStart ? "rounded-l-2xl" : ""} ${
+                      isEnd ? "rounded-r-2xl" : ""
+                    }`}
+                  >
+                    <View
+                      className={`w-8 h-8 rounded-full items-center justify-center ${
+                        isStart || isEnd ? "bg-violet-600" : ""
+                      }`}
+                    >
+                      <Text
+                        className={`text-[13.5px] ${
+                          disabled
+                            ? "text-gray-300"
+                            : isStart || isEnd
+                            ? "text-white font-bold"
+                            : isToday
+                            ? "text-violet-600 font-bold"
+                            : "text-gray-800"
+                        }`}
+                      >
+                        {cell.day}
+                      </Text>
+                    </View>
+                  </Pressable>
+                </View>
+              );
+            })}
+          </View>
+
+          {/* ── สรุปช่วงที่เลือก ──────────────────────────────── */}
+          <View className="px-5 pt-3">
+            <Text
+              className={`text-[13px] font-bold ${
+                pickStart && pickEnd ? "text-violet-800" : "text-gray-500"
+              }`}
+            >
+              {summaryText}
+            </Text>
+            {pickStart && !pickEnd ? (
+              <Text className="text-[11.5px] text-gray-400 mt-0.5">
+                เลือกได้ไม่เกิน {TRIP_MAX_DAYS} วันนับจากวันเริ่มต้น
+              </Text>
+            ) : null}
+          </View>
+
+          {/* ── ปุ่ม ─────────────────────────────────────────── */}
+          <View className="flex-row px-5 pt-3 pb-1">
+            <Pressable
+              onPress={onCancel}
+              accessibilityRole="button"
+              accessibilityLabel="ยกเลิก"
+              style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1 })}
+              className="flex-1 py-3 rounded-2xl border border-gray-200 items-center justify-center mr-2"
+            >
+              <Text className="text-[14px] font-bold text-gray-600">ยกเลิก</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => {
+                if (pickStart && pickEnd) onConfirm(pickStart, pickEnd);
+              }}
+              disabled={!pickStart || !pickEnd}
+              accessibilityRole="button"
+              accessibilityLabel="ตกลง"
+              style={({ pressed }) => ({ opacity: pressed ? 0.8 : 1 })}
+              className={`flex-1 py-3 rounded-2xl items-center justify-center ml-2 ${
+                pickStart && pickEnd ? "bg-violet-600" : "bg-gray-200"
+              }`}
+            >
+              <Text
+                className={`text-[14px] font-bold ${
+                  pickStart && pickEnd ? "text-white" : "text-gray-400"
+                }`}
+              >
+                ตกลง
+              </Text>
+            </Pressable>
+          </View>
         </View>
       </View>
     </Modal>

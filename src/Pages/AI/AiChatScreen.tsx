@@ -1979,12 +1979,14 @@ export default function AiChatScreen({
         onSelectOrigin={handleCardOriginSelected}
       />
 
-      {/* ปฏิทินเลือกช่วงวันที่ (วันเริ่ม → วันสิ้นสุด ในหน้าเดียว) */}
+      {/* ปฏิทินเลือกช่วงวันที่ (วันเริ่ม → วันสิ้นสุด ในหน้าเดียว)
+          ไม่ใส่ key ที่ Modal — การเปลี่ยน key ของ Modal ที่ยังเปิดอยู่ทำให้ iOS
+          ค้าง native modal เดิมไว้บนจอ (ล้อเลื่อนได้ แต่ปุ่มกดไม่ติด) */}
       <TripDateRangeSheet
-        key={`date-${cardPickerSeq}`}
         visible={cardPicker === "date"}
         startDate={draftSlots.startDate ?? null}
         endDate={draftSlots.endDate ?? null}
+        resetKey={cardPickerSeq}
         onCancel={() => setCardPicker(null)}
         onConfirm={(startDate, endDate) => {
           setCardPicker(null);
@@ -1999,9 +2001,9 @@ export default function AiChatScreen({
 
       {/* ล้อเวลาออกเดินทาง */}
       <TripTimeSheet
-        key={`time-${cardPickerSeq}`}
         visible={cardPicker === "time"}
         value={draftSlots.startTime ?? null}
+        resetKey={cardPickerSeq}
         onCancel={() => setCardPicker(null)}
         onConfirm={(time) => {
           setCardPicker(null);
