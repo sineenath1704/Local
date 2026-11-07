@@ -141,7 +141,10 @@ async function callAnthropicWithContinuation(params: {
   let round = 0;
   while (true) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), config.ai.timeoutMs);
+    // ถ้ามี Gemini เป็นตัวสำรอง ให้รอ MiniMax ไม่เกิน 20 วินาที เพื่อให้สลับไป Gemini ได้ทันก่อนที่มือถือจะตัดสาย (Timeout)
+    const hasGemini = Boolean(config.gemini.apiKey);
+    const timeout = hasGemini ? Math.min(config.ai.timeoutMs, 20_000) : config.ai.timeoutMs;
+    const timer = setTimeout(() => controller.abort(), timeout);
     try {
       const res = await fetch(`${config.ai.baseUrl}/v1/messages`, {
         method: "POST",

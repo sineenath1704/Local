@@ -321,7 +321,7 @@ export async function generateTripPlan(
       save: req.save ?? false,
       planId: req.planId ?? undefined,
     },
-    timeoutMs: API_TIMEOUT_MS * 6,
+    timeoutMs: API_TIMEOUT_MS * 12,
     onSettled: (ok, error) => {
       if (!ok && error) toastAiError(error);
     },
