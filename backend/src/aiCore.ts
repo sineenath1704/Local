@@ -6,27 +6,138 @@ export interface AiMessage {
   content: string;
 }
 
+const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
+
 /**
- * Low-level call to the Anthropic-compatible AI endpoint.
- * Returns the plain text reply. Throws on network/HTTP errors.
- * Supports auto-continuation if the response is cut off by max_tokens limit.
+ * เรียก Google Gemini โดยตรงสำหรับแชทและวางแผนทริป (ใช้เมื่อ MiniMax มีปัญหาหรือโควต้าหมด)
+ * ส่ง systemInstruction + contents สลับ user/model เหมือนกับโมเดลหลัก
  */
-export async function callAi(params: {
+export async function callGemini(params: {
   system: string;
   messages: AiMessage[];
   maxTokens?: number;
 }): Promise<string> {
-  if (!isAiConfigured()) {
-    throw new Error("AI_NOT_CONFIGURED");
+  if (!config.gemini.apiKey) {
+    throw new Error("GEMINI_API_KEY_NOT_CONFIGURED");
   }
 
   const tokenLimit = params.maxTokens ?? config.ai.maxTokens;
+
+  // แปลงประวัติแชทเป็นรูปแบบ Gemini: [{ role: "user" | "model", parts: [{ text }] }]
+  const contents: Array<{ role: "user" | "model"; parts: Array<{ text: string }> }> = [];
+
+  for (const m of params.messages) {
+    const role: "user" | "model" = m.role === "assistant" ? "model" : "user";
+    const text = (m.content || "").trim();
+    if (!text) continue;
+
+    // Gemini ไม่อนุญาตให้บทบาทเดียวกันติดกัน → รวมข้อความเป็นข้อความเดียว
+    if (contents.length > 0 && contents[contents.length - 1].role === role) {
+      contents[contents.length - 1].parts[0].text += "\n\n" + text;
+    } else {
+      contents.push({ role, parts: [{ text }] });
+    }
+  }
+
+  // Gemini บังคับให้ข้อความแรกต้องเป็น role: "user"
+  if (contents.length > 0 && contents[0].role === "model") {
+    contents.shift();
+  }
+  if (contents.length === 0) {
+    contents.push({ role: "user", parts: [{ text: "สวัสดี" }] });
+  }
+
+  // รายชื่อโมเดล Gemini ที่จะลองตามลำดับ (ถ้าโมเดลแรกไม่พร้อม ให้ลองโมเดลถัดไปทันที)
+  const candidateModels = Array.from(
+    new Set(
+      [
+        config.gemini.chatModel,
+        "gemini-2.0-flash",
+        "gemini-2.5-flash",
+        "gemini-1.5-flash",
+        config.gemini.model,
+      ].filter(Boolean)
+    )
+  );
+
+  let lastErr: any = null;
+
+  for (const model of candidateModels) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), config.gemini.timeoutMs);
+
+    try {
+      const bodyPayload: any = {
+        contents,
+        generationConfig: {
+          maxOutputTokens: Math.min(tokenLimit, 8192),
+          temperature: 0.7,
+        },
+      };
+
+      if (params.system && params.system.trim()) {
+        bodyPayload.systemInstruction = {
+          parts: [{ text: params.system.trim() }],
+        };
+      }
+
+      const res = await fetch(
+        `${GEMINI_BASE}/models/${encodeURIComponent(model)}:generateContent`,
+        {
+          method: "POST",
+          signal: controller.signal,
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": config.gemini.apiKey,
+          },
+          body: JSON.stringify(bodyPayload),
+        }
+      );
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        console.warn(`[gemini-chat] Model ${model} ตอบกลับ ${res.status}: ${errText.slice(0, 200)}`);
+        lastErr = new AiUpstreamError(res.status, errText);
+        continue;
+      }
+
+      const data: any = await res.json();
+      const candidate = Array.isArray(data?.candidates) ? data.candidates[0] : null;
+      const text: string = Array.isArray(candidate?.content?.parts)
+        ? candidate.content.parts
+            .map((p: any) => (typeof p?.text === "string" ? p.text : ""))
+            .join("")
+        : typeof candidate?.content?.parts?.[0]?.text === "string"
+        ? candidate.content.parts[0].text
+        : "";
+
+      if (text.trim()) {
+        return text.trim();
+      }
+    } catch (err: any) {
+      console.warn(`[gemini-chat] Model ${model} ส่งคำขอไม่สำเร็จ: ${err?.message ?? err}`);
+      lastErr = err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  throw lastErr || new Error("GEMINI_ALL_MODELS_FAILED");
+}
+
+/**
+ * เรียกโมเดล Anthropic / MiniMax พร้อมระบบต่อข้อความถ้าคำตอบโดนตัด
+ */
+async function callAnthropicWithContinuation(params: {
+  system: string;
+  messages: AiMessage[];
+  maxTokens?: number;
+}): Promise<string> {
+  const tokenLimit = params.maxTokens ?? config.ai.maxTokens;
   let fullReply = "";
   let currentMessages = [...params.messages];
-  // Allow more continuation attempts (up to 10) to ensure full answer
   const MAX_CONTINUE_ROUNDS = 10;
 
-  // Continuously request continuation until the response is complete (no artificial round limit)
   let round = 0;
   while (true) {
     const controller = new AbortController();
@@ -66,14 +177,12 @@ export async function callAi(params: {
         break;
       }
 
-      // Stitching: avoid duplicate first character and ensure words aren't glued together
       if (fullReply) {
         const lastChar = fullReply.slice(-1);
         const firstChar = rawText.charAt(0);
         if (lastChar && firstChar && lastChar === firstChar) {
           fullReply += rawText.slice(1);
         } else if (/[\p{L}]/u.test(lastChar) && /[\p{L}]/u.test(firstChar) && !/\s/.test(fullReply.slice(-1))) {
-          // Both are letters and there is no whitespace, insert a space
           fullReply += " " + rawText;
         } else {
           fullReply += rawText;
@@ -82,16 +191,12 @@ export async function callAi(params: {
         fullReply = rawText;
       }
 
-      // Continue only when the model was genuinely cut off by the token limit.
-      // Checking punctuation is unreliable for Thai (Thai doesn't use sentence-ending
-      // punctuation like . or !) and was causing infinite continuation loops on Vercel.
       const isIncomplete = stopReason === "max_tokens" || stopReason === "length";
 
       if (!isIncomplete || round >= MAX_CONTINUE_ROUNDS - 1) {
         break;
       }
 
-      // Prepare continuation prompt
       currentMessages = [
         ...params.messages,
         { role: "assistant", content: fullReply },
@@ -105,8 +210,59 @@ export async function callAi(params: {
     }
     round++;
   }
-  // Loop exited because response is complete
   return fullReply.trim();
+}
+
+/**
+ * เรียกใช้งานโมเดล AI (MiniMax-m3 เป็นตัวหลัก พร้อมสลับไปใช้ Gemini อัตโนมัติเมื่อโควต้าหมดหรือเกิดปัญหา)
+ */
+export async function callAi(params: {
+  system: string;
+  messages: AiMessage[];
+  maxTokens?: number;
+}): Promise<string> {
+  if (!isAiConfigured()) {
+    throw new Error("AI_NOT_CONFIGURED");
+  }
+
+  const hasAnthropic = Boolean(config.ai.baseUrl && config.ai.authToken);
+  const hasGemini = Boolean(config.gemini.apiKey);
+
+  // 1. ลองเรียก MiniMax-m3 ก่อนถ้ามีการตั้งค่าไว้
+  if (hasAnthropic) {
+    try {
+      return await callAnthropicWithContinuation(params);
+    } catch (err: any) {
+      console.warn(
+        `[aiCore] ⚠️ MiniMax-m3 ตอบกลับไม่สำเร็จ (HTTP ${err?.status ?? "ERR"}: ${err?.message ?? err})`
+      );
+
+      // 2. ถ้า MiniMax ล้มเหลว (เช่น 429 quota, 5xx server error, timeout) และมี Gemini → สลับไป Gemini อัตโนมัติ
+      if (hasGemini) {
+        console.warn(
+          `[aiCore] 🔄 สลับไปใช้ Gemini (${config.gemini.chatModel}) อัตโนมัติ (Fallback)`
+        );
+        try {
+          return await callGemini(params);
+        } catch (geminiErr: any) {
+          console.error(
+            `[aiCore] ❌ Gemini fallback ตอบกลับไม่สำเร็จเช่นกัน:`,
+            geminiErr?.message ?? geminiErr
+          );
+          throw err;
+        }
+      }
+
+      throw err;
+    }
+  }
+
+  // 3. ถ้าไม่มี MiniMax แต่มี Gemini ให้เรียก Gemini โดยตรง
+  if (hasGemini) {
+    return await callGemini(params);
+  }
+
+  throw new Error("NO_AI_PROVIDER_AVAILABLE");
 }
 
 export interface PingResult {
@@ -140,8 +296,21 @@ export async function pingAi(): Promise<PingResult> {
     return {
       ...base,
       ok: false,
-      reason: "ยังไม่ได้ตั้ง ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN",
+      reason: "ยังไม่ได้ตั้งค่า API Key (ทั้ง ANTHROPIC_AUTH_TOKEN และ GEMINI_API_KEY)",
       elapsedMs: 0,
+    };
+  }
+
+  // ถ้าไม่ได้ตั้งค่า Anthropic/MiniMax แต่ตั้งค่า Gemini ไว้
+  if (!config.ai.baseUrl || !config.ai.authToken) {
+    return {
+      ...base,
+      ok: true,
+      model: config.gemini.chatModel,
+      baseUrlHost: "generativelanguage.googleapis.com",
+      tokenLength: config.gemini.apiKey.length,
+      elapsedMs: 0,
+      reason: `ใช้ Gemini (${config.gemini.chatModel}) เป็นโมเดลหลัก (ไม่ได้ตั้ง MiniMax)`,
     };
   }
 
@@ -165,6 +334,7 @@ export async function pingAi(): Promise<PingResult> {
     });
     const text = await res.text().catch(() => "");
     const elapsedMs = Date.now() - startedAt;
+    const geminiNote = config.gemini.apiKey ? " + มี Gemini สำรอง" : "";
     return {
       ...base,
       ok: res.ok,
@@ -172,12 +342,13 @@ export async function pingAi(): Promise<PingResult> {
       upstreamBody: res.ok ? null : text.slice(0, 1000),
       elapsedMs,
       reason: res.ok
-        ? "เชื่อมต่อ AI สำเร็จ — token ใช้งานได้"
+        ? `เชื่อมต่อ MiniMax สำเร็จ — token ใช้งานได้${geminiNote}`
         : res.status === 401 || res.status === 403
-        ? "token ไม่ถูกต้องหรือหมดอายุ"
-        : `ปลายทาง AI ตอบกลับ ${res.status}`,
+        ? `token MiniMax ไม่ถูกต้องหรือหมดอายุ${geminiNote}`
+        : `ปลายทาง MiniMax ตอบกลับ ${res.status}${geminiNote}`,
     };
   } catch (err: any) {
+    const geminiNote = config.gemini.apiKey ? " (แต่มี Gemini สแตนด์บายสำรอง)" : "";
     return {
       ...base,
       ok: false,
@@ -186,8 +357,8 @@ export async function pingAi(): Promise<PingResult> {
       elapsedMs: Date.now() - startedAt,
       reason:
         err?.name === "AbortError"
-          ? "ต่อปลายทาง AI ไม่ทัน 15 วินาที"
-          : `ต่อปลายทาง AI ไม่ได้: ${err?.message ?? "unknown error"}`,
+          ? `ต่อปลายทาง MiniMax ไม่ทัน 15 วินาที${geminiNote}`
+          : `ต่อปลายทาง MiniMax ไม่ได้: ${err?.message ?? "unknown error"}${geminiNote}`,
     };
   } finally {
     clearTimeout(timer);

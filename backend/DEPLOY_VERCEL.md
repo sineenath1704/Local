@@ -26,9 +26,11 @@ Dashboard → your project → **Settings → Environment Variables**, add:
 
 | Name | Value | จำเป็น? |
 |---|---|---|
-| `ANTHROPIC_BASE_URL` | `https://nrrai2-model.sit.kmutt.ac.th/api` | จำเป็น |
-| `ANTHROPIC_AUTH_TOKEN` | your real token | จำเป็น |
+| `ANTHROPIC_BASE_URL` | `https://nrrai2-model.sit.kmutt.ac.th/api` | จำเป็น (โมเดลหลัก) |
+| `ANTHROPIC_AUTH_TOKEN` | your real token | จำเป็น (โมเดลหลัก) |
 | `ANTHROPIC_MODEL` | `minimax-m3` | ไม่ (default เหมือนกัน) |
+| `GEMINI_API_KEY` | your real Gemini key | จำเป็น (โมเดลสำรอง / ค้นหา / ถอดเสียง) |
+| `GEMINI_CHAT_MODEL` | `gemini-2.0-flash` | ไม่ (มี fallback อัตโนมัติในโค้ด) |
 | `AI_TIMEOUT_MS` | `120000` | ไม่ (default เหมือนกัน) |
 | `AI_MAX_TOKENS` | `32768` | **ไม่** — ค่าเริ่มต้นใน `src/config.ts` คือ 32768 อยู่แล้ว |
 

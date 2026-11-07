@@ -78,12 +78,14 @@ export const config = {
     googleKey: required("GOOGLE_PLACES_API_KEY"),
   },
 
-  // Google AI / Gemini (SERVER ONLY) — transcribe the clip's speech.
+  // Google AI / Gemini (SERVER ONLY) — transcribe the clip's speech & chat fallback.
   // Gemini reads video/mp4 directly, so we need no ffmpeg, no GCS bucket,
   // and none of the Cloud Speech-to-Text plumbing.
   gemini: {
     apiKey: required("GEMINI_API_KEY"),
     model: process.env.GEMINI_MODEL?.trim() || "gemini-3.8-flash",
+    /** โมเดล Gemini สำหรับแชท / วางแผนทริป (ใช้เมื่อ MiniMax โควต้าหมดหรือล่ม) */
+    chatModel: process.env.GEMINI_CHAT_MODEL?.trim() || "gemini-2.0-flash",
     timeoutMs: num("GEMINI_TIMEOUT_MS", 120000),
     /**
      * ค้นข้อมูลท่องเที่ยวจากเว็บ (Google Search grounding) — `geminiSearch.ts`
@@ -123,9 +125,9 @@ if (config.ai.maxTokens < MIN_SUMMARY_MAX_TOKENS) {
   );
 }
 
-/** True only when both base URL and token are configured. */
+/** True when at least one AI provider (Anthropic/MiniMax or Gemini) is configured. */
 export function isAiConfigured(): boolean {
-  return Boolean(config.ai.baseUrl && config.ai.authToken);
+  return Boolean((config.ai.baseUrl && config.ai.authToken) || config.gemini.apiKey);
 }
 
 /** True when the backend can read/write the Supabase database. */
