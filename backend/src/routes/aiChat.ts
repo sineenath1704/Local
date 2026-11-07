@@ -228,6 +228,10 @@ router.post("/", async (req: Request, res: Response) => {
       ? clipCtx.placeName.trim().slice(0, 200) || null
       : null;
 
+  const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
+  const lastUserText = (lastUserMsg?.content ?? "").trim();
+  console.log(`[aiChat] 💬 [${mode}] ได้รับคำขอแชท | ข้อความ: "${lastUserText.slice(0, 100)}" | โฟลเดอร์: ${folderId ?? (folder?.name ?? "ไม่มี")}`);
+
   if (messages.length === 0) {
     return res.status(400).json({
       error: "ต้องส่ง messages อย่างน้อย 1 ข้อความ",
@@ -875,7 +879,10 @@ router.post("/", async (req: Request, res: Response) => {
       });
     }
     // งบ 4096: บล็อกข้อมูลโฟลเดอร์ยาวกว่าเดิม (รายชื่อ + ราคา + ที่อยู่ + คลิปย่อ)
+    console.log(`[aiChat] 🤖 กำลังส่ง Prompt ให้ AI ประมวลผล (Messages: ${messages.length}, System chars: ${system.length})...`);
+    const tAi0 = Date.now();
     const reply = await callAi({ system, messages, maxTokens: 4096 });
+    console.log(`[aiChat] ✅ AI ประมวลผลเสร็จสิ้นใน ${Date.now() - tAi0}ms (Reply: ${reply.length} chars)`);
 
     // ── สัญญาณแผนทริป ───────────────────────────────────────────────
     // โมเดลเขียนบรรทัด TRIP_DRAFT:{...} ต่อท้ายคำตอบเมื่อผู้ใช้กำลังวางแผนทริป
@@ -899,11 +906,9 @@ router.post("/", async (req: Request, res: Response) => {
     const lastUser = [...messages].reverse().find((m) => m.role === "user");
     const lastUserAsk = (lastUser?.content ?? "").trim();
 
-    // ตรวจสอบว่าผู้ใช้กำลังต้องการวางแผนทริป หรือมี slots อยู่แล้ว
-    const isPlanningIntent =
-      Boolean(parsed.slots) ||
-      Boolean(clientSlots && Object.keys(clientSlots).length > 0) ||
-      /(?:แพลน|วางแผน|จัดทริป|ทริป|เที่ยว|itinerary|plan)/i.test(lastUserAsk);
+    // ตรวจสอบว่าผู้ใช้กำลังต้องการวางแผนทริป หรือโมเดลส่ง slots มา
+    const hasExplicitPlanKeyword = /(?:แพลน|วางแผน|จัดทริป|itinerary|plan)/i.test(lastUserAsk);
+    const isPlanningIntent = Boolean(parsed.slots) || hasExplicitPlanKeyword;
 
     if (isPlanningIntent) {
       let merged = mergeTripSlots(clientSlots, parsed.slots ?? {});
@@ -916,6 +921,8 @@ router.post("/", async (req: Request, res: Response) => {
         }
       }
 
+      console.log(`[aiChat] 🗺️ ตรวจพบสัญญาณวางแผนทริป (isPlanningIntent=true) | ส่ง tripDraft ให้แอป:`, merged);
+      console.log(`[aiChat] 📤 ส่งคำตอบกลับแอป | "${cleanReply.slice(0, 60)}..."`);
       // ส่ง tripDraft กลับไปเสมอ เพื่อให้แอปเปิดการ์ด TripQuestionFlow ขึ้นมาให้ผู้ใช้กรอก/เลือกทันที
       return res.json({
         reply: cleanReply,
@@ -925,10 +932,12 @@ router.post("/", async (req: Request, res: Response) => {
     }
 
     if (!parsed.slots) {
+      console.log(`[aiChat] 📤 ส่งคำตอบทั่วไปกลับแอป | "${cleanReply.slice(0, 60)}..."`);
       return res.json({ reply: cleanReply, ...replyMeta });
     }
 
     const merged = mergeTripSlots(clientSlots, parsed.slots);
+    console.log(`[aiChat] 📤 ส่งคำตอบกลับแอปพร้อม slots:`, merged);
     return res.json({
       reply: cleanReply,
       tripDraft: buildTripDraftResult(merged),

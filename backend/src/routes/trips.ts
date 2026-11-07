@@ -37,6 +37,7 @@ import {
 } from "../fuelPrice";
 import { findLodging } from "../lodging";
 import { config, isPlacesConfigured } from "../config";
+import { searchPlaceCandidates } from "./places";
 
 const router = Router();
 
@@ -1526,6 +1527,107 @@ router.get("/fuel-price", async (_req: Request, res: Response) => {
     staleNotice: table.staleNotice ?? null,
     bangkokDate: table.bangkokDate ?? null,
   });
+});
+
+/**
+ * POST /trips/suggest-places
+ * -------------------------------------------------------------
+ * แนะนำสถานที่ท่องเที่ยวตามสไตล์และจังหวัด เพื่อให้ผู้ใช้เลือกสร้างแพลน
+ * โดยใช้ AI คิดสถานที่ + Google Places API ดึงรูปจริง พิกัด และดาวรีวิว
+ */
+router.post("/suggest-places", async (req: Request, res: Response) => {
+  try {
+    const { destination, style, count = 6 } = req.body ?? {};
+    const destName = (destination || "").trim() || "พระนครศรีอยุธยา";
+    const styleName = (style || "").trim() || "ท่องเที่ยวทั่วไป ถ่ายรูป พักผ่อน";
+
+    console.log(`[trips/suggest-places] ขอคำแนะนำสถานที่: dest="${destName}", style="${styleName}"`);
+
+    let suggestedList: Array<{ name: string; description: string }> = [];
+
+    if (isAiConfigured()) {
+      try {
+        const systemPrompt = `คุณเป็นผู้เชี่ยวชาญด้านการท่องเที่ยวในประเทศไทย
+ให้แนะนำสถานที่ท่องเที่ยวเด่นๆ ในพื้นที่/จังหวัด "${destName}" ที่ตรงกับสไตล์ "${styleName}" จำนวน ${count} แห่ง
+สำคัญมาก:
+- เลือกสถานที่ที่มีตัวตนอยู่จริง มีชื่อเสียง และตรงกับสไตล์ที่ระบุ
+- แต่ละสถานที่ให้เขียนคำบรรยายสั้นๆ 1-2 ประโยค ว่าคืออะไร มีจุดเด่นอะไร
+- ตอบกลับเฉพาะ JSON array เท่านั้น ห้ามใส่ markdown หรือข้อความอื่น นอกเหนือจาก JSON array
+ตัวอย่างรูปแบบ:
+[
+  {"name": "วัดไชยวัฒนาราม", "description": "วัดโบราณริมแม่น้ำเจ้าพระยา โดดเด่นด้วยสถาปัตยกรรมขอมและเป็นจุดชมพระอาทิตย์ตกที่งดงาม"},
+  {"name": "วัดมหาธาตุ", "description": "โบราณสถานสำคัญ มีเศียรพระพุทธรูปในรากไม้โพธิ์ที่เป็นเอกลักษณ์ระดับโลก"}
+]`;
+
+        const aiResponse = await callAi({
+          system: systemPrompt,
+          messages: [{ role: "user", content: `ขอสถานที่ท่องเที่ยวใน ${destName} สไตล์ ${styleName}` }],
+          maxTokens: 1024,
+        });
+
+        const extracted = extractJson(aiResponse);
+        if (Array.isArray(extracted)) {
+          suggestedList = extracted.filter((item) => item && typeof item.name === "string");
+        }
+      } catch (err: any) {
+        console.warn("[trips/suggest-places] AI call failed:", err?.message);
+      }
+    }
+
+    // ถ้า AI ไม่ได้คืนผลลัพธ์ ให้ใช้ fallback ค้นหาจาก Google Places ตรงๆ
+    if (suggestedList.length === 0) {
+      suggestedList = [
+        { name: `${destName} ที่เที่ยวสำคัญ`, description: `สถานที่ท่องเที่ยวแนะนำใน ${destName}` },
+        { name: `${destName} วัด`, description: `วัดและโบราณสถานน่าเที่ยวใน ${destName}` },
+        { name: `${destName} คาเฟ่`, description: `ร้านกาแฟและจุดพักผ่อนบรรยากาศดีใน ${destName}` },
+      ];
+    }
+
+    // ดึงข้อมูลจริงจาก Google Places ขนานกัน
+    const enrichedPlaces = await Promise.all(
+      suggestedList.slice(0, count).map(async (item) => {
+        try {
+          const query = `${item.name} ${destName}`.trim();
+          const candidates = await searchPlaceCandidates(query, { maxResults: 1 });
+          const best = candidates[0];
+          if (!best) {
+            return null;
+          }
+
+          return {
+            name: best.name || item.name,
+            description: item.description,
+            address: best.address,
+            placeId: best.placeId,
+            latitude: best.latitude,
+            longitude: best.longitude,
+            province: best.province || destName,
+            district: best.district,
+            subdistrict: best.subdistrict,
+            rating: best.rating ?? null,
+            userRatingCount: best.userRatingCount ?? null,
+            photoUrl: best.photoUrl ?? null,
+            googleMapsUri: best.googleMapsUri || (best.placeId ? `https://www.google.com/maps/place/?q=place_id:${best.placeId}` : null),
+            types: best.types || [],
+          };
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    const validPlaces = enrichedPlaces.filter(Boolean);
+    console.log(`[trips/suggest-places] ค้นพบสถานที่จริง ${validPlaces.length} แห่ง`);
+
+    return res.json({
+      places: validPlaces,
+      destination: destName,
+      style: styleName,
+    });
+  } catch (err: any) {
+    console.error("[trips/suggest-places] Error:", err?.message);
+    return res.status(500).json({ error: "SUGGEST_PLACES_FAILED", message: err?.message });
+  }
 });
 
 export default router;

@@ -84,6 +84,10 @@ import TripQuestionFlow, {
 import TripDateRangeSheet from "../../components/TripDateRangeSheet";
 import TripTimeSheet from "../../components/TripTimeSheet";
 import TripPlanCard from "../../components/TripPlanCard";
+import {
+  TripDestinationPickerModal,
+  type TripExtraStop,
+} from "../../components/TripDestinationPickerModal";
 import { parseGoogleMapsUrl } from "../../services/savedPlacesService";
 import { resolvePlaceCoords } from "../../services/placesService";
 import { loadSavedVideos } from "../../services/interactionService";
@@ -322,6 +326,9 @@ export default function AiChatScreen({
    * รอบแรก (การ์ดฟอร์ม) ไม่บังคับรถ → ค่านี้บอกว่าต้องถามเพิ่มหรือไม่
    */
   const [vehicleSpecified, setVehicleSpecified] = useState<Record<string, boolean>>({});
+  /** Modal เลือกจุดหมายปลายทาง (โฟลเดอร์ / ค้นหา / ให้ AI คิดให้) เมื่อไม่มีสถานที่สำหรับวางแผน */
+  const [showDestinationPicker, setShowDestinationPicker] = useState<boolean>(false);
+  const [pendingPlanMessageId, setPendingPlanMessageId] = useState<string | null>(null);
 
   const listRef = useRef<FlatList<AiChatMessage>>(null);
   const autoSentRef = useRef(false);
@@ -667,6 +674,17 @@ export default function AiChatScreen({
       return result.plan;
     } catch (err) {
       const aiErr = asAiError(err);
+      // ถ้าไม่มีสถานที่ในโฟลเดอร์สำหรับวางแผนทริป หรือ NO_STOPS → เปิด Modal ให้เลือกสถานที่/ให้ AI คิดให้ ทันที
+      if (
+        (aiErr as any)?.code === "NO_STOPS" ||
+        aiErr?.message?.includes("ไม่พบสถานที่") ||
+        aiErr?.message?.includes("NO_STOPS")
+      ) {
+        console.log("[AiChatScreen] runPlan caught NO_STOPS, opening destination picker modal");
+        setPendingPlanMessageId(messageId);
+        setShowDestinationPicker(true);
+        return null;
+      }
       Alert.alert(
         "คำนวณแผนไม่สำเร็จ",
         aiErr?.message ?? "เรียกตัวคำนวณแผนทริปไม่สำเร็จ ลองใหม่อีกครั้ง"
@@ -684,6 +702,17 @@ export default function AiChatScreen({
     // ใช้ค่าล่าสุดเสมอ (ผู้ใช้อาจแก้การ์ดระหว่างที่รอเอไaiตอบ)
     const rawSlots = draftSlotsRef.current;
     console.log("[AiChatScreen] handleCreatePlan called, rawSlots:", rawSlots);
+
+    // ตรวจสอบก่อนว่ามีสถานที่ให้วางแผนหรือไม่ (ถ้าไม่มีทั้งโฟลเดอร์ และไม่มี extraStops)
+    const currentExtra = extraStops[targetId] ?? [];
+    const hasFolder = Boolean(attachedFolderId || thread?.folderId);
+    if (!hasFolder && currentExtra.length === 0) {
+      console.log("[AiChatScreen] ไม่มีสถานที่และไม่มีโฟลเดอร์ เปิด TripDestinationPickerModal ทันที");
+      setPendingPlanMessageId(targetId);
+      setShowDestinationPicker(true);
+      return;
+    }
+
     setPlanning(true);
 
     // ถ้าผู้ใช้กดข้ามจุดเริ่มต้น หรือจุดยังไม่มีพิกัด ให้เตรียมค่าเริ่มต้นที่ใช้งานได้
@@ -717,6 +746,65 @@ export default function AiChatScreen({
         setEditingPlanMessageId(null);
         // สรุปแผนทั้งหมดกลับให้ผู้ใช้ในแชท (ข้อ 2.3)
         // → การ์ดแพลนดูรายละเอียด แต่ในแชทต้องมีภาพรวมทั้งทริปด้วย
+        appendMessage(threadId, {
+          role: "assistant",
+          content: formatPlanSummary(plan),
+        });
+      }
+    } finally {
+      setPlanning(false);
+    }
+  };
+
+  /** เมื่อผู้ใช้เลือกโฟลเดอร์จาก TripDestinationPickerModal */
+  const handlePickerSelectFolder = (folderId: string) => {
+    setAttachedFolderId(folderId);
+    setShowDestinationPicker(false);
+    if (pendingPlanMessageId) {
+      const targetId = pendingPlanMessageId;
+      setTimeout(() => {
+        void handleCreatePlan(targetId);
+      }, 350);
+    }
+  };
+
+  /** เมื่อผู้ใช้เลือกสถานที่จาก TripDestinationPickerModal (จากการค้นหา หรือ AI จัดทริปให้) */
+  const handlePickerSelectStops = async (stops: TripExtraStop[]) => {
+    setShowDestinationPicker(false);
+    if (!pendingPlanMessageId || stops.length === 0) return;
+    const targetId = pendingPlanMessageId;
+
+    // บันทึกสถานที่ลงใน extraStops ของข้อความนี้
+    setExtraStops((prev) => ({
+      ...prev,
+      [targetId]: [...(prev[targetId] ?? []), ...stops],
+    }));
+
+    const rawSlots = draftSlotsRef.current;
+    const slots: TripSlots = {
+      ...rawSlots,
+      startPoint: rawSlots.startPoint?.coords
+        ? rawSlots.startPoint
+        : rawSlots.startPoint?.label
+        ? { label: rawSlots.startPoint.label, coords: { lat: 18.7883, lng: 98.9853 } }
+        : { label: "เชียงใหม่ (จุดเริ่มต้น)", coords: { lat: 18.7883, lng: 98.9853 } },
+      returnMode: rawSlots.returnMode ?? "same_as_start",
+      budgetPerPerson: rawSlots.budgetPerPerson ?? 3000,
+      startTime: rawSlots.startTime ?? "08:00",
+    };
+
+    setPlanning(true);
+    try {
+      const plan = await runPlan(
+        targetId,
+        buildPlanRequest(slots, {
+          extraStops: stops,
+          fuelPriceOverride: fuelOverride[targetId] ?? null,
+        })
+      );
+      if (plan) {
+        clearDraftCards();
+        setEditingPlanMessageId(null);
         appendMessage(threadId, {
           role: "assistant",
           content: formatPlanSummary(plan),
@@ -1367,25 +1455,24 @@ export default function AiChatScreen({
   const isEmpty = !thread || thread.messages.length === 0;
 
   /**
-   * การ์ดข้อมูลแผนทริปโผล่ที่ข้อความล่าสุดที่มี `tripDraft` เท่านั้น
-   * (ไม่งั้นจะมีการ์ดซ้ำทุกข้อความ — ปัญหาเดิมที่ปุ่มขึ้นทุกครั้งที่เอไaiตอบ)
+   * การ์ดข้อมูลแผนทริปโผล่ที่ข้อความที่เป็นเจ้าของ draft ที่ยังไม่ได้สร้างแพลน
+   * หาจากข้อความแรกที่มี draft และยังไม่มี plan เพื่อให้การ์ดยึดอยู่กับข้อความเดิม ไม่เลื่อนตามข้อความใหม่
    */
-  const lastDraftMessageId = (() => {
+  const activeDraftMessageId = (() => {
     const msgs = thread?.messages ?? [];
-    for (let i = msgs.length - 1; i >= 0; i--) {
+    for (let i = 0; i < msgs.length; i++) {
       const m = msgs[i];
-      if (m && m.tripDraft) return m.id;
+      if (m && m.tripDraft && !m.plan) return m.id;
     }
     return null;
   })();
 
+  const lastDraftMessageId = activeDraftMessageId;
+
   /**
-   * การ์ดช่องข้อมูลต้องโผล่ต่อเมื่อ "ยังไม่ได้สร้างแพลน" ของข้อความ draft ล่าสุด
-   * (ถ้าสร้างแพลนแล้ว → ให้การ์ดแผนในเซลล์ข้อความแทน)
+   * การ์ดช่องข้อมูลต้องโผล่ต่อเมื่อ "ยังไม่ได้สร้างแพลน" ของข้อความ draft
    */
-  const showDraftCard =
-    !!lastDraftMessageId &&
-    !thread?.messages.find((m) => m.id === lastDraftMessageId)?.plan;
+  const showDraftCard = !!activeDraftMessageId;
 
   /**
    * คลิปของแต่ละจุดแวะในแผน (ข้อ 2.3)
@@ -1496,12 +1583,12 @@ export default function AiChatScreen({
    * → ถามทีละอย่าง ตอบได้ทั้งพิมพ์เองและกดเลือกตัวเลือก
    * → วันที่/เวลาใช้ตัวเลือกของแอปเอง (ปฏิทิน + ล้อเวลา) ที่เปิดจากระดับหน้าจอ
    */
-  const renderQuestionFlow = () => (
+  const renderQuestionFlow = (forMessageId?: string) => (
     <TripQuestionFlow
       slots={draftSlots}
       onChange={applyDraftSlots}
       onSubmitText={(text) => void send(text)}
-      onCreatePlan={() => void handleCreatePlan(lastDraftMessageId ?? "")}
+      onCreatePlan={() => void handleCreatePlan(forMessageId ?? activeDraftMessageId ?? "")}
       creating={planning}
       onRequestOrigin={setCardOriginTarget}
       onRequestDateRange={() => openCardPicker("date")}
@@ -1861,10 +1948,10 @@ export default function AiChatScreen({
                   {/* แผนที่คำนวณเสร็จแล้ว → การ์ดแผน (แผนที่จริง · เวลา · ต้นทุน · เพิ่ม/ลบจุด) */}
                   {!mine && !failed && item.plan ? renderPlanCard(item.id, item.plan) : null}
 
-                  {/* การ์ดช่องข้อมูลย้ายไปอยู่ใน ListFooterComponent แล้ว
-                      (เพราะถ้าอยู่ในเซลล์ของ FlatList → เซลล์ถูก recycle → การ์ดถูกถอด/เข้าใหม่
-                       → สถานะ "กำลังแก้" หาย และที่กดอยู่ถูกลบ → แอปค้าง/แอปหลุด)
-                      แผนที่คำนวณเสร็จแล้ว → การ์ดแผนยังอยู่ในเซลล์เหมือนเดิม */}
+                  {/* การ์ดวางแผนทริป (TripQuestionFlow) ยึดติดกับข้อความที่เป็นเจ้าของ draft เพื่อไม่ให้เลื่อนตามข้อความใหม่ */}
+                  {!mine && !failed && !item.plan && item.id === activeDraftMessageId ? (
+                    <View className="mt-2.5">{renderQuestionFlow(item.id)}</View>
+                  ) : null}
 
                   {/* ชื่อสถานที่ซ้ำหลายแห่ง → ให้ผู้ใช้เลือกแห่งที่ถูก
                       (แตะ = ถามคำเดิมซ้ำพร้อม placeId → ได้คำตอบใหม่ต่อท้าย) */}
@@ -1958,18 +2045,12 @@ export default function AiChatScreen({
             );
           }}
           ListFooterComponent={
-            <>
-              {sending ? (
-                <View className="flex-row items-center ml-9 mb-3">
-                  <ActivityIndicator size="small" color="#7C3AED" />
-                  <Text className="text-gray-400 text-[12px] ml-2">กำลังคิด...</Text>
-                </View>
-              ) : null}
-              {/* การ์ดช่องข้อมูลอยู่ที่ footer ของ FlatList
-                  → footer ไม่ถูก recycle (RN ดันเข้า cells หลังข้อมูลที่แสดง)
-                  → การ์ดไม่ถูกถอด/เข้าใหม่ตอนเอไaiตอบ → ไม่ค้าง ไม่หลุดแอป */}
-              {showDraftCard ? <View className="ml-9 mr-1">{renderQuestionFlow()}</View> : null}
-            </>
+            sending ? (
+              <View className="flex-row items-center ml-9 mb-3">
+                <ActivityIndicator size="small" color="#7C3AED" />
+                <Text className="text-gray-400 text-[12px] ml-2">กำลังคิด...</Text>
+              </View>
+            ) : undefined
           }
         />
       )}
@@ -2267,6 +2348,20 @@ export default function AiChatScreen({
             startTime: time,
           });
         }}
+      />
+
+      {/* Modal เลือกจุดหมายปลายทาง (โฟลเดอร์ / ค้นหาสถานที่ / ให้ AI คิดให้) เมื่อไม่มีสถานที่สำหรับวางแผน */}
+      <TripDestinationPickerModal
+        visible={showDestinationPicker}
+        onClose={() => setShowDestinationPicker(false)}
+        onSelectFolder={handlePickerSelectFolder}
+        onSelectStops={handlePickerSelectStops}
+        initialDestination={
+          draftSlots.style?.includes("อยุธยา")
+            ? "พระนครศรีอยุธยา"
+            : draftSlots.startPoint?.label?.replace("จุดเริ่มต้น", "").trim() || ""
+        }
+        initialStyle={draftSlots.style || ""}
       />
     </View>
   );

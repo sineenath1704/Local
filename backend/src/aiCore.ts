@@ -65,8 +65,10 @@ export async function callGemini(params: {
   for (const model of candidateModels) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), config.gemini.timeoutMs);
+    const t0 = Date.now();
 
     try {
+      console.log(`[aiCore] ⏳ กำลังเรียก Google Gemini (${model}) | Timeout: ${config.gemini.timeoutMs}ms...`);
       const bodyPayload: any = {
         contents,
         generationConfig: {
@@ -94,9 +96,11 @@ export async function callGemini(params: {
         }
       );
 
+      const elapsed = Date.now() - t0;
+
       if (!res.ok) {
         const errText = await res.text().catch(() => "");
-        console.warn(`[gemini-chat] Model ${model} ตอบกลับ ${res.status}: ${errText.slice(0, 200)}`);
+        console.warn(`[aiCore] ⚠️ Gemini (${model}) ตอบกลับ HTTP ${res.status} ใน ${elapsed}ms: ${errText.slice(0, 200)}`);
         lastErr = new AiUpstreamError(res.status, errText);
         continue;
       }
@@ -112,10 +116,12 @@ export async function callGemini(params: {
         : "";
 
       if (text.trim()) {
+        console.log(`[aiCore] ✅ Google Gemini (${model}) ตอบกลับสำเร็จใน ${elapsed}ms (${text.length} ตัวอักษร)`);
         return text.trim();
       }
     } catch (err: any) {
-      console.warn(`[gemini-chat] Model ${model} ส่งคำขอไม่สำเร็จ: ${err?.message ?? err}`);
+      const elapsed = Date.now() - t0;
+      console.warn(`[aiCore] ⚠️ Gemini (${model}) ส่งคำขอไม่สำเร็จ (${elapsed}ms): ${err?.message ?? err}`);
       lastErr = err;
     } finally {
       clearTimeout(timer);
@@ -145,7 +151,9 @@ async function callAnthropicWithContinuation(params: {
     const hasGemini = Boolean(config.gemini.apiKey);
     const timeout = hasGemini ? Math.min(config.ai.timeoutMs, 20_000) : config.ai.timeoutMs;
     const timer = setTimeout(() => controller.abort(), timeout);
+    const t0 = Date.now();
     try {
+      console.log(`[aiCore] ⏳ [รอบ ${round + 1}] กำลังเรียก MiniMax-m3 (${config.ai.model}) | Timeout: ${timeout}ms...`);
       const res = await fetch(`${config.ai.baseUrl}/v1/messages`, {
         method: "POST",
         signal: controller.signal,
@@ -162,8 +170,11 @@ async function callAnthropicWithContinuation(params: {
         }),
       });
 
+      const elapsed = Date.now() - t0;
+
       if (!res.ok) {
         const errText = await res.text().catch(() => "");
+        console.warn(`[aiCore] ⚠️ MiniMax-m3 ตอบกลับ HTTP ${res.status} ใน ${elapsed}ms: ${errText.slice(0, 200)}`);
         throw new AiUpstreamError(res.status, errText);
       }
 
@@ -173,6 +184,8 @@ async function callAnthropicWithContinuation(params: {
         : typeof data?.content === "string"
         ? data.content
         : "";
+
+      console.log(`[aiCore] ✅ MiniMax-m3 ตอบกลับสำเร็จใน ${elapsed}ms (${rawText.length} ตัวอักษร, stop_reason=${data?.stop_reason ?? "-"})`);
 
       const stopReason = data?.stop_reason;
 

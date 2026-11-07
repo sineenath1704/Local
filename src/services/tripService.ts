@@ -528,3 +528,45 @@ export async function fetchFuelPrices(): Promise<FuelPriceSnapshot | null> {
 export function lodgingToTripLodging(l: TripPlanLodging): TripPlanLodging {
   return l;
 }
+
+export interface SuggestedPlace {
+  name: string;
+  description: string;
+  address: string;
+  placeId: string;
+  latitude: number | null;
+  longitude: number | null;
+  province?: string | null;
+  district?: string | null;
+  subdistrict?: string | null;
+  rating?: number | null;
+  userRatingCount?: number | null;
+  photoUrl?: string | null;
+  googleMapsUri?: string | null;
+  types?: string[];
+}
+
+/**
+ * ขอให้ AI และ Google Places แนะนำสถานที่ท่องเที่ยวตามสไตล์และจังหวัด
+ */
+export async function suggestTripPlaces(input: {
+  destination?: string;
+  style?: string;
+  count?: number;
+}): Promise<SuggestedPlace[]> {
+  try {
+    const data = await aiFetch<{ places: SuggestedPlace[] }>({
+      label: "trips/suggest-places",
+      path: "/trips/suggest-places",
+      method: "POST",
+      body: input,
+      timeoutMs: API_TIMEOUT_MS * 5,
+      onSettled: (ok, error) => {
+        if (!ok && error) toastAiError(error);
+      },
+    });
+    return Array.isArray(data?.places) ? data.places : [];
+  } catch {
+    return [];
+  }
+}
