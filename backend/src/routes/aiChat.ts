@@ -676,11 +676,6 @@ router.post("/", async (req: Request, res: Response) => {
     resolvedHostSelf?.businessPlaceName?.trim() ||
     null;
 
-  let placeTag: "otop" | "tourism" | undefined;
-  if (tagPlaceName) {
-    placeTag = (await isRegisteredOtopPlace(tagPlaceName)) ? "otop" : "tourism";
-  }
-
   /**
    * ค้นเว็บจริง (Gemini + Google Search) — อุดช่องว่างที่เอไaiเดิมตอบไม่ได้
    * เช่น "มีที่พักใกล้ๆไหม" "อะไรน่าไปบ้าง" "วัดนี้อยู่ที่ไหน"
@@ -697,6 +692,8 @@ router.post("/", async (req: Request, res: Response) => {
   let searchBlock = "";
   let sources: TravelSource[] = [];
   let topicTags: TravelTopicTag[] = [];
+  /** ชื่อสถานที่ที่ Gemini สรุปว่าเป็น "สถานที่หลัก" ของคำถาม (ถ้ามี) */
+  let searchPlaceName: string | null = null;
 
   if (
     mode === "tourist" &&
@@ -716,6 +713,7 @@ router.post("/", async (req: Request, res: Response) => {
         });
         sources = search.sources;
         topicTags = search.tags;
+        searchPlaceName = search.placeName?.trim() || null;
         console.log(
           `[ai-chat] ค้นเว็บแล้ว · คำค้น="${lastUserText.slice(0, 80)}" · ` +
             `แหล่งที่มา=${sources.length} · แท็ก=${topicTags.join(",") || "-"}`
@@ -732,6 +730,24 @@ router.post("/", async (req: Request, res: Response) => {
     if (tag) topicTags = [tag];
   }
 
+  /**
+   * ชื่อสถานที่ที่จะติดแท็ก
+   * -------------------------------------------------------------
+   * เอาชื่อที่ Gemini สรุปว่าเป็นสถานที่หลักของคำถามก่อน (ตรงกับสิ่งที่คำตอบจะพูดถึงมากกว่า)
+   * → แท็กจะถูกติด "หน้าชื่อ" ในบรรทัดของคำตอบ (ฝั่งแอปวางให้เอง)
+   */
+  const tagTargetName = searchPlaceName || tagPlaceName;
+
+  /**
+   * กฎของผู้ใช้: นำชื่อไปค้นว่าเป็นสถานที่ OTOP ไหมก่อน
+   * ถ้าใช่ก็ติดทะเบียน OTOP · ถ้าไม่ใช่ก็ท่องเที่ยวทั่วไป
+   * → เช็คกับทะเบียนสถานที่ของระบบ (community_places) ก่อนเสมอ
+   */
+  let placeTag: "otop" | "tourism" | undefined;
+  if (tagTargetName) {
+    placeTag = (await isRegisteredOtopPlace(tagTargetName)) ? "otop" : "tourism";
+  }
+
   const system =
     buildChatSystemPrompt(resolvedFolder, resolvedPlace, resolvedHostSelf) +
     communityBlock +
@@ -742,19 +758,33 @@ router.post("/", async (req: Request, res: Response) => {
     // ถ้าค้นเว็บเจอข้อมูลแล้ว ห้ามบอกผู้ใช้ว่า "ไม่พบสถานที่" (สองบล็อกขัดกัน)
     (searchBlock ? "" : placeLookupNote);
 
-  /** ข้อมูลแท็กที่ส่งกลับฝั่งแอป (ไม่มี = ไม่ต้องแสดงอะไร) */
-  const tagPayload =
-    placeTag || topicTags.length > 0
-      ? {
-          ...(placeTag ? { placeTag } : {}),
-          ...(topicTags.length > 0 ? { tags: topicTags } : {}),
-        }
-      : null;
+  /**
+   * ข้อมูลแท็กที่ส่งกลับฝั่งแอป
+   * -------------------------------------------------------------
+   * กฎของผู้ใช้: **แท็กเฉพาะตอนที่คำตอบเอ่ยชื่อสถานที่จริง**
+   *   (เดิมติดแท็กทุกคำตอบ → ผู้ใช้เห็นแท็กเกลอะทุกข้อความ)
+   * → คำตอบที่ไม่เอ่ยชื่อสถานที่ = ไม่ส่งแท็กกลับไปเลย
+   * → คำตอบที่เอ่ยชื่อ = ส่ง `tagPlace` (ชื่อที่จะติดแท็ก) ไปด้วย
+   *   ให้ฝั่งแอปวางแท็กไว้ "หน้าชื่อ" ในบรรทัดเดียวกับคำตอบ
+   */
+  const mentionsPlaceName = (text: string, name: string | null): boolean => {
+    if (!name) return false;
+    const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+    const target = norm(name);
+    return !!target && norm(text).includes(target);
+  };
 
-  /** ข้อมูลเสริมที่ติดไปกับคำตอบทุกทาง (แท็ก + ลิงก์แหล่งที่มา) */
-  const replyMeta: Record<string, unknown> = {
-    ...(tagPayload ?? {}),
-    ...(sources.length > 0 ? { sources } : {}),
+  const buildReplyMeta = (replyText: string): Record<string, unknown> => {
+    const meta: Record<string, unknown> = {};
+    if (sources.length > 0) meta.sources = sources;
+    // ไม่ได้เอ่ยชื่อสถานที่ → ไม่ต้องมีแท็ก
+    if (!placeTag || !tagTargetName || !mentionsPlaceName(replyText, tagTargetName)) {
+      return meta;
+    }
+    meta.placeTag = placeTag;
+    if (topicTags.length > 0) meta.tags = topicTags;
+    meta.tagPlace = tagTargetName;
+    return meta;
   };
 
   if (!isAiConfigured()) {
@@ -772,11 +802,12 @@ router.post("/", async (req: Request, res: Response) => {
   try {
     // ชื่อซ้ำหลายแห่ง → ให้ผู้ใช้เลือกก่อน (ยังไม่ต้องให้โมเดลตอบ)
     if (placeCandidates && placeCandidates.length > 0) {
+      const stub =
+        "เจอสถานที่ชื่อเหมือนกันหลายแห่ง — เลือกอันที่ถูกที่สุดได้เลยครับ";
       return res.json({
-        reply:
-          "เจอสถานที่ชื่อเหมือนกันหลายแห่ง — เลือกอันที่ถูกที่สุดได้เลยครับ",
+        reply: stub,
         placeCandidates,
-        ...replyMeta,
+        ...buildReplyMeta(stub),
       });
     }
     // งบ 4096: บล็อกข้อมูลโฟลเดอร์ยาวกว่าเดิม (รายชื่อ + ราคา + ที่อยู่ + คลิปย่อ)
@@ -790,7 +821,7 @@ router.post("/", async (req: Request, res: Response) => {
     const parsed = parseTripDraftLine(reply);
     const cleanReply = parsed.reply.trim() || "ได้ค่ะ อยากให้ช่วยเรื่องอะไรต่อคะ";
     if (!parsed.slots) {
-      return res.json({ reply: cleanReply, ...replyMeta });
+      return res.json({ reply: cleanReply, ...buildReplyMeta(cleanReply) });
     }
 
     const merged = mergeTripSlots(clientSlots, parsed.slots);
@@ -798,13 +829,13 @@ router.post("/", async (req: Request, res: Response) => {
       (v) => v !== undefined && v !== null
     );
     if (!hasAnySlot) {
-      return res.json({ reply: cleanReply, ...replyMeta });
+      return res.json({ reply: cleanReply, ...buildReplyMeta(cleanReply) });
     }
 
     return res.json({
       reply: cleanReply,
       tripDraft: buildTripDraftResult(merged),
-      ...replyMeta,
+      ...buildReplyMeta(cleanReply),
     });
   } catch (err: any) {
     return sendError(res, err, req);

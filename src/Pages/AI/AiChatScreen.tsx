@@ -70,7 +70,11 @@ import type { VideoPost } from "../../data/homeFeedData";
 import OriginSelectorModal from "../../components/OriginSelectorModal";
 import MyVideoViewer from "../../components/MyVideoViewer";
 import FolderClipBrowser from "../../components/FolderClipBrowser";
-import ChatTagChips from "../../components/ChatTagChips";
+import {
+  ChatSourceChips,
+  InlinePlaceTags,
+  splitAtPlaceName,
+} from "../../components/ChatTagChips";
 import TripQuestionFlow, {
   TripOriginTarget,
 } from "../../components/TripQuestionFlow";
@@ -1230,8 +1234,10 @@ export default function AiChatScreen({
         placeCandidates: result.placeCandidates,
         planMeta: linkedPlanId ? { planId: linkedPlanId } : undefined,
         // แท็กประเภทสถานที่ (OTOP / ท่องเที่ยวทั่วไป) + หมวดหมู่ + ลิงก์แหล่งที่มา
+        // tagPlace = ชื่อที่จะติดแท็ก (มีเฉพาะตอนที่คำตอบเอ่ยชื่อนี้จริง)
         placeTag: result.placeTag,
         tags: result.tags,
+        tagPlace: result.tagPlace,
         sources: result.sources,
         tripDraft: mergedSlots
           ? {
@@ -1417,6 +1423,27 @@ export default function AiChatScreen({
       console.warn("[AiChatScreen] เปิดคลิปของจุดแวะไม่สำเร็จ:", err?.message ?? err);
       Alert.alert("เปิดคลิปไม่สำเร็จ", "ลองใหม่อีกครั้ง");
     }
+  };
+
+  /**
+   * เนื้อหาข้อความของเอไai + แท็กที่แทรกไว้ "หน้าชื่อสถานที่"
+   * -------------------------------------------------------------
+   * กฎของผู้ใช้: แท็กต้องอยู่หน้าชื่อสถานที่ ในบรรทัดเดียวกับคำตอบ
+   *   (ไม่ใช่ก้อนแท็กใต้ข้อความ) และใส่เฉพาะตอนที่คำตอบเอ่ยชื่อนั้นจริง
+   * → backend ส่ง `tagPlace` (ชื่อที่จะติดแท็ก) มาพร้อมกัน → หาในข้อความแล้วแทรกแท็ก
+   * → ถ้าไม่มี/ไม่เจอ → แสดงข้อความเดิมเปล่า ๆ (ไม่มีแท็กเกลอะ)
+   */
+  const renderMessageContent = (msg: AiChatMessage) => {
+    const parts = splitAtPlaceName(msg.content, msg.tagPlace);
+    if (!parts) return msg.content;
+    return (
+      <>
+        {parts.before}
+        <InlinePlaceTags placeTag={msg.placeTag} tags={msg.tags} />
+        {parts.match}
+        {parts.after}
+      </>
+    );
   };
 
   /** การ์ดแผนที่คำนวณเสร็จแล้ว (ผูกกับข้อความที่สร้างมัน) */
@@ -1751,17 +1778,13 @@ export default function AiChatScreen({
                         failed ? "text-red-800" : mine ? "text-white font-medium" : "text-gray-900"
                       }`}
                     >
-                      {item.content}
+                      {renderMessageContent(item)}
                     </Text>
                   </View>
 
-                  {/* แท็กประเภทสถานที่ (OTOP / ท่องเที่ยวทั่วไป) + หมวดหมู่ + ลิงก์แหล่งที่มา */}
+                  {/* ลิงก์แหล่งที่มา (แท็กประเภทสถานที่อยู่ในบรรทัดคำตอบแล้ว) */}
                   {!mine && !failed ? (
-                    <ChatTagChips
-                      placeTag={item.placeTag}
-                      tags={item.tags}
-                      sources={item.sources}
-                    />
+                    <ChatSourceChips sources={item.sources} />
                   ) : null}
 
                   {failed ? (

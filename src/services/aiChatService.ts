@@ -39,6 +39,11 @@ export interface ChatReply {
   placeTag?: PlaceTag;
   /** หมวดหมู่ของสถานที่ (ที่พัก · ร้านอาหาร · คาเฟ่ ...) */
   tags?: string[];
+  /**
+   * ชื่อสถานที่ที่จะติดแท็ก — มีเฉพาะตอนที่คำตอบเอ่ยชื่อนี้จริง
+   * (แอปใช้วางแท็กไว้หน้าชื่อในบรรทัดเดียวกับคำตอบ)
+   */
+  tagPlace?: string;
   /** ลิงก์แหล่งที่มา — มีเมื่อคำตอบนี้มาจากการค้นเว็บ */
   sources?: ChatSource[];
 }
@@ -105,6 +110,16 @@ function parseTopicTags(raw: unknown): string[] | undefined {
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
   return list.length > 0 ? list.slice(0, 4) : undefined;
+}
+
+/**
+ * ชื่อสถานที่ที่จะติดแท็ก — backend ส่งมาเฉพาะตอนที่คำตอบเอ่ยชื่อนี้จริง
+ * ค่าที่ไม่ใช่ข้อความ → ทิ้ง (แอปจะได้ไม่ติดแท็กที่ไหนเลย)
+ */
+function parseTagPlace(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const name = raw.trim();
+  return name ? name : undefined;
 }
 
 /** แปลงลิงก์แหล่งที่มา — ข้ามรายการที่ไม่มี url */
@@ -232,6 +247,7 @@ export async function sendChat(
     tripDraft?: unknown;
     placeTag?: unknown;
     tags?: unknown;
+    tagPlace?: unknown;
     sources?: unknown;
   }>({
     label: "ai-chat",
@@ -269,6 +285,7 @@ export async function sendChat(
   const tripDraft = parseTripDraft(data.tripDraft);
   const placeTag = parsePlaceTag(data.placeTag);
   const tags = parseTopicTags(data.tags);
+  const tagPlace = parseTagPlace(data.tagPlace);
   const sources = parseSources(data.sources);
   return {
     reply: data.reply,
@@ -276,6 +293,7 @@ export async function sendChat(
     ...(tripDraft ? { tripDraft } : {}),
     ...(placeTag ? { placeTag } : {}),
     ...(tags ? { tags } : {}),
+    ...(tagPlace ? { tagPlace } : {}),
     ...(sources ? { sources } : {}),
   };
 }

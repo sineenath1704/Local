@@ -208,7 +208,14 @@ export default function OriginSelectorModal({
       onRequestClose={handleClose}
     >
       <View className="flex-1 justify-end bg-black/60">
-        <View className="bg-white rounded-t-3xl max-h-[92%]">
+        {/* หน้าแก้ไขต้องมีความสูงที่กำหนด (h-[92%]) ไม่ใช่แค่สูงสุด
+            ไม่งั้นลูกที่เป็น flex-1 (SavedPlaceEditorSheet) จะพับตัวเองเป็นความสูง 0
+            → หน้าจะเห็นแค่ฉากหลัง ส่วนหน้ารายการยังคงความสูงตามเนื้อหา */}
+        <View
+          className={`bg-white rounded-t-3xl ${
+            editingPlace ? "h-[92%]" : "max-h-[92%]"
+          }`}
+        >
           {/* ── หน้าแก้ไขที่อยู่ที่บันทึกไว้ (เปิดจากการกดชิป) ─────────────
               อยู่ใน Modal เดียวกัน ไม่ซ้อน Modal (บน iOS ถ้าซ้อนแล้วปุ่มกดไม่ติด) */}
           {editingPlace ? (

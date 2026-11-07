@@ -435,7 +435,7 @@ export default function SavedPlaceEditorSheet({
 
       <ScrollView
         showsVerticalScrollIndicator={false}
-        className="px-5 pt-3"
+        className="flex-1 px-5 pt-3"
         keyboardShouldPersistTaps="handled"
       >
         {/* ── แผนที่ ─────────────────────────────────────────────── */}
