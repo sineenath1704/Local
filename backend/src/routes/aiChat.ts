@@ -731,24 +731,49 @@ router.post("/", async (req: Request, res: Response) => {
   }
 
   /**
-   * กรองชื่อจังหวัดออก ไม่ให้ติดแท็กสถานที่บนชื่อจังหวัด
-   * เช่น ผู้ใช้ถาม "แนะนำที่เที่ยวน่าน" ห้ามเอาคำว่า "น่าน" ไปติดแท็ก [OTOP]/[ท่องเที่ยวทั่วไป]
+   * กรองชื่อจังหวัด และคำทั่วไปออก ไม่ให้ติดแท็กสถานที่บนคำพวกนี้
+   * เช่น ผู้ใช้ถาม "แนะนำที่เที่ยวน่าน" หรือตอบว่า "จุดเดิม / หอพัก" ห้ามเอาคำพวกนี้ไปติดแท็ก [OTOP]/[ท่องเที่ยวทั่วไป]
    */
-  const isProvinceOnly = (name?: string | null): boolean => {
-    if (!name) return false;
+  const IGNORED_TAG_WORDS = new Set([
+    "จุดเดิม",
+    "ที่เดิม",
+    "หอพัก",
+    "บ้าน",
+    "จุดเริ่มต้น",
+    "จุดสิ้นสุด",
+    "ที่พัก",
+    "โรงแรม",
+    "สนามบิน",
+    "สถานี",
+    "ตัวเมือง",
+    "ตำบล",
+    "อำเภอ",
+    "จังหวัด",
+    "ประเทศไทย",
+    "google maps",
+    "google map",
+  ]);
+
+  const isIgnoredTagTarget = (name?: string | null): boolean => {
+    if (!name) return true;
     const trimmed = name.trim();
+    if (trimmed.length <= 2) return true;
+    const lower = trimmed.toLowerCase();
+    if (IGNORED_TAG_WORDS.has(lower)) return true;
     const detected = detectProvinceInText(trimmed);
-    if (!detected) return false;
-    const clean = trimmed.replace(/^(จังหวัด|จ\.)\s*/, "").trim();
-    return clean === detected;
+    if (detected) {
+      const clean = trimmed.replace(/^(จังหวัด|จ\.)\s*/, "").trim();
+      if (clean === detected) return true;
+    }
+    return false;
   };
 
   /**
    * ชื่อสถานที่ที่จะติดแท็ก
-   * (กรองออกหากตรงกับชื่อจังหวัด)
+   * (กรองออกหากตรงกับชื่อจังหวัดหรือคำทั่วไป)
    */
   const rawTargetName = searchPlaceName || tagPlaceName;
-  const tagTargetName = isProvinceOnly(rawTargetName) ? null : rawTargetName;
+  const tagTargetName = isIgnoredTagTarget(rawTargetName) ? null : rawTargetName;
 
   /**
    * กฎของผู้ใช้: นำชื่อไปค้นว่าเป็นสถานที่ OTOP ไหมก่อน
@@ -788,15 +813,15 @@ router.post("/", async (req: Request, res: Response) => {
 
     // รวบรวมรายชื่อสถานที่ที่เป็นไปได้ทั้งหมดในบทสนทนานี้ เพื่อสแกนหาในคำตอบ
     const candidateNames = new Set<string>();
-    if (tagTargetName && !isProvinceOnly(tagTargetName)) candidateNames.add(tagTargetName);
-    if (resolvedPlace?.placeName && !isProvinceOnly(resolvedPlace.placeName)) candidateNames.add(resolvedPlace.placeName);
-    if (clipPlaceName && !isProvinceOnly(clipPlaceName)) candidateNames.add(clipPlaceName);
-    if (chosenPlaceName && !isProvinceOnly(chosenPlaceName)) candidateNames.add(chosenPlaceName);
+    if (tagTargetName && !isIgnoredTagTarget(tagTargetName)) candidateNames.add(tagTargetName);
+    if (resolvedPlace?.placeName && !isIgnoredTagTarget(resolvedPlace.placeName)) candidateNames.add(resolvedPlace.placeName);
+    if (clipPlaceName && !isIgnoredTagTarget(clipPlaceName)) candidateNames.add(clipPlaceName);
+    if (chosenPlaceName && !isIgnoredTagTarget(chosenPlaceName)) candidateNames.add(chosenPlaceName);
     (resolvedFolder?.places ?? []).forEach((p) => {
-      if (p && !isProvinceOnly(p)) candidateNames.add(p);
+      if (p && !isIgnoredTagTarget(p)) candidateNames.add(p);
     });
     (registryPlaceNames ?? []).slice(0, 30).forEach((p) => {
-      if (p && !isProvinceOnly(p)) candidateNames.add(p);
+      if (p && !isIgnoredTagTarget(p)) candidateNames.add(p);
     });
 
     const placeTags: Array<{ name: string; placeTag: "otop" | "tourism"; tags?: string[] }> = [];
@@ -871,18 +896,39 @@ router.post("/", async (req: Request, res: Response) => {
       replyMeta.showFolderPicker = true;
     }
 
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    const lastUserAsk = (lastUser?.content ?? "").trim();
+
+    // ตรวจสอบว่าผู้ใช้กำลังต้องการวางแผนทริป หรือมี slots อยู่แล้ว
+    const isPlanningIntent =
+      Boolean(parsed.slots) ||
+      Boolean(clientSlots && Object.keys(clientSlots).length > 0) ||
+      /(?:แพลน|วางแผน|จัดทริป|ทริป|เที่ยว|itinerary|plan)/i.test(lastUserAsk);
+
+    if (isPlanningIntent) {
+      let merged = mergeTripSlots(clientSlots, parsed.slots ?? {});
+
+      // ถ้าผู้ใช้ระบุจำนวนวันแต่ slots ยังไม่มี ให้ดึงจากข้อความอัตโนมัติ
+      if (!merged.days) {
+        const dayMatch = lastUserAsk.match(/(\d+)\s*(?:วัน|days?)/i);
+        if (dayMatch) {
+          merged = { ...merged, days: parseInt(dayMatch[1], 10) };
+        }
+      }
+
+      // ส่ง tripDraft กลับไปเสมอ เพื่อให้แอปเปิดการ์ด TripQuestionFlow ขึ้นมาให้ผู้ใช้กรอก/เลือกทันที
+      return res.json({
+        reply: cleanReply,
+        tripDraft: buildTripDraftResult(merged),
+        ...replyMeta,
+      });
+    }
+
     if (!parsed.slots) {
       return res.json({ reply: cleanReply, ...replyMeta });
     }
 
     const merged = mergeTripSlots(clientSlots, parsed.slots);
-    const hasAnySlot = Object.values(merged).some(
-      (v) => v !== undefined && v !== null
-    );
-    if (!hasAnySlot) {
-      return res.json({ reply: cleanReply, ...replyMeta });
-    }
-
     return res.json({
       reply: cleanReply,
       tripDraft: buildTripDraftResult(merged),

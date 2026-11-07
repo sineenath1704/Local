@@ -594,6 +594,22 @@ export default function TripQuestionFlow({
               )}
             </TouchableOpacity>
           </View>
+
+          {/* ปุ่มทางลัดสำหรับผู้ใช้ที่ต้องการให้ AI สร้างแพลนออกมาเลย */}
+          <View className="flex-row items-center justify-between mt-3 pt-2.5 border-t border-gray-100">
+            <Text className="text-[11.5px] text-gray-400">หรือให้ระบบคำนวณแผนที่ทันที</Text>
+            <TouchableOpacity
+              onPress={onCreatePlan}
+              disabled={creating}
+              activeOpacity={0.8}
+              className="px-3.5 py-1.5 rounded-full bg-violet-600 flex-row items-center"
+            >
+              <SparklesIcon size={12} color="#FFFFFF" />
+              <Text className="text-[11.5px] font-bold text-white ml-1">
+                {creating ? "กำลังสร้างแพลน..." : "สร้างแพลนเลย"}
+              </Text>
+            </TouchableOpacity>
+          </View>
         </View>
       ) : null}
 
