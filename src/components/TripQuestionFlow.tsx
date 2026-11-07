@@ -491,19 +491,35 @@ export default function TripQuestionFlow({
 
           {/* ปุ่มเปิดตัวเลือกของแอปเอง (ปฏิทิน / ล้อเวลา / เลือกจุด) */}
           {meta.kind === "point" ? (
-            <TouchableOpacity
-              onPress={() => onRequestOrigin(originTargetOf(question))}
-              activeOpacity={0.8}
-              className="flex-row items-center bg-violet-50 border border-violet-200 rounded-2xl px-3.5 py-3 mt-3"
-            >
-              <MapPinIcon size={18} color="#7C3AED" />
-              <Text className="flex-1 text-[13px] font-bold text-violet-800 ml-2">
-                {originTargetOf(question) === "start"
-                  ? "เลือกจุดเริ่มต้น"
-                  : "เลือกจุดสิ้นสุด"}
-              </Text>
-              <ChevronRightIcon size={16} color="#7C3AED" />
-            </TouchableOpacity>
+            <>
+              <TouchableOpacity
+                onPress={() => onRequestOrigin(originTargetOf(question))}
+                activeOpacity={0.8}
+                className="flex-row items-center bg-violet-50 border border-violet-200 rounded-2xl px-3.5 py-3 mt-3"
+              >
+                <MapPinIcon size={18} color="#7C3AED" />
+                <Text className="flex-1 text-[13px] font-bold text-violet-800 ml-2">
+                  {originTargetOf(question) === "start"
+                    ? "เลือกจุดเริ่มต้น (หรือจากโฟลเดอร์ที่เซฟ)"
+                    : "เลือกจุดสิ้นสุด"}
+                </Text>
+                <ChevronRightIcon size={16} color="#7C3AED" />
+              </TouchableOpacity>
+
+              {originTargetOf(question) === "start" ? (
+                <View className="flex-row flex-wrap gap-2 mt-2">
+                  <TouchableOpacity
+                    onPress={() => onSubmitText("ช่วยคิดทริปท่องเที่ยวให้หน่อย จัดแพลนและเลือกจุดเริ่มต้นให้เลย")}
+                    activeOpacity={0.8}
+                    className="px-3 py-1.5 rounded-full bg-violet-100 border border-violet-200"
+                  >
+                    <Text className="text-[12px] font-bold text-violet-800">
+                      ✨ ให้ AI วางแผนและเลือกจุดให้เลย
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
+            </>
           ) : null}
           {meta.kind === "date" ? (
             <TouchableOpacity

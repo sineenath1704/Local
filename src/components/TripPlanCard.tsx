@@ -8,6 +8,7 @@ import {
   ActivityIndicator,
   Image,
   ScrollView,
+  Modal,
 } from "react-native";
 import {
   MapPinIcon,
@@ -24,6 +25,9 @@ import {
   CalendarDaysIcon,
   BanknotesIcon,
   PlayIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
+  XMarkIcon,
 } from "react-native-heroicons/outline";
 import {
   TripPlan,
@@ -129,8 +133,8 @@ interface TripPlanCardProps {
   onConfirm?: () => void;
   /** กด "แก้ไขกับเอไai" */
   onEditWithAi?: () => void;
-  /** กด "เพิ่มจุดแวะ" */
-  onAddStop?: () => void;
+  /** กด "เพิ่มจุดแวะ" (ระบุวันได้) */
+  onAddStop?: (dayIndex?: number) => void;
   /** กด "ลบ" จุด → คำนวณใหม่ */
   onRemoveStop?: (stopId: string) => void;
   /** ขยับลำดับจุดขึ้น/ลง */
@@ -191,6 +195,20 @@ export default function TripPlanCard({
   const [vehicleChoice, setVehicleChoice] = useState<VehicleClass | null>(null);
   const [vehicleModelText, setVehicleModelText] = useState("");
   const [editingTravelers, setEditingTravelers] = useState(false);
+
+  // สถานะเปิด-ปิดของแต่ละเซ็คชั่น (Accordion)
+  const [sectionMap, setSectionMap] = useState(true);
+  const [sectionStops, setSectionStops] = useState(true);
+  const [sectionBudget, setSectionBudget] = useState(true);
+  const [sectionLodging, setSectionLodging] = useState(true);
+  const [sectionTips, setSectionTips] = useState(false);
+
+  // สถานะ Popup ดูรายละเอียดที่พักที่แนะนำ
+  const [detailLodging, setDetailLodging] = useState<TripPlanLodging | null>(null);
+
+  // สถานะเปิด Timeline Preview Modal (ข้อ 6)
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewDayIndex, setPreviewDayIndex] = useState(0);
 
   const days = plan.days ?? [];
   const day: TripPlanDay | undefined = days[dayIndex] ?? days[0];
@@ -424,40 +442,80 @@ export default function TripPlanCard({
       {/* ── แผนที่ ────────────────────────────────────────────── */}
       {day ? (
         <View className="px-3 pt-2">
-          <TripRouteMap
-            startPoint={day.startPoint}
-            endPoint={day.endPoint}
-            returnMode={plan.returnMode}
-            stops={mapStops}
-            legs={day.legs ?? EMPTY_LEGS}
-            height={230}
-            routeSource={plan.routeSource}
-            routeCredit={plan.routeCredit}
-          />
+          <TouchableOpacity
+            onPress={() => setSectionMap((v) => !v)}
+            activeOpacity={0.7}
+            className="flex-row items-center justify-between py-2 px-3 bg-gray-50 rounded-xl mb-2 border border-gray-100"
+          >
+            <View className="flex-row items-center">
+              <MapPinIcon size={16} color="#7C3AED" />
+              <Text className="text-gray-900 text-[13.5px] font-bold ml-2">แผนที่เส้นทาง</Text>
+            </View>
+            {sectionMap ? (
+              <ChevronUpIcon size={16} color="#6B7280" />
+            ) : (
+              <ChevronDownIcon size={16} color="#6B7280" />
+            )}
+          </TouchableOpacity>
 
-          <View className="flex-row items-center mt-2 flex-wrap">
-            <Text className="text-[12px] text-gray-600 font-bold mr-3">
-              รวมวันนี้ {km(day.totalKm)} · {mins(day.totalDriveMinutes)} ขับ
-            </Text>
-            {day.fuelCost ? (
-              <Text className="text-[12px] text-gray-600 mr-3">
-                {isEv ? "ค่าไฟ" : "ค่าน้ำมัน"} {money(day.fuelCost)}
-              </Text>
-            ) : null}
-            <Text className="text-[12px] text-gray-500">
-              {day.endPointType === "lodging" ? "จบวันที่ที่พัก" : "จบวันที่จุดสิ้นสุด"}
-            </Text>
-          </View>
+          {sectionMap && (
+            <>
+              <TripRouteMap
+                startPoint={day.startPoint}
+                endPoint={day.endPoint}
+                returnMode={plan.returnMode}
+                stops={mapStops}
+                legs={day.legs ?? EMPTY_LEGS}
+                height={230}
+                routeSource={plan.routeSource}
+                routeCredit={plan.routeCredit}
+              />
+
+              <View className="flex-row items-center mt-2 flex-wrap">
+                <Text className="text-[12px] text-gray-600 font-bold mr-3">
+                  รวมวันนี้ {km(day.totalKm)} · {mins(day.totalDriveMinutes)} ขับ
+                </Text>
+                {day.fuelCost ? (
+                  <Text className="text-[12px] text-gray-600 mr-3">
+                    {isEv ? "ค่าไฟ" : "ค่าน้ำมัน"} {money(day.fuelCost)}
+                  </Text>
+                ) : null}
+                <Text className="text-[12px] text-gray-500">
+                  {day.endPointType === "lodging" ? "จบวันที่ที่พัก" : "จบวันที่จุดสิ้นสุด"}
+                </Text>
+              </View>
+            </>
+          )}
         </View>
       ) : null}
 
       {/* ── รายการจุดแวะ ─────────────────────────────────────── */}
       {day?.stops?.length ? (
-        <View className="px-3 pt-3">
-          <Text className="text-gray-900 text-[13.5px] font-black mb-1.5">
-            จุดแวะวันที่ {day.day}
-          </Text>
-          {day.stops.map((stop, i) => {
+        <View className="px-3 pt-2">
+          <TouchableOpacity
+            onPress={() => setSectionStops((v) => !v)}
+            activeOpacity={0.7}
+            className="flex-row items-center justify-between py-2 px-3 bg-gray-50 rounded-xl mb-2 border border-gray-100"
+          >
+            <View className="flex-row items-center">
+              <ClockIcon size={16} color="#7C3AED" />
+              <Text className="text-gray-900 text-[13.5px] font-bold ml-2">
+                จุดแวะวันที่ {day.day}
+              </Text>
+              <View className="bg-violet-100 px-2 py-0.5 rounded-full ml-2">
+                <Text className="text-violet-700 text-[11px] font-bold">{day.stops.length} จุด</Text>
+              </View>
+            </View>
+            {sectionStops ? (
+              <ChevronUpIcon size={16} color="#6B7280" />
+            ) : (
+              <ChevronDownIcon size={16} color="#6B7280" />
+            )}
+          </TouchableOpacity>
+
+          {sectionStops && (
+            <>
+              {day.stops.map((stop, i) => {
             const oh = openHoursBadge(stop.openHours);
             return (
               <View
@@ -700,14 +758,48 @@ export default function TripPlanCard({
               </View>
             );
           })}
+              {onAddStop ? (
+                <TouchableOpacity
+                  onPress={() => onAddStop(dayIndex)}
+                  activeOpacity={0.8}
+                  className="flex-row items-center justify-center bg-violet-50 border border-violet-200 rounded-xl py-2 mt-1 mb-2"
+                >
+                  <MapPinIcon size={14} color="#7C3AED" />
+                  <Text className="text-violet-700 text-[12.5px] font-bold ml-1.5">
+                    + เพิ่มจุดแวะในวันที่ {day.day}
+                  </Text>
+                </TouchableOpacity>
+              ) : null}
+            </>
+          )}
         </View>
       ) : null}
 
       {/* ── ต้นทุน ────────────────────────────────────────────── */}
-      <View className="px-3 pt-3">
-        <Text className="text-gray-900 text-[13.5px] font-black mb-1.5">
-          ค่าใช้จ่ายโดยประมาณ
-        </Text>
+      <View className="px-3 pt-2">
+        <TouchableOpacity
+          onPress={() => setSectionBudget((v) => !v)}
+          activeOpacity={0.7}
+          className="flex-row items-center justify-between py-2 px-3 bg-gray-50 rounded-xl mb-2 border border-gray-100"
+        >
+          <View className="flex-row items-center">
+            <BanknotesIcon size={16} color="#7C3AED" />
+            <Text className="text-gray-900 text-[13.5px] font-bold ml-2">ค่าใช้จ่ายและยานพาหนะ</Text>
+            {budget?.perPerson ? (
+              <View className="bg-emerald-100 px-2 py-0.5 rounded-full ml-2">
+                <Text className="text-emerald-800 text-[11px] font-bold">{money(budget.perPerson)}/คน</Text>
+              </View>
+            ) : null}
+          </View>
+          {sectionBudget ? (
+            <ChevronUpIcon size={16} color="#6B7280" />
+          ) : (
+            <ChevronDownIcon size={16} color="#6B7280" />
+          )}
+        </TouchableOpacity>
+
+        {sectionBudget && (
+          <>
 
         {/* ── ถามอีกรอบตอนสรุปค่าใช้จ่าย: รถ + จำนวนคน ─────────── */}
         {!vehicleSpecified ? (
@@ -878,9 +970,10 @@ export default function TripPlanCard({
           />
           <CostRow label="ค่าที่พัก" value={money(budget?.lodging)} />
           <CostRow label="ค่าอาหาร" value={money(budget?.food)} />
-          {budget?.activities ? (
-            <CostRow label="ค่ากิจกรรม" value={money(budget.activities)} />
-          ) : null}
+          <CostRow
+            label="ค่าเข้าชมสถานที่ / กิจกรรม"
+            value={money(budget?.activities)}
+          />
           {budget?.other ? (
             <CostRow label="ค่าใช้จ่ายอื่น" value={money(budget.other)} />
           ) : null}
@@ -973,118 +1066,63 @@ export default function TripPlanCard({
             </TouchableOpacity>
           ) : null}
         </View>
+          </>
+        )}
       </View>
 
       {/* ── ที่พักที่ระบบเสนอ ────────────────────────────────── */}
       {plan.lodgingSuggestions?.length ? (
-        <View className="px-3 pt-1">
-          <Text className="text-gray-900 text-[13.5px] font-black mb-1.5">
-            ที่พักที่ระบบเสนอ
-          </Text>
-          {plan.lodgingSuggestions.map((l, i) => {
-            const picked = selectedLodgingName === l.name;
-            return (
-              <View
-                key={`${l.name}-${i}`}
-                className={`border rounded-2xl p-3 mb-2 ${
-                  picked
-                    ? "bg-emerald-50 border-emerald-300"
-                    : "bg-white border-gray-200"
-                }`}
-              >
-                <View className="flex-row items-start">
-                  <View className="flex-1">
-                    <Text className="text-gray-900 text-[13.5px] font-bold">
-                      {l.name}
+        <View className="px-3 pt-2">
+          <TouchableOpacity
+            onPress={() => setSectionLodging((v) => !v)}
+            activeOpacity={0.7}
+            className="flex-row items-center justify-between py-2 px-3 bg-gray-50 rounded-xl mb-2 border border-gray-100"
+          >
+            <View className="flex-row items-center">
+              <SparklesIcon size={16} color="#7C3AED" />
+              <Text className="text-gray-900 text-[13.5px] font-bold ml-2">ที่พักที่แนะนำ</Text>
+              <View className="bg-violet-100 px-2 py-0.5 rounded-full ml-2">
+                <Text className="text-violet-700 text-[11px] font-bold">{plan.lodgingSuggestions.length} แห่ง</Text>
+              </View>
+            </View>
+            {sectionLodging ? (
+              <ChevronUpIcon size={16} color="#6B7280" />
+            ) : (
+              <ChevronDownIcon size={16} color="#6B7280" />
+            )}
+          </TouchableOpacity>
+
+          {sectionLodging && (
+            <View className="flex-row flex-wrap mt-1">
+              {plan.lodgingSuggestions.map((l, i) => {
+                const picked = selectedLodgingName === l.name;
+                return (
+                  <TouchableOpacity
+                    key={`${l.name}-${i}`}
+                    onPress={() => setDetailLodging(l)}
+                    activeOpacity={0.75}
+                    className={`flex-row items-center rounded-2xl px-3 py-2 mr-2 mb-2 border ${
+                      picked
+                        ? "bg-emerald-50 border-emerald-400"
+                        : "bg-white border-gray-200"
+                    }`}
+                  >
+                    <Text className="text-[13px] font-bold text-gray-800 mr-1.5">
+                      🏨 {l.name}
                     </Text>
-                    {l.address ? (
-                      <Text className="text-gray-500 text-[12px] mt-0.5">
-                        {l.address}
+                    {l.price != null ? (
+                      <Text className="text-[11.5px] font-bold text-violet-700 bg-violet-50 px-1.5 py-0.5 rounded-md">
+                        {money(l.price)}
                       </Text>
                     ) : null}
-                  </View>
-                  {picked ? (
-                    <CheckBadgeIcon size={17} color="#059669" />
-                  ) : null}
-                </View>
-                <View className="flex-row items-center flex-wrap mt-1.5">
-                  {l.price != null ? (
-                    <View className="bg-gray-100 px-2 py-0.5 rounded-full mr-2 mb-1">
-                      <Text className="text-gray-800 text-[12px] font-bold">
-                        {money(l.price)}
-                        {l.priceUnit ? ` / ${l.priceUnit}` : ""}
-                      </Text>
-                    </View>
-                  ) : l.priceText ? (
-                    <View className="bg-gray-100 px-2 py-0.5 rounded-full mr-2 mb-1">
-                      <Text className="text-gray-800 text-[12px] font-bold">
-                        {l.priceText}
-                      </Text>
-                    </View>
-                  ) : null}
-                  {l.distanceKm != null ? (
-                    <View className="bg-blue-50 px-2 py-0.5 rounded-full mr-2 mb-1">
-                      <Text className="text-blue-800 text-[12px] font-bold">
-                        ห่างจากจุดสุดท้าย {km(l.distanceKm)}
-                      </Text>
-                    </View>
-                  ) : null}
-                  {l.rating != null ? (
-                    <View className="bg-amber-50 px-2 py-0.5 rounded-full mr-2 mb-1">
-                      <Text className="text-amber-800 text-[12px] font-bold">
-                        ⭐ {l.rating.toFixed(1)}
-                      </Text>
-                    </View>
-                  ) : null}
-                </View>
-                <View className="flex-row items-center flex-wrap mt-1.5">
-                  {l.phone ? (
-                    <TouchableOpacity
-                      onPress={() =>
-                        Linking.openURL(`tel:${l.phone}`).catch(() => undefined)
-                      }
-                      activeOpacity={0.7}
-                      className="flex-row items-center bg-emerald-50 border border-emerald-200 rounded-full px-2.5 py-1 mr-2 mb-1"
-                    >
-                      <PhoneIcon size={12} color="#047857" />
-                      <Text className="text-emerald-800 text-[12px] font-bold ml-1">
-                        {l.phone}
-                      </Text>
-                    </TouchableOpacity>
-                  ) : null}
-                  {l.website ? (
-                    <TouchableOpacity
-                      onPress={() =>
-                        Linking.openURL(l.website!).catch(() => undefined)
-                      }
-                      activeOpacity={0.7}
-                      className="flex-row items-center bg-blue-50 border border-blue-200 rounded-full px-2.5 py-1 mr-2 mb-1"
-                    >
-                      <GlobeAltIcon size={12} color="#1D4ED8" />
-                      <Text className="text-blue-700 text-[12px] font-bold ml-1">
-                        เว็บไซต์
-                      </Text>
-                    </TouchableOpacity>
-                  ) : null}
-                  {onSelectLodging ? (
-                    <TouchableOpacity
-                      onPress={() => onSelectLodging(l)}
-                      activeOpacity={0.8}
-                      className={`px-3 py-1 rounded-full ml-auto ${
-                        picked
-                          ? "bg-emerald-700"
-                          : "bg-violet-600"
-                      }`}
-                    >
-                      <Text className="text-white text-[12px] font-bold">
-                        {picked ? "เลือกแล้ว ✓" : "เลือกที่พักนี้"}
-                      </Text>
-                    </TouchableOpacity>
-                  ) : null}
-                </View>
-              </View>
-            );
-          })}
+                    {picked && (
+                      <CheckBadgeIcon size={15} color="#059669" style={{ marginLeft: 4 }} />
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          )}
         </View>
       ) : null}
 
@@ -1097,7 +1135,7 @@ export default function TripPlanCard({
             </Text>
             {onAddStop ? (
               <TouchableOpacity
-                onPress={onAddStop}
+                onPress={() => onAddStop(dayIndex)}
                 activeOpacity={0.8}
                 className="flex-row items-center bg-violet-50 border border-violet-200 rounded-full px-2.5 py-1"
               >
@@ -1124,7 +1162,7 @@ export default function TripPlanCard({
       ) : onAddStop ? (
         <View className="px-3 pt-1">
           <TouchableOpacity
-            onPress={onAddStop}
+            onPress={() => onAddStop(dayIndex)}
             activeOpacity={0.8}
             className="flex-row items-center justify-center bg-violet-50 border border-violet-200 rounded-2xl py-2.5"
           >
@@ -1138,54 +1176,77 @@ export default function TripPlanCard({
 
       {/* ── ข้อควรระวัง / สมมติฐาน ─────────────────────────────── */}
       {warnings.length || plan.assumptions?.length || plan.tips?.length ? (
-        <View className="px-3 pt-3 pb-1">
-          {folderWarning ? (
-            <NoticeBox tone="amber" title="หมายเหตุ">
-              {folderWarning}
-            </NoticeBox>
-          ) : null}
-          {warnings.map((w, i) => (
-            <NoticeBox key={`w-${i}`} tone="amber" title="ข้อควรระวัง">
-              {w}
-            </NoticeBox>
-          ))}
-          {plan.assumptions?.map((a, i) => (
-            <NoticeBox key={`a-${i}`} tone="gray" title="สมมติฐานที่ใช้คำนวณ">
-              {a}
-            </NoticeBox>
-          ))}
-          {plan.tips?.map((t, i) => (
-            <NoticeBox key={`t-${i}`} tone="blue" title="เคล็ดลับ">
-              {t}
-            </NoticeBox>
-          ))}
+        <View className="px-3 pt-2 pb-1">
+          <TouchableOpacity
+            onPress={() => setSectionTips((v) => !v)}
+            activeOpacity={0.7}
+            className="flex-row items-center justify-between py-2 px-3 bg-gray-50 rounded-xl mb-1.5 border border-gray-100"
+          >
+            <View className="flex-row items-center">
+              <ExclamationTriangleIcon size={15} color="#B45309" />
+              <Text className="text-gray-900 text-[13.5px] font-bold ml-2">คำแนะนำและข้อควรระวัง</Text>
+            </View>
+            {sectionTips ? (
+              <ChevronUpIcon size={16} color="#6B7280" />
+            ) : (
+              <ChevronDownIcon size={16} color="#6B7280" />
+            )}
+          </TouchableOpacity>
+
+          {sectionTips && (
+            <>
+              {folderWarning ? (
+                <NoticeBox tone="amber" title="หมายเหตุ">
+                  {folderWarning}
+                </NoticeBox>
+              ) : null}
+              {warnings.map((w, i) => (
+                <NoticeBox key={`w-${i}`} tone="amber" title="ข้อควรระวัง">
+                  {w}
+                </NoticeBox>
+              ))}
+              {plan.assumptions?.map((a, i) => (
+                <NoticeBox key={`a-${i}`} tone="gray" title="สมมติฐานที่ใช้คำนวณ">
+                  {a}
+                </NoticeBox>
+              ))}
+              {plan.tips?.map((t, i) => (
+                <NoticeBox key={`t-${i}`} tone="blue" title="เคล็ดลับ">
+                  {t}
+                </NoticeBox>
+              ))}
+            </>
+          )}
         </View>
       ) : null}
 
       {/* ── ปุ่มการกระทำ ─────────────────────────────────────── */}
       <View className="px-3 pt-3 pb-3.5">
         <TouchableOpacity
-          onPress={onConfirm}
+          onPress={() => {
+            setPreviewDayIndex(dayIndex);
+            setPreviewOpen(true);
+          }}
           disabled={busy}
           activeOpacity={0.85}
-          className={`rounded-2xl py-3 items-center justify-center flex-row ${
+          className={`rounded-2xl py-3.5 items-center justify-center flex-row ${
             busy ? "bg-violet-300" : "bg-violet-600 shadow-md shadow-violet-200"
           }`}
         >
           {busy ? (
             <ActivityIndicator size="small" color="#FFFFFF" />
           ) : (
-            <CheckBadgeIcon size={17} color="#FFFFFF" />
+            <SparklesIcon size={18} color="#FFFFFF" />
           )}
-          <Text className="text-white text-[14px] font-bold ml-1.5">
-            {busy ? "กำลังคำนวณใหม่..." : "ยืนยันและบันทึกแพลน"}
+          <Text className="text-white text-[15px] font-bold ml-1.5">
+            {busy ? "กำลังคำนวณใหม่..." : "สร้างแพลน"}
           </Text>
         </TouchableOpacity>
 
         <View className="flex-row mt-2">
           {onAddStop ? (
             <TouchableOpacity
-              onPress={onAddStop}
+              onPress={() => onAddStop(dayIndex)}
               disabled={busy}
               activeOpacity={0.8}
               className="flex-1 flex-row items-center justify-center bg-white border border-violet-200 rounded-2xl py-2.5 mr-1.5"
@@ -1211,6 +1272,268 @@ export default function TripPlanCard({
           ) : null}
         </View>
       </View>
+
+      {/* ── Modal ดูรายละเอียดที่พัก ───────────────────────────── */}
+      <Modal
+        visible={!!detailLodging}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setDetailLodging(null)}
+      >
+        <View className="flex-1 bg-black/50 justify-center items-center px-4">
+          <View className="bg-white rounded-3xl p-5 w-full max-w-sm">
+            <View className="flex-row items-center justify-between mb-3 border-b border-gray-100 pb-2">
+              <View className="flex-row items-center flex-1">
+                <Text className="text-base font-black text-gray-900 mr-2" numberOfLines={1}>
+                  🏨 {detailLodging?.name}
+                </Text>
+              </View>
+              <TouchableOpacity onPress={() => setDetailLodging(null)} className="p-1">
+                <XMarkIcon size={20} color="#6B7280" />
+              </TouchableOpacity>
+            </View>
+
+            {detailLodging?.address ? (
+              <Text className="text-gray-600 text-xs mb-2 leading-4">
+                📍 {detailLodging.address}
+              </Text>
+            ) : null}
+
+            <View className="flex-row flex-wrap gap-2 my-2">
+              {detailLodging?.price != null ? (
+                <View className="bg-violet-50 px-2.5 py-1 rounded-full border border-violet-100">
+                  <Text className="text-violet-700 text-xs font-bold">
+                    {money(detailLodging.price)} {detailLodging.priceUnit ? `/ ${detailLodging.priceUnit}` : ""}
+                  </Text>
+                </View>
+              ) : null}
+              {detailLodging?.distanceKm != null ? (
+                <View className="bg-blue-50 px-2.5 py-1 rounded-full border border-blue-100">
+                  <Text className="text-blue-700 text-xs font-bold">
+                    ห่าง {km(detailLodging.distanceKm)}
+                  </Text>
+                </View>
+              ) : null}
+              {detailLodging?.rating != null ? (
+                <View className="bg-amber-50 px-2.5 py-1 rounded-full border border-amber-100">
+                  <Text className="text-amber-800 text-xs font-bold">
+                    ⭐ {detailLodging.rating.toFixed(1)}
+                  </Text>
+                </View>
+              ) : null}
+            </View>
+
+            <View className="flex-row gap-2 mt-4">
+              {detailLodging?.phone ? (
+                <TouchableOpacity
+                  onPress={() => Linking.openURL(`tel:${detailLodging.phone}`).catch(() => undefined)}
+                  className="flex-1 bg-emerald-50 border border-emerald-200 py-2.5 rounded-xl items-center justify-center flex-row"
+                >
+                  <PhoneIcon size={14} color="#047857" />
+                  <Text className="text-emerald-800 text-xs font-bold ml-1">โทรสอบถาม</Text>
+                </TouchableOpacity>
+              ) : null}
+              {onSelectLodging && detailLodging ? (
+                <TouchableOpacity
+                  onPress={() => {
+                    onSelectLodging(detailLodging);
+                    setDetailLodging(null);
+                  }}
+                  className={`flex-1 py-2.5 rounded-xl items-center justify-center ${
+                    selectedLodgingName === detailLodging.name ? "bg-emerald-700" : "bg-violet-600"
+                  }`}
+                >
+                  <Text className="text-white text-xs font-bold">
+                    {selectedLodgingName === detailLodging.name ? "เลือกแล้ว ✓" : "เลือกที่พักนี้"}
+                  </Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── Modal สรุปไทม์ไลน์และยืนยันแพลน (Timeline Preview Modal) ── */}
+      <Modal
+        visible={previewOpen}
+        animationType="slide"
+        onRequestClose={() => setPreviewOpen(false)}
+      >
+        <View className="flex-1 bg-gray-50">
+          {/* Header */}
+          <View className="bg-white px-4 pt-12 pb-3 border-b border-gray-100 flex-row items-center justify-between">
+            <View className="flex-1 pr-3">
+              <Text className="text-lg font-black text-gray-900" numberOfLines={1}>
+                {plan.title || "แผนการท่องเที่ยว"}
+              </Text>
+              <Text className="text-xs text-gray-500">
+                ตรวจเช็คเวลาและลำดับสถานที่ก่อนยืนยันเข้าทริป
+              </Text>
+            </View>
+            <TouchableOpacity
+              onPress={() => setPreviewOpen(false)}
+              className="p-2 rounded-full bg-gray-100"
+            >
+              <XMarkIcon size={20} color="#374151" />
+            </TouchableOpacity>
+          </View>
+
+          {/* สลับวัน (ถ้ามีหลายวัน) */}
+          {days.length > 1 ? (
+            <View className="bg-white px-3 py-2 border-b border-gray-100">
+              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                {days.map((d, i) => (
+                  <TouchableOpacity
+                    key={`preview-tab-${i}`}
+                    onPress={() => setPreviewDayIndex(i)}
+                    className={`px-3 py-1.5 rounded-full mr-2 ${
+                      i === previewDayIndex ? "bg-violet-600" : "bg-gray-100"
+                    }`}
+                  >
+                    <Text
+                      className={`text-xs font-bold ${
+                        i === previewDayIndex ? "text-white" : "text-gray-700"
+                      }`}
+                    >
+                      วันที่ {d.day}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+          ) : null}
+
+          {/* Timeline Content */}
+          <ScrollView className="flex-1 px-4 pt-3" showsVerticalScrollIndicator={false}>
+            {/* Timeline รายวัน: เวลา --- [กล่องชื่อสถานที่] */}
+            <View className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100 mb-4">
+              <Text className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">
+                กำหนดการ • วันที่ {days[previewDayIndex]?.day ?? 1}
+              </Text>
+
+              {days[previewDayIndex]?.stops?.map((stop, sIdx) => {
+                const isLast = sIdx === (days[previewDayIndex]?.stops?.length ?? 0) - 1;
+                return (
+                  <View key={`timeline-${stop.id}-${sIdx}`} className="flex-row">
+                    {/* คอลัมน์เวลา */}
+                    <View className="w-16 items-end pr-3 pt-1">
+                      <Text className="text-sm font-black text-violet-700">
+                        {stop.arriveTime || "--:--"}
+                      </Text>
+                      {stop.stayHours ? (
+                        <Text className="text-[10.5px] text-gray-400">
+                          {stop.stayHours} ชม.
+                        </Text>
+                      ) : null}
+                    </View>
+
+                    {/* เส้น timeline */}
+                    <View className="items-center mr-3">
+                      <View className="w-3.5 h-3.5 rounded-full bg-violet-600 border-2 border-white shadow-sm mt-1" />
+                      {!isLast && <View className="w-0.5 flex-1 bg-violet-200 my-1" />}
+                    </View>
+
+                    {/* กล่องชื่อสถานที่ */}
+                    <View className="flex-1 mb-4">
+                      <View className="bg-gray-50 border border-gray-100 rounded-2xl p-3">
+                        <Text className="text-[14px] font-bold text-gray-900">
+                          {stop.name}
+                        </Text>
+                        {stop.activity ? (
+                          <Text className="text-xs text-gray-600 mt-0.5">
+                            {stop.activity}
+                          </Text>
+                        ) : null}
+                        {stop.estimatedCost != null && stop.estimatedCost > 0 ? (
+                          <Text className="text-xs font-bold text-emerald-700 mt-1">
+                            ค่าเข้า/กิจกรรม: {money(stop.estimatedCost)}
+                          </Text>
+                        ) : null}
+                      </View>
+
+                      {/* ระยะทาง/เวลาขับไปจุดถัดไป */}
+                      {stop.driveToNextMins ? (
+                        <View className="flex-row items-center mt-1 ml-1">
+                          <Text className="text-[11px] text-gray-400 font-medium">
+                            ↓ ขับรถ {stop.driveToNextMins} นาที
+                            {stop.distanceFromPrevKm ? ` (${stop.distanceFromPrevKm.toFixed(1)} กม.)` : ""}
+                          </Text>
+                        </View>
+                      ) : null}
+                    </View>
+                  </View>
+                );
+              })}
+            </View>
+
+            {/* ข้อมูลงบประมาณที่คำนวณ (ตัวเลขโดดเด่นมาก) */}
+            <View className="rounded-3xl p-5 shadow-md shadow-violet-200 mb-6 bg-violet-600">
+              <View className="flex-row items-center justify-between mb-1">
+                <Text className="text-violet-100 text-xs font-bold uppercase tracking-wider">
+                  งบประมาณรวมเฉลี่ย
+                </Text>
+                <View className="bg-violet-500/40 px-2.5 py-0.5 rounded-full">
+                  <Text className="text-white text-xs font-bold">
+                    {travelers} ผู้เดินทาง
+                  </Text>
+                </View>
+              </View>
+
+              {/* ตัวเลขเด่น */}
+              <View className="flex-row items-baseline my-1">
+                <Text className="text-3xl font-black text-white">
+                  {money(budget?.perPerson)}
+                </Text>
+                <Text className="text-violet-200 text-sm font-semibold ml-2">
+                  / คน
+                </Text>
+              </View>
+              <Text className="text-violet-200 text-xs mb-3">
+                รวมทั้งหมดทั้งกลุ่ม: {money(budget?.total)}
+              </Text>
+
+              {/* Breakdown */}
+              <View className="bg-white/10 rounded-2xl p-3 border border-white/15">
+                <View className="flex-row justify-between py-1 border-b border-white/10">
+                  <Text className="text-violet-100 text-xs">
+                    {isEv ? "ค่าไฟฟ้า" : "ค่าน้ำมัน"}
+                  </Text>
+                  <Text className="text-white text-xs font-bold">{money(budget?.fuel)}</Text>
+                </View>
+                <View className="flex-row justify-between py-1 border-b border-white/10">
+                  <Text className="text-violet-100 text-xs">ค่าที่พัก</Text>
+                  <Text className="text-white text-xs font-bold">{money(budget?.lodging)}</Text>
+                </View>
+                <View className="flex-row justify-between py-1 border-b border-white/10">
+                  <Text className="text-violet-100 text-xs">ค่าเข้าชมสถานที่ / กิจกรรม</Text>
+                  <Text className="text-white text-xs font-bold">{money(budget?.activities)}</Text>
+                </View>
+                <View className="flex-row justify-between py-1">
+                  <Text className="text-violet-100 text-xs">ค่าอาหารโดยประมาณ</Text>
+                  <Text className="text-white text-xs font-bold">{money(budget?.food)}</Text>
+                </View>
+              </View>
+            </View>
+          </ScrollView>
+
+          {/* Footer Action Button */}
+          <View className="bg-white p-4 border-t border-gray-100">
+            <TouchableOpacity
+              onPress={() => {
+                setPreviewOpen(false);
+                onConfirm?.();
+              }}
+              activeOpacity={0.85}
+              className="bg-emerald-600 rounded-2xl py-3.5 items-center justify-center shadow-md shadow-emerald-200 flex-row"
+            >
+              <CheckBadgeIcon size={20} color="#FFFFFF" />
+              <Text className="text-white text-base font-black ml-2">
+                ยืนยันแพลนนี้และบันทึกเข้าทริป
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }

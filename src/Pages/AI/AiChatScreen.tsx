@@ -31,6 +31,8 @@ import {
   ArrowPathIcon,
   CheckBadgeIcon,
   ChevronRightIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
   QuestionMarkCircleIcon,
   PlayIcon,
 } from "react-native-heroicons/outline";
@@ -74,6 +76,7 @@ import {
   ChatSourceChips,
   InlinePlaceTags,
   splitAtPlaceName,
+  renderAnnotatedTextWithPlaces,
 } from "../../components/ChatTagChips";
 import TripQuestionFlow, {
   TripOriginTarget,
@@ -304,8 +307,12 @@ export default function AiChatScreen({
   /** sheet จุดใกล้เคียง */
   const [nearbyOpen, setNearbyOpen] = useState(false);
   const [nearbyMessageId, setNearbyMessageId] = useState<string | null>(null);
+  const [nearbyTargetDay, setNearbyTargetDay] = useState<number>(0);
   const [nearby, setNearby] = useState<NearbyPlace[]>([]);
   const [nearbyLoading, setNearbyLoading] = useState(false);
+  /** แบนเนอร์โฟลเดอร์ที่หัวแชท (ข้อ 7) */
+  const [folderBannerExpanded, setFolderBannerExpanded] = useState<boolean>(false);
+  const [folderBannerDismissed, setFolderBannerDismissed] = useState<boolean>(false);
   /** ที่พักที่ผู้ใช้เลือกจากข้อเสนอ — key = id ข้อความ */
   const [selectedLodging, setSelectedLodging] = useState<Record<string, string>>({});
   /**
@@ -876,14 +883,15 @@ export default function AiChatScreen({
     );
   };
 
-  /** เปิดรายการจุดใกล้เคียง (ระบบเสนอ — ผู้ใช้ต้องกดเพิ่มเอง) */
-  const openNearby = async (messageId: string, plan: TripPlan) => {
+  /** เปิดรายการจุดใกล้เคียง (ระบบเสนอ — ผู้ใช้ต้องกดเพิ่มเอง และระบุวันได้) */
+  const openNearby = async (messageId: string, plan: TripPlan, targetDayIndex = 0) => {
     setNearbyMessageId(messageId);
+    setNearbyTargetDay(targetDayIndex);
     setNearbyOpen(true);
     setNearbyLoading(true);
     setNearby([]);
     try {
-      const day = plan.days?.[0];
+      const day = plan.days?.[targetDayIndex] ?? plan.days?.[0];
       const stops = day?.stops ?? [];
       const lastStop = stops[stops.length - 1];
       const nearPoint =
@@ -915,7 +923,7 @@ export default function AiChatScreen({
     }
   };
 
-  /** ผู้ใช้กดเพิ่มจุดใกล้เคียง → คำนวณแผนใหม่ */
+  /** ผู้ใช้กดเพิ่มจุดใกล้เคียง → คำนวณแผนใหม่ (ใส่ในวันที่เลือก + อัปเดต route แบบ real-time) */
   const addNearbyStop = async (messageId: string, place: NearbyPlace) => {
     const current = extraStops[messageId] ?? [];
     const next = [
@@ -934,10 +942,16 @@ export default function AiChatScreen({
     setNearbyOpen(false);
     const plan = thread?.messages.find((m) => m.id === messageId)?.plan;
     if (!plan) return;
+    const existingStops = collectSelectedStops(plan.days);
+    const targetDayNumber = (nearbyTargetDay ?? 0) + 1;
+    const updatedSelectedStops = [
+      ...existingStops,
+      { name: place.name, day: targetDayNumber },
+    ];
     await runPlan(
       messageId,
       buildPlanRequest(slotsFromPlan(plan), {
-        selectedStops: collectSelectedStops(plan.days),
+        selectedStops: updatedSelectedStops,
         extraStops: next,
         fuelPriceOverride: fuelOverride[messageId] ?? null,
       })
@@ -1032,6 +1046,8 @@ export default function AiChatScreen({
           lodging: saved.budget?.lodging ?? 0,
           fuel: saved.budget?.fuel ?? 0,
           food: saved.budget?.food ?? 0,
+          activities: saved.budget?.activities ?? 0,
+          other: saved.budget?.other ?? 0,
           total: saved.budget?.total ?? 0,
           perPerson: saved.budget?.perPerson ?? 0,
           withinBudget: saved.budget?.withinBudget !== false,
@@ -1238,6 +1254,7 @@ export default function AiChatScreen({
         placeTag: result.placeTag,
         tags: result.tags,
         tagPlace: result.tagPlace,
+        placeTags: result.placeTags,
         sources: result.sources,
         tripDraft: mergedSlots
           ? {
@@ -1247,6 +1264,10 @@ export default function AiChatScreen({
             }
           : undefined,
       });
+
+      if (result.showFolderPicker) {
+        setPickerOpen(true);
+      }
       // โฟลเดอร์ไม่ถูกถอดออกหลังส่งแล้ว → ยัง "ติดอยู่" ตลอดเธอร์
       //   → ข้อความถัดไปยังได้บริบทโฟลเดอร์ไปให้ backend ทุกครั้ง (ข้อ 2.3)
       //   → ผู้ใช้ถอดเองได้ด้วยปุ่ม X บนชิปโฟลเดอร์ในช่องพิมพ์
@@ -1434,16 +1455,11 @@ export default function AiChatScreen({
    * → ถ้าไม่มี/ไม่เจอ → แสดงข้อความเดิมเปล่า ๆ (ไม่มีแท็กเกลอะ)
    */
   const renderMessageContent = (msg: AiChatMessage) => {
-    const parts = splitAtPlaceName(msg.content, msg.tagPlace);
-    if (!parts) return msg.content;
-    return (
-      <>
-        {parts.before}
-        <InlinePlaceTags placeTag={msg.placeTag} tags={msg.tags} />
-        {parts.match}
-        {parts.after}
-      </>
-    );
+    return renderAnnotatedTextWithPlaces(msg.content, msg.placeTags, {
+      placeName: msg.tagPlace,
+      placeTag: msg.placeTag,
+      tags: msg.tags,
+    });
   };
 
   /** การ์ดแผนที่คำนวณเสร็จแล้ว (ผูกกับข้อความที่สร้างมัน) */
@@ -1460,7 +1476,7 @@ export default function AiChatScreen({
       busy={replanning === messageId || planning}
       onConfirm={() => handleConfirmPlan(messageId, plan)}
       onEditWithAi={() => handleEditWithAi(messageId, plan)}
-      onAddStop={() => openNearby(messageId, plan)}
+      onAddStop={(dIndex) => openNearby(messageId, plan, dIndex ?? 0)}
       onRemoveStop={(stopId) => handleRemoveStop(messageId, plan, stopId)}
       onMoveStop={(stopId, dir) => handleMoveStop(messageId, plan, stopId, dir)}
       onSelectLodging={(lodging) => handleSelectLodging(messageId, plan, lodging)}
@@ -1553,6 +1569,73 @@ export default function AiChatScreen({
           </TouchableOpacity>
         )}
       </View>
+
+      {/* แบนเนอร์ประกาศโฟลเดอร์ที่หัวแชท พร้อมปุ่มย่อ/ซ่อน และปุ่มปิด (ข้อ 7) */}
+      {folder && !folderBannerDismissed && (
+        <View className="bg-violet-50/90 border-b border-violet-100 px-3 py-2">
+          <View className="flex-row items-center justify-between">
+            <TouchableOpacity
+              onPress={() =>
+                setBrowserFolder({
+                  id: folder.id,
+                  name: folder.name,
+                  clipCount: folderCtx?.clipCount ?? folder.videoIds.length,
+                })
+              }
+              activeOpacity={0.7}
+              className="flex-row items-center flex-1 mr-2"
+            >
+              <FolderIcon size={15} color="#7C3AED" />
+              <Text className="text-violet-900 text-[12px] font-bold ml-1.5 flex-1" numberOfLines={1}>
+                กำลังคุยเรื่อง: {folder.name} ({folderCtx?.clipCount ?? folder.videoIds.length} คลิป{folderCtx?.places.length ? ` • ${folderCtx.places.length} สถานที่` : ""})
+              </Text>
+              <Text className="text-[11px] text-violet-600 underline ml-1">ดูคลิป</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={() => setFolderBannerExpanded((v) => !v)}
+              className="p-1 mx-1 rounded-full bg-violet-100/70"
+              accessibilityLabel={folderBannerExpanded ? "ย่อ" : "ขยาย"}
+            >
+              {folderBannerExpanded ? (
+                <ChevronUpIcon size={13} color="#7C3AED" />
+              ) : (
+                <ChevronDownIcon size={13} color="#7C3AED" />
+              )}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={() => {
+                setAttachedFolderId(null);
+                setFolderBannerDismissed(true);
+              }}
+              className="p-1 rounded-full bg-violet-100/50"
+              accessibilityLabel="ปิดการเชื่อมต่อโฟลเดอร์นี้"
+            >
+              <XMarkIcon size={13} color="#7C3AED" />
+            </TouchableOpacity>
+          </View>
+
+          {/* รายชื่อสถานที่ในโฟลเดอร์เมื่อกดขยาย */}
+          {folderBannerExpanded && folderCtx && folderCtx.places.length > 0 && (
+            <View className="flex-row flex-wrap mt-2 pt-1.5 border-t border-violet-100">
+              {folderCtx.places.slice(0, 8).map((p) => (
+                <View
+                  key={p.key}
+                  className="bg-white border border-violet-100 rounded-full px-2 py-0.5 mr-1 mb-1"
+                >
+                  <Text className="text-[10.5px] text-violet-800 font-semibold">{p.name}</Text>
+                </View>
+              ))}
+              {folderCtx.places.length > 8 ? (
+                <Text className="text-[10.5px] text-gray-500 self-center">
+                  +{folderCtx.places.length - 8} แห่ง
+                </Text>
+              ) : null}
+            </View>
+          )}
+        </View>
+      )}
 
       {/* Mode toggle — visible only for hosts. Defaults to the historical
           tourist behaviour; host-self is a JWT-gated advisor that reads the
@@ -1658,34 +1741,6 @@ export default function AiChatScreen({
                   </View>
                 )}
                 <View className="max-w-[88%]">
-                  {/* โฟลเดอร์ที่ผู้ใช้แนบ → การ์ดที่กดเข้าไปดูคลิปข้างในได้ (ข้อ 2.2) */}
-                  {mine && item.folder ? (
-                    <TouchableOpacity
-                      onPress={() =>
-                        setBrowserFolder({
-                          id: item.folder!.id,
-                          name: item.folder!.name,
-                          clipCount: item.folder!.clipCount,
-                        })
-                      }
-                      activeOpacity={0.85}
-                      className="mb-1.5 self-end flex-row items-center bg-amber-50 border border-amber-200 rounded-2xl px-3 py-2"
-                    >
-                      <View className="w-8 h-8 rounded-xl bg-amber-100 items-center justify-center">
-                        <FolderIcon size={16} color="#D47A3A" />
-                      </View>
-                      <View className="ml-2 flex-1">
-                        <Text className="text-amber-800 text-[13px] font-bold" numberOfLines={1}>
-                          {item.folder.name}
-                        </Text>
-                        <Text className="text-amber-600 text-[11.5px]">
-                          {item.folder.clipCount} คลิป · แตะเพื่อดูข้างใน
-                        </Text>
-                      </View>
-                      <ChevronRightIcon size={16} color="#B45309" />
-                    </TouchableOpacity>
-                  ) : null}
-
                   {/* คลิปที่ผู้ใช้แนบมาพร้อมข้อความ → แตะแล้วเปิดดูเต็มจอ (แบบหน้าแรก) */}
                   {mine && item.video ? (
                     <>
@@ -1941,69 +1996,6 @@ export default function AiChatScreen({
           </View>
         )}
 
-        {/* ชิปโฟลเดอร์ที่แนบอยู่ (โฟลเดอร์ยัง "ติด" กับเธอร์นี้ → backend ได้บริบททุกข้อความ) */}
-        {attachedFolder && (
-          <View className="flex-row items-center mx-3 mt-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
-            <FolderIcon size={16} color="#D47A3A" />
-            <Text className="flex-1 text-amber-800 text-[12px] font-semibold ml-2" numberOfLines={1}>
-              {attachedFolder.name} • {attachedFolder.videoIds.length} คลิป
-            </Text>
-            <TouchableOpacity
-              onPress={() => {
-                setAttachedFolderId(null);
-                // ถอดออกแล้วแนบใหม่ → ให้การ์ดโฟลเดอร์โผล่ใหม่ได้
-                announcedFolderRef.current = null;
-              }}
-              className="p-0.5"
-            >
-              <XMarkIcon size={16} color="#B45309" />
-            </TouchableOpacity>
-          </View>
-        )}
-
-        {/* การ์ดโฟลเดอร์: รายชื่อสถานที่จริงที่โฟลเดอร์นี้ไป (แหล่งข้อมูลเดียวกับหน้าโฟลเดอร์) */}
-        {folder && folderCtx && folderCtx.places.length > 0 && (
-          <View className="mx-3 mt-2 bg-violet-50 border border-violet-100 rounded-xl px-3 py-2.5">
-            <View className="flex-row items-center">
-              <FolderIcon size={14} color="#7C3AED" />
-              <Text className="text-violet-800 text-[11.5px] font-bold ml-1.5" numberOfLines={1}>
-                {folder.name} • {folderCtx.clipCount} คลิป • {folderCtx.places.length} สถานที่
-              </Text>
-            </View>
-            <View className="flex-row flex-wrap mt-1.5">
-              {folderCtx.places.slice(0, 6).map((p) => (
-                <View
-                  key={p.key}
-                  className={`flex-row items-center rounded-full px-2 py-0.5 mr-1.5 mb-1 ${
-                    p.source === "registry" ? "bg-emerald-100" : "bg-amber-100"
-                  }`}
-                >
-                  {p.source === "registry" ? (
-                    <CheckBadgeIcon size={10} color="#059669" />
-                  ) : (
-                    <QuestionMarkCircleIcon size={10} color="#D97706" />
-                  )}
-                  <Text
-                    className={`text-[10.5px] font-semibold ml-1 ${
-                      p.source === "registry" ? "text-emerald-800" : "text-amber-800"
-                    }`}
-                  >
-                    {p.name}
-                  </Text>
-                </View>
-              ))}
-              {folderCtx.places.length > 6 ? (
-                <Text className="text-[10.5px] text-gray-500 self-center">
-                  +{folderCtx.places.length - 6} แห่ง
-                </Text>
-              ) : null}
-            </View>
-            <Text className="text-[10.5px] text-gray-500">
-              ลงทะเบียนแล้ว {folderCtx.registryHits} · จากคลิป {folderCtx.aiFallbacks}
-            </Text>
-          </View>
-        )}
-
         <View
           className="flex-row items-center px-3 pt-2 border-t border-gray-100"
           style={{ paddingBottom: Math.max(insets.bottom, 10) }}
@@ -2080,7 +2072,7 @@ export default function AiChatScreen({
               <TouchableOpacity
                 onPress={() => {
                   setAttachedFolderId(item.id);
-                  // เพิ่งแนบโฟลเดอร์ใหม่ → ให้การ์ดโฟลเดอร์โผล่ในแชทอีกครั้ง
+                  setFolderBannerDismissed(false);
                   announcedFolderRef.current = null;
                   setPickerOpen(false);
                 }}

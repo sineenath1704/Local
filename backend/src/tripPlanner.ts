@@ -717,7 +717,20 @@ export async function buildTripPlan(
     resolvedFuel?.pricePerLitre ?? electricityPrice
   );
   const food = Number(input.aiBudget?.food ?? 0) || 0;
-  const activities = Number(input.aiBudget?.activities ?? 0) || 0;
+  // คำนวณค่าเข้าชม/กิจกรรมจากราคาของแต่ละจุดแวะ (ถ้า AI ไม่ได้ส่งมา หรือส่ง 0 ให้ใช้ผลรวมราคาจากสถานที่จริง)
+  const stopsAdmissionSum = builtDays.reduce(
+    (sum, d) =>
+      sum +
+      d.stops.reduce(
+        (sSum, st) => sSum + (st.estimatedCost ? Number(st.estimatedCost) : 0),
+        0
+      ),
+    0
+  );
+  const activities =
+    Number(input.aiBudget?.activities ?? 0) > 0
+      ? Number(input.aiBudget!.activities)
+      : stopsAdmissionSum * Math.max(1, input.travelers);
   const other = Number(input.aiBudget?.other ?? 0) || 0;
   const lodging = 0;
   const total = totalFuel + lodging + food + activities + other;
@@ -1035,7 +1048,15 @@ function buildDayTimeline(args: {
         website: c.website ?? null,
         note: c.note ?? c.openingHours ?? null,
       },
-      estimatedCost: null,
+      estimatedCost:
+        c.price != null
+          ? typeof c.price === "number"
+            ? c.price
+            : (() => {
+                const m = String(c.price).match(/\d+(?:[.,]\d+)?/);
+                return m ? parseFloat(m[0].replace(/,/g, "")) : null;
+              })()
+          : null,
       note: c.note ?? null,
       dataSource: c.source ?? "community",
       verified: false,

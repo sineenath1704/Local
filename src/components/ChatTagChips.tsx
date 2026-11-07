@@ -116,6 +116,90 @@ export function InlinePlaceTags({
   );
 }
 
+/**
+ * วางแท็กหน้าชื่อสถานที่แต่ละแห่งในข้อความ (แยกตามแต่ละสถานที่ ไม่ใช่ติดที่จังหวัด)
+ */
+export function renderAnnotatedTextWithPlaces(
+  content: string,
+  placeTags?: { name: string; placeTag?: PlaceTag | null; tags?: string[] | null }[] | null,
+  singleTag?: { placeName?: string | null; placeTag?: PlaceTag | null; tags?: string[] | null }
+): React.ReactNode {
+  if (!content) return null;
+  const list = (placeTags ?? []).filter((p) => p && p.name && p.name.trim());
+  if (list.length === 0) {
+    if (singleTag?.placeName) {
+      const parts = splitAtPlaceName(content, singleTag.placeName);
+      if (parts) {
+        return (
+          <>
+            {parts.before}
+            <InlinePlaceTags placeTag={singleTag.placeTag} tags={singleTag.tags} />
+            {parts.match}
+            {parts.after}
+          </>
+        );
+      }
+    }
+    return content;
+  }
+
+  type MatchSpan = {
+    start: number;
+    end: number;
+    placeTag?: PlaceTag | null;
+    tags?: string[] | null;
+    matchText: string;
+  };
+  const spans: MatchSpan[] = [];
+
+  for (const item of list) {
+    const pattern = new RegExp(escapeRegExp(item.name.trim()).replace(/\s+/g, "\\s+"), "gi");
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(content)) !== null) {
+      spans.push({
+        start: match.index,
+        end: match.index + match[0].length,
+        placeTag: item.placeTag,
+        tags: item.tags,
+        matchText: match[0],
+      });
+      if (!pattern.global) break;
+    }
+  }
+
+  if (spans.length === 0) return content;
+
+  spans.sort((a, b) => a.start - b.start);
+  const nonOverlapping: MatchSpan[] = [];
+  let lastEnd = 0;
+  for (const s of spans) {
+    if (s.start >= lastEnd) {
+      nonOverlapping.push(s);
+      lastEnd = s.end;
+    }
+  }
+
+  const nodes: React.ReactNode[] = [];
+  let cursor = 0;
+  nonOverlapping.forEach((span, idx) => {
+    if (span.start > cursor) {
+      nodes.push(content.slice(cursor, span.start));
+    }
+    nodes.push(
+      <React.Fragment key={`tag-span-${idx}`}>
+        <InlinePlaceTags placeTag={span.placeTag} tags={span.tags} />
+        {span.matchText}
+      </React.Fragment>
+    );
+    cursor = span.end;
+  });
+  if (cursor < content.length) {
+    nodes.push(content.slice(cursor));
+  }
+
+  return <>{nodes}</>;
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 //  แหล่งที่มา (กด "ที่มา N แหล่ง" เพื่อกางลิงก์ออก)
 // ─────────────────────────────────────────────────────────────────────────

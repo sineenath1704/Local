@@ -731,12 +731,24 @@ router.post("/", async (req: Request, res: Response) => {
   }
 
   /**
-   * ชื่อสถานที่ที่จะติดแท็ก
-   * -------------------------------------------------------------
-   * เอาชื่อที่ Gemini สรุปว่าเป็นสถานที่หลักของคำถามก่อน (ตรงกับสิ่งที่คำตอบจะพูดถึงมากกว่า)
-   * → แท็กจะถูกติด "หน้าชื่อ" ในบรรทัดของคำตอบ (ฝั่งแอปวางให้เอง)
+   * กรองชื่อจังหวัดออก ไม่ให้ติดแท็กสถานที่บนชื่อจังหวัด
+   * เช่น ผู้ใช้ถาม "แนะนำที่เที่ยวน่าน" ห้ามเอาคำว่า "น่าน" ไปติดแท็ก [OTOP]/[ท่องเที่ยวทั่วไป]
    */
-  const tagTargetName = searchPlaceName || tagPlaceName;
+  const isProvinceOnly = (name?: string | null): boolean => {
+    if (!name) return false;
+    const trimmed = name.trim();
+    const detected = detectProvinceInText(trimmed);
+    if (!detected) return false;
+    const clean = trimmed.replace(/^(จังหวัด|จ\.)\s*/, "").trim();
+    return clean === detected;
+  };
+
+  /**
+   * ชื่อสถานที่ที่จะติดแท็ก
+   * (กรองออกหากตรงกับชื่อจังหวัด)
+   */
+  const rawTargetName = searchPlaceName || tagPlaceName;
+  const tagTargetName = isProvinceOnly(rawTargetName) ? null : rawTargetName;
 
   /**
    * กฎของผู้ใช้: นำชื่อไปค้นว่าเป็นสถานที่ OTOP ไหมก่อน
@@ -761,11 +773,7 @@ router.post("/", async (req: Request, res: Response) => {
   /**
    * ข้อมูลแท็กที่ส่งกลับฝั่งแอป
    * -------------------------------------------------------------
-   * กฎของผู้ใช้: **แท็กเฉพาะตอนที่คำตอบเอ่ยชื่อสถานที่จริง**
-   *   (เดิมติดแท็กทุกคำตอบ → ผู้ใช้เห็นแท็กเกลอะทุกข้อความ)
-   * → คำตอบที่ไม่เอ่ยชื่อสถานที่ = ไม่ส่งแท็กกลับไปเลย
-   * → คำตอบที่เอ่ยชื่อ = ส่ง `tagPlace` (ชื่อที่จะติดแท็ก) ไปด้วย
-   *   ให้ฝั่งแอปวางแท็กไว้ "หน้าชื่อ" ในบรรทัดเดียวกับคำตอบ
+   * กฎของผู้ใช้: **แท็กเฉพาะตอนที่คำตอบเอ่ยชื่อสถานที่จริง และแยกตามแต่ละสถานที่ ไม่ใช่ติดที่จังหวัด**
    */
   const mentionsPlaceName = (text: string, name: string | null): boolean => {
     if (!name) return false;
@@ -774,16 +782,46 @@ router.post("/", async (req: Request, res: Response) => {
     return !!target && norm(text).includes(target);
   };
 
-  const buildReplyMeta = (replyText: string): Record<string, unknown> => {
+  const buildReplyMeta = async (replyText: string): Promise<Record<string, unknown>> => {
     const meta: Record<string, unknown> = {};
     if (sources.length > 0) meta.sources = sources;
-    // ไม่ได้เอ่ยชื่อสถานที่ → ไม่ต้องมีแท็ก
-    if (!placeTag || !tagTargetName || !mentionsPlaceName(replyText, tagTargetName)) {
-      return meta;
+
+    // รวบรวมรายชื่อสถานที่ที่เป็นไปได้ทั้งหมดในบทสนทนานี้ เพื่อสแกนหาในคำตอบ
+    const candidateNames = new Set<string>();
+    if (tagTargetName && !isProvinceOnly(tagTargetName)) candidateNames.add(tagTargetName);
+    if (resolvedPlace?.placeName && !isProvinceOnly(resolvedPlace.placeName)) candidateNames.add(resolvedPlace.placeName);
+    if (clipPlaceName && !isProvinceOnly(clipPlaceName)) candidateNames.add(clipPlaceName);
+    if (chosenPlaceName && !isProvinceOnly(chosenPlaceName)) candidateNames.add(chosenPlaceName);
+    (resolvedFolder?.places ?? []).forEach((p) => {
+      if (p && !isProvinceOnly(p)) candidateNames.add(p);
+    });
+    (registryPlaceNames ?? []).slice(0, 30).forEach((p) => {
+      if (p && !isProvinceOnly(p)) candidateNames.add(p);
+    });
+
+    const placeTags: Array<{ name: string; placeTag: "otop" | "tourism"; tags?: string[] }> = [];
+    for (const name of candidateNames) {
+      if (mentionsPlaceName(replyText, name)) {
+        const isOtop = await isRegisteredOtopPlace(name);
+        placeTags.push({
+          name,
+          placeTag: isOtop ? "otop" : "tourism",
+          tags: topicTags.length > 0 ? topicTags : undefined,
+        });
+      }
     }
-    meta.placeTag = placeTag;
-    if (topicTags.length > 0) meta.tags = topicTags;
-    meta.tagPlace = tagTargetName;
+
+    if (placeTags.length > 0) {
+      meta.placeTags = placeTags;
+      meta.placeTag = placeTags[0].placeTag;
+      meta.tagPlace = placeTags[0].name;
+      if (topicTags.length > 0) meta.tags = topicTags;
+    } else if (placeTag && tagTargetName && mentionsPlaceName(replyText, tagTargetName)) {
+      meta.placeTag = placeTag;
+      if (topicTags.length > 0) meta.tags = topicTags;
+      meta.tagPlace = tagTargetName;
+    }
+
     return meta;
   };
 
@@ -804,10 +842,11 @@ router.post("/", async (req: Request, res: Response) => {
     if (placeCandidates && placeCandidates.length > 0) {
       const stub =
         "เจอสถานที่ชื่อเหมือนกันหลายแห่ง — เลือกอันที่ถูกที่สุดได้เลยครับ";
+      const replyMeta = await buildReplyMeta(stub);
       return res.json({
         reply: stub,
         placeCandidates,
-        ...buildReplyMeta(stub),
+        ...replyMeta,
       });
     }
     // งบ 4096: บล็อกข้อมูลโฟลเดอร์ยาวกว่าเดิม (รายชื่อ + ราคา + ที่อยู่ + คลิปย่อ)
@@ -819,9 +858,21 @@ router.post("/", async (req: Request, res: Response) => {
     //   → คำนวณ "ขาดอะไร" แบบ deterministic ในโค้ด (ไม่ให้โมเดลตัดสิน)
     // ถ้าโมเดลไม่เขียน TRIP_DRAFT → ไม่มี tripDraft → แอปไม่โชว์ปุ่มแผน
     const parsed = parseTripDraftLine(reply);
-    const cleanReply = parsed.reply.trim() || "ได้ค่ะ อยากให้ช่วยเรื่องอะไรต่อคะ";
+    let cleanReply = parsed.reply.trim() || "ได้ค่ะ อยากให้ช่วยเรื่องอะไรต่อคะ";
+
+    let showFolderPicker = false;
+    if (/SHOW_FOLDER_PICKER(?::\s*true)?/i.test(cleanReply)) {
+      showFolderPicker = true;
+      cleanReply = cleanReply.replace(/SHOW_FOLDER_PICKER(?::\s*true)?/gi, "").trim();
+    }
+
+    const replyMeta = await buildReplyMeta(cleanReply);
+    if (showFolderPicker) {
+      replyMeta.showFolderPicker = true;
+    }
+
     if (!parsed.slots) {
-      return res.json({ reply: cleanReply, ...buildReplyMeta(cleanReply) });
+      return res.json({ reply: cleanReply, ...replyMeta });
     }
 
     const merged = mergeTripSlots(clientSlots, parsed.slots);
@@ -829,13 +880,13 @@ router.post("/", async (req: Request, res: Response) => {
       (v) => v !== undefined && v !== null
     );
     if (!hasAnySlot) {
-      return res.json({ reply: cleanReply, ...buildReplyMeta(cleanReply) });
+      return res.json({ reply: cleanReply, ...replyMeta });
     }
 
     return res.json({
       reply: cleanReply,
       tripDraft: buildTripDraftResult(merged),
-      ...buildReplyMeta(cleanReply),
+      ...replyMeta,
     });
   } catch (err: any) {
     return sendError(res, err, req);

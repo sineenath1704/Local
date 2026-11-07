@@ -46,6 +46,14 @@ export interface ChatReply {
   tagPlace?: string;
   /** ลิงก์แหล่งที่มา — มีเมื่อคำตอบนี้มาจากการค้นเว็บ */
   sources?: ChatSource[];
+  /** แท็กแยกรายสถานที่ */
+  placeTags?: {
+    name: string;
+    placeTag?: PlaceTag;
+    tags?: string[];
+  }[];
+  /** สัญญาณให้แสดงรายการโฟลเดอร์ให้ผู้ใช้เลือก */
+  showFolderPicker?: boolean;
 }
 
 /**
@@ -248,6 +256,8 @@ export async function sendChat(
     placeTag?: unknown;
     tags?: unknown;
     tagPlace?: unknown;
+    placeTags?: unknown;
+    showFolderPicker?: unknown;
     sources?: unknown;
   }>({
     label: "ai-chat",
@@ -287,6 +297,16 @@ export async function sendChat(
   const tags = parseTopicTags(data.tags);
   const tagPlace = parseTagPlace(data.tagPlace);
   const sources = parseSources(data.sources);
+  const placeTags = Array.isArray(data.placeTags)
+    ? (data.placeTags as any[])
+        .filter((p) => p && typeof p.name === "string" && p.name.trim())
+        .map((p) => ({
+          name: String(p.name).trim(),
+          placeTag: parsePlaceTag(p.placeTag),
+          tags: parseTopicTags(p.tags),
+        }))
+    : undefined;
+  const showFolderPicker = data.showFolderPicker === true;
   return {
     reply: data.reply,
     ...(placeCandidates ? { placeCandidates } : {}),
@@ -295,5 +315,7 @@ export async function sendChat(
     ...(tags ? { tags } : {}),
     ...(tagPlace ? { tagPlace } : {}),
     ...(sources ? { sources } : {}),
+    ...(placeTags && placeTags.length > 0 ? { placeTags } : {}),
+    ...(showFolderPicker ? { showFolderPicker: true } : {}),
   };
 }

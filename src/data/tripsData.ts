@@ -176,6 +176,14 @@ export interface AiChatMessage {
    * → แอปวางแท็กไว้ "หน้าชื่อ" ในบรรทัดเดียวกับคำตอบ (ไม่ใช่ก้อนใต้ข้อความ)
    */
   tagPlace?: string | null;
+  /**
+   * แท็กแยกตามแต่ละสถานที่ (ข้อ 5)
+   */
+  placeTags?: {
+    name: string;
+    placeTag?: PlaceTag;
+    tags?: string[];
+  }[];
   /** ลิงก์แหล่งที่มา — มีเมื่อคำตอบนี้มาจากการค้นเว็บ */
   sources?: ChatSource[];
   /**
@@ -1010,6 +1018,8 @@ export interface TripBudget {
   lodging: number;
   fuel: number;
   food: number;
+  activities?: number;
+  other?: number;
   total: number;
   perPerson: number;
   withinBudget: boolean;
