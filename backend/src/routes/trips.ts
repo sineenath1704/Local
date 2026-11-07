@@ -37,7 +37,6 @@ import {
 } from "../fuelPrice";
 import { findLodging } from "../lodging";
 import { config, isPlacesConfigured } from "../config";
-import { searchPlaceCandidates } from "./places";
 
 const router = Router();
 
@@ -1529,6 +1528,40 @@ router.get("/fuel-price", async (_req: Request, res: Response) => {
   });
 });
 
+async function searchGooglePlaceText(query: string): Promise<any | null> {
+  if (!isPlacesConfigured()) return null;
+  const key = config.places.googleKey;
+  if (!key) return null;
+  const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(
+    query
+  )}&language=th&region=th&key=${encodeURIComponent(key)}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) return null;
+    const json: any = await res.json();
+    if (json?.status !== "OK" || !Array.isArray(json.results) || json.results.length === 0) return null;
+    const first = json.results[0];
+    const photoRef = first.photos?.[0]?.photo_reference;
+    return {
+      name: first.name,
+      address: first.formatted_address ?? null,
+      placeId: first.place_id,
+      latitude: first.geometry?.location?.lat ?? null,
+      longitude: first.geometry?.location?.lng ?? null,
+      rating: typeof first.rating === "number" ? first.rating : null,
+      userRatingCount: typeof first.user_ratings_total === "number" ? first.user_ratings_total : null,
+      photoUrl: photoRef ? `/places/photo?ref=${encodeURIComponent(photoRef)}` : null,
+      googleMapsUri: first.place_id ? `https://www.google.com/maps/place/?q=place_id:${first.place_id}` : null,
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * POST /trips/suggest-places
  * -------------------------------------------------------------
@@ -1588,8 +1621,7 @@ router.post("/suggest-places", async (req: Request, res: Response) => {
       suggestedList.slice(0, count).map(async (item) => {
         try {
           const query = `${item.name} ${destName}`.trim();
-          const candidates = await searchPlaceCandidates(query, { maxResults: 1 });
-          const best = candidates[0];
+          const best = await searchGooglePlaceText(query);
           if (!best) {
             return null;
           }
@@ -1601,14 +1633,14 @@ router.post("/suggest-places", async (req: Request, res: Response) => {
             placeId: best.placeId,
             latitude: best.latitude,
             longitude: best.longitude,
-            province: best.province || destName,
-            district: best.district,
-            subdistrict: best.subdistrict,
+            province: destName,
+            district: null,
+            subdistrict: null,
             rating: best.rating ?? null,
             userRatingCount: best.userRatingCount ?? null,
             photoUrl: best.photoUrl ?? null,
-            googleMapsUri: best.googleMapsUri || (best.placeId ? `https://www.google.com/maps/place/?q=place_id:${best.placeId}` : null),
-            types: best.types || [],
+            googleMapsUri: best.googleMapsUri,
+            types: [],
           };
         } catch {
           return null;

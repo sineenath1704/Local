@@ -229,8 +229,9 @@ router.post("/", async (req: Request, res: Response) => {
       : null;
 
   const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
-  const lastUserText = (lastUserMsg?.content ?? "").trim();
-  console.log(`[aiChat] 💬 [${mode}] ได้รับคำขอแชท | ข้อความ: "${lastUserText.slice(0, 100)}" | โฟลเดอร์: ${folderId ?? (folder?.name ?? "ไม่มี")}`);
+  const initialUserText = (lastUserMsg?.content ?? "").trim();
+  const folderDisplayName = folderId ?? (folder?.folderName ?? "ไม่มี");
+  console.log(`[aiChat] 💬 [${mode}] ได้รับคำขอแชท | ข้อความ: "${initialUserText.slice(0, 100)}" | โฟลเดอร์: ${folderDisplayName}`);
 
   if (messages.length === 0) {
     return res.status(400).json({
