@@ -41,15 +41,15 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.3",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "ws": "^8.22.0"
+    "cors": "^2.8.6",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.3",
+    "ws": "^8.22.1"
   },
   "devDependencies": {
-    "@types/cors": "^2.8.17",
-    "@types/express": "^4.17.21",
-    "@types/node": "^20.14.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^4.17.25",
+    "@types/node": "^20.19.43",
     "@types/ws": "^8.18.2",
     "@vercel/node": "^3.2.29",
     "ts-node-dev": "^2.0.0",
