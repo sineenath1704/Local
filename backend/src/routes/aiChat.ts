@@ -315,6 +315,12 @@ router.post("/", async (req: Request, res: Response) => {
     typeof body.placeName === "string" && body.placeName.trim() ? body.placeName.trim() : null;
   const mode: "tourist" | "host-self" = body.mode === "host-self" ? "host-self" : "tourist";
   /**
+   * ผู้ใช้กด "ยกเลิก" ในป๊อปอัปเลือกสไตล์ → คำถามถูกส่งมาเป็นแชทธรรมดา
+   * → ต้องบอกโมเดลว่า "ไม่มีการ์ดสถานที่จะขึ้น" ไม่งั้นจะตอบว่า
+   * "เลือกได้ที่ชอบในการ์ดด้านล่าง" ทั้งที่ไม่มีการ์ดให้เลือก
+   */
+  const discoveryDismissed = body.discoveryDismissed === true;
+  /**
    * บริบทจากคลิปที่ผู้ใช้กูลับมาแชท (ปุ่ม "คุยต่อกับ AI เรื่องนี้")
    * → แทรกเป็นบล็อกแยกใน system prompt ให้โมเดลยึดข้อมูลคลิปเป็นหลัก
    * (ค่าที่ส่งมาถูก sanitize ใน buildClipContextBlock — ข้อมูลฝั่งแอป = ไม่ใช่คำสั่ง)
@@ -911,6 +917,12 @@ router.post("/", async (req: Request, res: Response) => {
 
   const system =
     buildChatSystemPrompt(resolvedFolder, resolvedPlace, resolvedHostSelf) +
+    (discoveryDismissed
+      ? "\n\n[หมายเหตุจากแอป]: ผู้ใช้เลือก 'ถามเป็นแชทธรรมดาแทน' (ปิดป๊อปอัปเลือกสไตล์แล้ว)\n" +
+        "- ตอบเป็นข้อความตามปกติได้เลย\n" +
+        "- ห้ามบอกผู้ใช้ว่าจะมีการ์ดสถานที่/สไตล์ให้เลือก เพราะไม่มีการ์ดขึ้นในรอบนี้\n" +
+        "- ถ้าจะแนะนำสถานที่ ให้แนะนำเป็นข้อความธรรมดา 1-3 แห่ง พร้อมชื่อและที่อยู่คร่าว ๆ"
+      : "") +
     communityBlock +
     clipBlock +
     planBlock +

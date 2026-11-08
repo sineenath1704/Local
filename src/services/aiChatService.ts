@@ -426,6 +426,11 @@ export interface SendChatOptions {
    * ใน system prompt เพื่อให้เอไaiรู้ว่าแก้อะไรจากแผนเดิม
    */
   planContext?: unknown;
+  /**
+   * ผู้ใช้กด "ยกเลิก" ในป๊อปอัปเลือกสไตล์ → คำถามถูกส่งมาเป็นแชทธรรมดา
+   * → บอก backend ให้รู้ว่า "ไม่มีการ์ดสถานที่จะขึ้น" (ไม่งั้นโมเดลจะสัญญาว่าจะมีการ์ดให้เลือก)
+   */
+  discoveryDismissed?: boolean;
 }
 
 export async function sendChat(
@@ -489,6 +494,7 @@ export async function sendChat(
       clipContext: opts.clipContext ?? undefined,
       tripDraft: opts.tripDraft ?? undefined,
       planContext: opts.planContext ?? undefined,
+      discoveryDismissed: opts.discoveryDismissed ? true : undefined,
     },
     timeoutMs: API_TIMEOUT_MS * 3,
   });

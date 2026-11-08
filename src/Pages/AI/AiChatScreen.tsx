@@ -187,12 +187,34 @@ const PLAN_QUESTION_PATTERNS = [
   /ลำดับการเดินทาง/,
 ];
 
+/**
+ * คำตอบสั้น ๆ ที่เป็น "สไตล์" (เช่น "ทะเล" "คาเฟ่" "วัด")
+ * → เอไaiเพิ่งถามว่าอยากไปแนวไหน → เปิดป๊อปอัปให้เลือกสไตล์ต่อ
+ * (จำกัดความยาวไว้ กันไม่ให้จับคำถามยาว ๆ ที่บังเอิญมีคำเหล่านี้)
+ */
+const STYLE_KEYWORD_PATTERNS = [
+  /ทะเล/,
+  /หาด/,
+  /ภูเขา/,
+  /ป่า/,
+  /น้ำตก/,
+  /คาเฟ่/,
+  /วัด/,
+  /ตลาด/,
+  /ธรรมชาติ/,
+  /ประวัติศาสตร์/,
+  /ถนนคนเดิน/,
+];
+
 function shouldOfferDiscovery(text: string): boolean {
   const t = (text ?? "").trim();
   if (!t) return false;
   if (PLAN_QUESTION_PATTERNS.some((re) => re.test(t))) return false;
   if (FACT_QUESTION_PATTERNS.some((re) => re.test(t))) return false;
-  return DISCOVERY_PATTERNS.some((re) => re.test(t));
+  if (DISCOVERY_PATTERNS.some((re) => re.test(t))) return true;
+  // คำตอบสั้น ๆ ที่เป็นสไตล์ → เปิดป๊อปอัปเลือกสไตล์ต่อ
+  if (t.length <= 12 && STYLE_KEYWORD_PATTERNS.some((re) => re.test(t))) return true;
+  return false;
 }
 
 /**
@@ -1370,6 +1392,8 @@ export default function AiChatScreen({
       tripDraftOverride?: TripSlots;
       /** ข้ามการเปิดป๊อปอัปเลือกสไตล์ (ใช้ตอนผู้ใช้กด "ยกเลิก" ในป๊อปอัปเอง) */
       skipDiscovery?: boolean;
+      /** ผู้ใช้เลือก "ถามเป็นแชทธรรมดาแทน" → บอก backend ว่าไม่มีการ์ดสถานที่จะขึ้น */
+      discoveryDismissed?: boolean;
     }
   ) => {
     const body = text.trim();
@@ -1498,6 +1522,9 @@ export default function AiChatScreen({
             : null,
         // แผนที่กำลังแก้ → backend แทรกลง system prompt ให้เอไaiอ้างอิงได้
         planContext: opts?.planContext ?? null,
+        // ผู้ใช้กด "ยกเลิก" ในป๊อปอัปเลือกสไตล์ → บอก backend ว่าไม่มีการ์ดจะขึ้น
+        // (ไม่งั้นโมเดลจะตอบว่า "เลือกในการ์ดด้านล่าง" ทั้งที่ไม่มีการ์ด)
+        discoveryDismissed: opts?.discoveryDismissed ?? false,
       });
       // เอไaiสกัดช่องข้อมูลได้ → รวมกับที่ผู้ใช้เคยกรอก (ค่าที่โมเดลไม่รู้จะไม่ทับของเดิม
       // และพิกัดที่ผู้ใช้เลือกเองจะไม่หาย)
@@ -1648,7 +1675,7 @@ export default function AiChatScreen({
       setSending(false);
     }
     if (fallbackQuestion) {
-      void send(fallbackQuestion, { skipDiscovery: true });
+      void send(fallbackQuestion, { skipDiscovery: true, discoveryDismissed: true });
     }
   };
 
@@ -1662,7 +1689,7 @@ export default function AiChatScreen({
     // เปลี่ยนสไตล์ (คำถามเดิมอยู่ในแชทแล้ว) → ปิดไป การ์ดเดิมยังอยู่
     if (replaceId) return;
     if (!question.trim()) return;
-    void send(question, { skipDiscovery: true });
+    void send(question, { skipDiscovery: true, discoveryDismissed: true });
   };
 
   /** ติ๊ก/เอาออกสถานที่ในการ์ด (เก็บแยกต่อข้อความ) */
