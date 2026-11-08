@@ -36,6 +36,7 @@ import {
 import type { FolderPlace } from "../folderContext";
 import { lookupPlace, findNameMatches } from "../placeLookup";
 import type { PlaceChoice } from "../placeLookup";
+import { discoverPlaces, proposeStyles } from "../discovery";
 import type { LocationScope } from "../placeScope";
 import { detectProvinceInText } from "../communityContext";
 
@@ -174,6 +175,127 @@ function foldPlaceName(value: string): string {
   return value.toLowerCase().replace(/[\s\-_/()ฯๆ.,"'`]/g, "");
 }
 
+/**
+ * มีสล็อตแผนทริปที่ได้ค่าจริงอย่างน้อย 1 ช่องไหม
+ * -------------------------------------------------------------
+ * ใช้เป็น "ชั้นกัน" ก่อนส่ง `tripDraft` กลับแอป → ถ้าทุกช่องยังว่าง
+ * แปลว่าโมเดลแค่เผลอส่งสัญญาณมา ไม่ได้กำลังวางแผนจริง
+ * → ถ้าปล่อยผ่าน แอปจะเปิดการ์ดวางแผนทิ้งมาตอนผู้ใช้แค่อยากรู้
+ */
+function hasFilledSlot(slots: TripSlots, userText = "", strict = false): boolean {
+  // strict = true  → นับเฉพาะค่าที่ "ข้อความผู้ใช้รองรับ" (ค่าที่โมเดลสกัดมา
+  //   เพราะโมเดลมักเติมค่าเริ่มต้นเอง เช่น days=1 · startTime=08:00)
+  // strict = false → นับทุกค่าที่ไม่ใช่ค่าเริ่มต้นของระบบ (สล็อตที่แอปส่งมา
+  //   = ผู้ใช้กรอกในการ์ดเอง → เชื่อได้)
+  const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  const pointLabel = (v: unknown) => {
+    if (!v || typeof v !== "object") return "";
+    const label = (v as { label?: unknown }).label;
+    return typeof label === "string" ? label.trim() : "";
+  };
+
+  // จุดเริ่มต้น/จุดสิ้นสุด → มีชื่อจริง = ผู้ใช้บอกว่าจะไปที่ไหน
+  const startLabel = pointLabel(slots?.startPoint);
+  if (startLabel && (!strict || mentionsPlace(userText, startLabel))) return true;
+  const endLabel = pointLabel(slots?.endPoint);
+  if (endLabel && (!strict || mentionsPlace(userText, endLabel))) return true;
+
+  // วันที่ → ต้องมีคำบอกวันในข้อความด้วย (โมเดลเดาวันเองไม่ได้)
+  if (str(slots?.date) && (!strict || mentionsDate(userText))) return true;
+
+  // จำนวนวัน → 1 วันคือค่าเริ่มต้นของโมเดล → นับเมื่อผู้ใช้บอกจำนวนวันเอง
+  const days = Number(slots?.days);
+  if (Number.isFinite(days) && days > 0) {
+    if (!strict || mentionsDayCount(userText)) return true;
+  }
+
+  // เวลาเริ่มต้น → 08:00 คือค่าเริ่มต้นของระบบ
+  const startTime = str(slots?.startTime);
+  if (startTime && startTime !== DEFAULT_START_TIME) return true;
+
+  // ยานพาหนะ → โมเดลมักเติม "private_car" เอง → นับเมื่อผู้ใช้พูดถึงรถ
+  if (str(slots?.vehicle) && (!strict || mentionsVehicle(userText))) return true;
+  if (str(slots?.vehicleModel)) return true;
+
+  // จำนวนคน → 1 คนคือค่าเริ่มต้นของระบบ
+  const travelers = Number(slots?.travelers);
+  if (Number.isFinite(travelers) && travelers > DEFAULT_TRAVELERS) {
+    if (!strict || mentionsTravelers(userText)) return true;
+  }
+
+  // งบต่อคน → 3000 คือค่าเริ่มต้นของระบบ
+  const budget = Number(slots?.budgetPerPerson);
+  if (
+    Number.isFinite(budget) &&
+    budget > 0 &&
+    budget !== DEFAULT_BUDGET_PER_PERSON
+  ) {
+    if (!strict || mentionsBudget(userText)) return true;
+  }
+
+  // กลับคนละจุด → ผู้ใช้ต้องบอกว่าจะกลับคนละที่
+  if (slots?.returnMode === "custom") return true;
+
+  return false;
+}
+
+/**
+ * ค่าเริ่มต้นของระบบ — ถ้าโมเดลเติมค่าเหล่านี้เอง แปลว่ายังไม่ได้ "ตั้งใจวางแผน"
+ * (ผู้ใช้ไม่ได้พูดถึง → โมเดลเดาค่าเริ่มต้นให้ เช่น days=1 · startTime=08:00)
+ */
+const DEFAULT_START_TIME = "08:00";
+const DEFAULT_TRAVELERS = 1;
+const DEFAULT_BUDGET_PER_PERSON = 3000;
+
+/** ผู้ใช้บอกเรื่อง "จำนวนวัน" เองหรือเปล่า (เช่น "3 วัน" · "2 days") */
+function mentionsDayCount(text: string): boolean {
+  return /\d+\s*(?:วัน|days?)/i.test(text);
+}
+
+/** ผู้ใช้บอกวัน/ช่วงวันเองหรือเปล่า */
+function mentionsDate(text: string): boolean {
+  return /(?:วันนี้|พรุ่งนี้|คืนนี้|มื่อวาน|วันจันทร์|วันอังคาร|วันพุธ|วันพฤหัส|วันศุกร์|วันเสาร์|วันอาทิตย์|สัปดาห์หน้า|เดือนหน้า|ต้นเดือน|ปลายเดือน|\d{1,2}\/\d{1,2}|\d{1,2}\s*(?:ม\.ค\.|ก\.พ\.|มี\.ค\.|เม\.ย\.|พ\.ค\.|มิ\.ย\.|ก\.ค\.|ส\.ค\.|ก\.ย\.|ต\.ค\.|พ\.ย\.|ธ\.ค\.))/i.test(
+    text
+  );
+}
+
+/** ผู้ใช้บอกเรื่องยานพาหนะเองหรือเปล่า */
+function mentionsVehicle(text: string): boolean {
+  return /(?:ใช้รถ|ขับรถ|รถยนต์|รถมอเตอร์ไซค์|รถแวน|รถปิคอัพ|เช่ารถ|รถไฟ|เรือ)/i.test(
+    text
+  );
+}
+
+/** ผู้ใช้บอกเรื่องงบเองหรือเปล่า */
+function mentionsBudget(text: string): boolean {
+  // ถามราคา/งบแบบ "เท่าไหร่" = ถามข้อเท็จจริง ไม่ใช่ขอวางแผน
+  if (/(?:เท่าไหร่|ราคา|ประมาณ)/i.test(text)) return false;
+  return /(?:งบ|ค่าใช้จ่าย|บัตร|พันบาท|บาทต่อคน)/i.test(text);
+}
+
+/** ผู้ใช้บอกเรื่องจำนวนผู้เดินทางเองหรือเปล่า */
+function mentionsTravelers(text: string): boolean {
+  return /(?:ไปกับ|คนไป|ทั้งหมด|แนวนับ|ครอบครัว)/i.test(text);
+}
+
+/**
+ * ชื่อสถานที่ที่โมเดลสกัดมา ปรากฏในข้อความผู้ใช้หรือเปล่า
+ * -------------------------------------------------------------
+ * โมเดลอาจเดาชื่อที่ผู้ใช้ไม่ได้พูดถึง (หรือเขียนนามจังหวัดเต็ม)
+ * → เทียบแบบคลาวเคลื่อน: ข้อความต้องมีคำในชื่อนั้นสักคำ
+ */
+function mentionsPlace(text: string, label: string): boolean {
+  const t = text.toLowerCase();
+  const l = label.toLowerCase().trim();
+  if (!l) return false;
+  if (t.includes(l)) return true;
+  return l
+    .split(/[\s,·|/()-]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 4)
+    .some((s) => t.includes(s));
+}
+
 const router = Router();
 
 router.post("/", async (req: Request, res: Response) => {
@@ -227,6 +349,10 @@ router.post("/", async (req: Request, res: Response) => {
     typeof clipCtx.placeName === "string"
       ? clipCtx.placeName.trim().slice(0, 200) || null
       : null;
+
+  const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
+  const lastUserText = (lastUserMsg?.content ?? "").trim();
+  console.log(`[aiChat] 💬 [${mode}] ได้รับคำขอแชท | ข้อความ: "${lastUserText.slice(0, 100)}" | โฟลเดอร์: ${folderId ?? (folder?.folderName ?? "ไม่มี")}`);
 
   if (messages.length === 0) {
     return res.status(400).json({
@@ -680,8 +806,6 @@ router.post("/", async (req: Request, res: Response) => {
    * ค้นเว็บจริง (Gemini + Google Search) — อุดช่องว่างที่เอไaiเดิมตอบไม่ได้
    * เช่น "มีที่พักใกล้ๆไหม" "อะไรน่าไปบ้าง" "วัดนี้อยู่ที่ไหน"
    */
-  const lastUserText =
-    [...messages].reverse().find((m) => m.role === "user")?.content?.trim() ?? "";
   /** มีข้อมูลที่เชื่อถือได้จากระบบของเราแล้วหรือยัง (ทะเบียน/โฟลเดอร์/ชุมชน) */
   const hasInAppData =
     (!!resolvedPlace && resolvedPlace.source !== "google") ||
@@ -875,7 +999,10 @@ router.post("/", async (req: Request, res: Response) => {
       });
     }
     // งบ 4096: บล็อกข้อมูลโฟลเดอร์ยาวกว่าเดิม (รายชื่อ + ราคา + ที่อยู่ + คลิปย่อ)
+    console.log(`[aiChat] 🤖 กำลังส่ง Prompt ให้ AI ประมวลผล (Messages: ${messages.length}, System chars: ${system.length})...`);
+    const tAi0 = Date.now();
     const reply = await callAi({ system, messages, maxTokens: 4096 });
+    console.log(`[aiChat] ✅ AI ประมวลผลเสร็จสิ้นใน ${Date.now() - tAi0}ms (Reply: ${reply.length} chars)`);
 
     // ── สัญญาณแผนทริป ───────────────────────────────────────────────
     // โมเดลเขียนบรรทัด TRIP_DRAFT:{...} ต่อท้ายคำตอบเมื่อผู้ใช้กำลังวางแผนทริป
@@ -899,11 +1026,9 @@ router.post("/", async (req: Request, res: Response) => {
     const lastUser = [...messages].reverse().find((m) => m.role === "user");
     const lastUserAsk = (lastUser?.content ?? "").trim();
 
-    // ตรวจสอบว่าผู้ใช้กำลังต้องการวางแผนทริป หรือมี slots อยู่แล้ว
-    const isPlanningIntent =
-      Boolean(parsed.slots) ||
-      Boolean(clientSlots && Object.keys(clientSlots).length > 0) ||
-      /(?:แพลน|วางแผน|จัดทริป|ทริป|เที่ยว|itinerary|plan)/i.test(lastUserAsk);
+    // ตรวจสอบว่าผู้ใช้กำลังต้องการวางแผนทริป หรือโมเดลส่ง slots มา
+    const hasExplicitPlanKeyword = /(?:แพลน|วางแผน|จัดทริป|itinerary|plan)/i.test(lastUserAsk);
+    const isPlanningIntent = Boolean(parsed.slots) || hasExplicitPlanKeyword;
 
     if (isPlanningIntent) {
       let merged = mergeTripSlots(clientSlots, parsed.slots ?? {});
@@ -916,6 +1041,31 @@ router.post("/", async (req: Request, res: Response) => {
         }
       }
 
+      /**
+       * ชั้นกันพลาด (สำคัญ) — การ์ดวางแผนทริปต้องไม่โผล่มาเอง
+       * -------------------------------------------------------------
+       * เคยเป็นบั๊ก: ถาม "มีที่ไหนน่าเที่ยวบ้าง" → โมเดลส่ง TRIP_DRAFT ที่สล็อต
+       * ว่างทั้งหมด → backend ส่ง tripDraft กลับ → แอปเปิดการ์ด "วางแผนทริป
+       * คำถามที่ 1/5" ทันที ทั้งที่ผู้ใช้แค่อยากรู้
+       *
+       * แก้โดย: ส่ง tripDraft กลับก็ต่อเมื่อ
+       *   · มีสล็อตที่ได้ค่าจริงอย่างน้อย 1 ช่อง (เช่น จุดเริ่มต้น/วันที่/จำนวนวัน) หรือ
+       *   · ผู้ใช้ขอวางแผนชัดเจน (แพลน/จัดทริป/itinerary)
+       *
+       * ข้อสำคัญ: ค่าที่โมเดลเดาเอง (1 วัน · 08:00 · กลับจุดเดิม · รถส่วนตัว)
+       * ไม่นับว่า "ผู้ใช้กำลังวางแผน" → ต้องมีคำรองรับในข้อความผู้ใช้ด้วย
+       */
+      const userAlreadyPlanning = hasFilledSlot(clientSlots, lastUserAsk);
+      const modelFoundIntent = hasFilledSlot(merged, lastUserAsk, true);
+      if (!userAlreadyPlanning && !modelFoundIntent && !hasExplicitPlanKeyword) {
+        console.log(
+          `[aiChat] 🧹 โมเดลส่ง TRIP_DRAFT แต่สล็อตว่าง + ผู้ใช้ไม่ได้ขอแผน → ไม่เปิดการ์ดแผน`
+        );
+        return res.json({ reply: cleanReply, ...replyMeta });
+      }
+
+      console.log(`[aiChat] 🗺️ ตรวจพบสัญญาณวางแผนทริป (isPlanningIntent=true) | ส่ง tripDraft ให้แอป:`, merged);
+      console.log(`[aiChat] 📤 ส่งคำตอบกลับแอป | "${cleanReply.slice(0, 60)}..."`);
       // ส่ง tripDraft กลับไปเสมอ เพื่อให้แอปเปิดการ์ด TripQuestionFlow ขึ้นมาให้ผู้ใช้กรอก/เลือกทันที
       return res.json({
         reply: cleanReply,
@@ -925,10 +1075,12 @@ router.post("/", async (req: Request, res: Response) => {
     }
 
     if (!parsed.slots) {
+      console.log(`[aiChat] 📤 ส่งคำตอบทั่วไปกลับแอป | "${cleanReply.slice(0, 60)}..."`);
       return res.json({ reply: cleanReply, ...replyMeta });
     }
 
     const merged = mergeTripSlots(clientSlots, parsed.slots);
+    console.log(`[aiChat] 📤 ส่งคำตอบกลับแอปพร้อม slots:`, merged);
     return res.json({
       reply: cleanReply,
       tripDraft: buildTripDraftResult(merged),
@@ -936,6 +1088,73 @@ router.post("/", async (req: Request, res: Response) => {
     });
   } catch (err: any) {
     return sendError(res, err, req);
+  }
+});
+
+/**
+ * POST /ai-chat/discovery
+ * -------------------------------------------------------------
+ * เส้นทาง "ถามแนะนำสถานที่" (ประเภท D) — แยกจาก /ai-chat เพราะ
+ * ผู้ใช้แค่ "อยากรู้" ไม่ได้ขอแผน → คำตอบต้องเป็นการ์ดสถานที่
+ * ให้ผู้ใช้ติ๊กเลือก ไม่ใช่ตารางวางแผนทริป
+ *
+ * Body: {
+ *   messages: { role, content }[],   // ประวัติแชท (เอาไว้หาคำถามล่าสุด)
+ *   area?: string,                   // พื้นที่ที่ผู้ใช้เลือก/ระบุ
+ *   style?: { id, label, emoji, desc, query }   // ถ้ายังไม่เลือกสไตล์ → ไม่ต้องส่ง
+ * }
+ *
+ * Response:
+ *   · ไม่ส่ง style → { styles: [...] }        (AI เสนอสไตล์ตามคำถาม)
+ *   · ส่ง style    → { reply, places: [...] }  (คำตอบ + การ์ดสถานที่)
+ */
+router.post("/discovery", async (req: Request, res: Response) => {
+  const body = req.body ?? {};
+  const messages: AiMessage[] = Array.isArray(body.messages) ? body.messages : [];
+  const area = typeof body.area === "string" ? body.area.trim().slice(0, 80) : "";
+  const styleInput =
+    body.style && typeof body.style === "object" ? (body.style as any) : null;
+
+  // คำถามล่าสุดของผู้ใช้ = เกณฑ์ในการเสนอสไตล์/หาสถานที่
+  const lastUserAsk = [...messages]
+    .reverse()
+    .find((m) => m.role === "user")
+    ?.content?.trim();
+  const question = (lastUserAsk ?? "").slice(0, 500);
+
+  try {
+    // ── (1) ยังไม่เลือกสไตล์ → เสนอสไตล์ให้เลือกก่อน ──
+    if (!styleInput) {
+      const styles = await proposeStyles({ question, area });
+      console.log(
+        `[ai-chat/discovery] เสนอสไตล์ ${styles.length} แบบ · คำถาม="${question.slice(0, 60)}"`
+      );
+      return res.json({ styles });
+    }
+
+    // ── (2) เลือกสไตล์แล้ว → หาสถานที่จริง + ให้เอไaiตอบตามบริบท ──
+    const result = await discoverPlaces({
+      question,
+      area,
+      style: styleInput,
+      count: 6,
+    });
+    console.log(
+      `[ai-chat/discovery] สไตล์="${result.style.label}" · พื้นที่="${result.area ?? "-"}" · ` +
+        `ได้สถานที่ ${result.places.length} แห่ง`
+    );
+    return res.json({
+      reply: result.reply,
+      places: result.places,
+      style: result.style,
+      area: result.area,
+    });
+  } catch (err: any) {
+    console.error("[ai-chat/discovery] Error:", err?.message);
+    return res.status(500).json({
+      error: "DISCOVERY_FAILED",
+      message: err?.message ?? "ค้นหาสถานที่ไม่สำเร็จ",
+    });
   }
 });
 

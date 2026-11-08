@@ -132,6 +132,60 @@ export interface ChatFolderAttachment {
   clipCount: number;
 }
 
+/**
+ * สไตล์การท่องเที่ยวที่ผู้ใช้เลือกก่อนหาสถานที่
+ * -------------------------------------------------------------
+ * มาจาก `POST /ai-chat/discovery` (ไม่ส่ง style) → เอไaiเสนอตามคำถาม
+ * ถ้าเอไaiล้มเหลว แอปจะใช้ชุดสำรอง 6 แบบแทน
+ */
+export interface DiscoveryStyle {
+  /** id สั้น ๆ ใช้เก็บค่าที่ผู้ใช้เลือก */
+  id: string;
+  /** ชื่อสไตล์ที่แสดงในป๊อปอัป */
+  label: string;
+  /** อีโมจิประกอบสไตล์ */
+  emoji: string;
+  /** คำอธิบายสั้น ๆ ว่าสไตล์นี้คืออะไร */
+  desc: string;
+  /** คำค้นภาษาไทยสำหรับ Google */
+  query: string;
+}
+
+/**
+ * การ์ดสถานที่ 1 แห่ง ในแชท (ประเภท D — "ถามแนะนำสถานที่")
+ * -------------------------------------------------------------
+ * ข้อมูลทั้งหมดมาจาก Google Places จริง (ชื่อ · รูป · ดาว · พิกัด ·
+ * เว็บไซต์) · คำอธิบายสั้น ๆ เขียนโดยเอไai
+ */
+export interface ChatPlaceCard {
+  placeId: string;
+  name: string;
+  /** คำอธิบายสั้น ๆ ว่าสถานที่นี้คืออะไร */
+  description: string;
+  address: string | null;
+  /** จังหวัดของสถานที่ */
+  area: string | null;
+  district: string | null;
+  subdistrict: string | null;
+  /** ประเภทสถานที่ (วัด · คาเฟ่ · จุดท่องเที่ยว ...) */
+  category: string | null;
+  /** path ของรูปใน backend — แอปต้องแปลงเป็น URL เต็มก่อนโหลด */
+  photoUrl: string | null;
+  rating: number | null;
+  userRatingsTotal: number | null;
+  /** เว็บไซต์/เพจของสถานที่ (ถ้าไม่มี → ซ่อนปุ่ม) */
+  website: string | null;
+  /** ลิงก์เปิดใน Google Maps */
+  googleMapsUrl: string | null;
+  lat: number | null;
+  lng: number | null;
+  openingHours: string | null;
+  /** ระดับราคาจาก Google (0-4) */
+  priceLevel: number | null;
+  /** ประเภทดิบจาก Google (ใช้กรอง/แสดงผล) */
+  types: string[];
+}
+
 export interface AiChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -148,6 +202,15 @@ export interface AiChatMessage {
    * มีแค่ตอนที่คำถามแตะสถานที่ที่ยังไม่มีข้อมูลในระบบ และ Google คืนมาหลายแห่ง
    */
   placeCandidates?: PlaceChoice[];
+  /**
+   * การ์ดสถานที่ที่แนะนำ (ประเภท D — "ถามแนะนำสถานที่")
+   * → แสดงเรียงลงมาใต้คำตอบ ผู้ใช้ติ๊กเลือกได้ว่าอยากไปที่ไหน
+   */
+  placeCards?: ChatPlaceCard[];
+  /**
+   * สไตล์ที่ผู้ใช้เลือกจากป๊อปอัป (การ์ดสถานที่จะแสดงป้ายสไตล์นี้บนชื่อสถานที่)
+   */
+  discoveryStyle?: DiscoveryStyle;
   /** placeId ที่ผู้ใช้เลือกจาก `placeCandidates` (ส่งกลับไปให้ backend ดึงรายละเอียดของอันนี้) */
   chosenPlaceId?: string;
   /**

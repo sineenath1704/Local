@@ -402,6 +402,9 @@ export async function searchPlaceCandidates(
       primaryType: p.types?.[0] ?? null,
       primaryTypeDisplayName: null,
       priceLevel: p.price_level ?? null,
+      // รูปจากผลค้น (Legacy) — ไม่งั้นการ์ดสถานที่จะไม่มีรูป
+      // (ถ้ายังไม่มี จะไปดึงจาก details ต่อ)
+      photoUrl: photoPathFor(p.photos?.[0]?.photo_reference ?? null, null),
     } as PlaceCandidate;
   });
 }

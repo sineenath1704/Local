@@ -39,7 +39,12 @@ import {
 import { useAiPlanner } from "../../state/AiPlannerContext";
 import { useInteractions } from "../../state/InteractionContext";
 import { useAuth } from "../../state/AuthContext";
-import { sendChat } from "../../services/aiChatService";
+import {
+  sendChat,
+  requestDiscoveryPlaces,
+  requestDiscoveryStyles,
+  FALLBACK_DISCOVERY_STYLES,
+} from "../../services/aiChatService";
 import { asAiError } from "../../services/aiHttp";
 import { getFolderContext, type FolderContextInfo } from "../../services/folderContextService";
 import {
@@ -62,11 +67,15 @@ import {
   TripPlanMeta,
   TripPlanPoint,
   TripSlots,
+  TRIP_MAX_DAYS,
   computeTripMissing,
   formatPlanSummary,
   isTripPlanReady,
   normalizeTripSlotsShape,
   slotsToWire,
+  tripAddDays,
+  tripTodayIso,
+  type DiscoveryStyle,
 } from "../../data/tripsData";
 import type { VideoPost } from "../../data/homeFeedData";
 import OriginSelectorModal from "../../components/OriginSelectorModal";
@@ -88,6 +97,8 @@ import {
   TripDestinationPickerModal,
   type TripExtraStop,
 } from "../../components/TripDestinationPickerModal";
+import { ChatStylePickerModal } from "../../components/ChatStylePickerModal";
+import { ChatPlaceCard } from "../../components/ChatPlaceCard";
 import { parseGoogleMapsUrl } from "../../services/savedPlacesService";
 import { resolvePlaceCoords } from "../../services/placesService";
 import { loadSavedVideos } from "../../services/interactionService";
@@ -125,6 +136,64 @@ const HOST_SUGGESTIONS = [
   "วันไหนที่ร้านปิดบ้าง",
   "ช่วยแต่งแคปชันโปรโมทห้องพักหน่อย",
 ];
+
+/**
+ * เช็คว่าคำถามควรเปิด "ป๊อปอัปเลือกสไตล์" หรือไม่ (ประเภท D)
+ * -------------------------------------------------------------
+ * เปิดเฉพาะคำถามแบบ "อยากรู้ว่ามีที่ไหนน่าเที่ยว / อะไรน่าไป" เท่านั้น
+ * · ถามข้อเท็จจริง (ราคา · เวลาเปิด · เบอร์ · ที่อยู่) → ตอบเป็นข้อความปกติ
+ * · ขอวางแผนทริป (แพลน · จัดทริป · กี่วัน) → ไปทางการ์ดวางแผนเดิม
+ * · โหมด "ถามเกี่ยวกับธุรกิจ" → ไม่เกี่ยว (เช็คที่ผู้เรียก)
+ */
+const DISCOVERY_PATTERNS = [
+  /มีที่ไหน/,
+  /มีอะไร[^?]{0,24}น่า/,
+  /อะไร[^?]{0,24}น่า/,
+  /ที่ไหน[^?]{0,24}น่า/,
+  /ช่วยแนะนำ/,
+  /แนะนำ(ที่|สถานที่|จุด|ร้าน|คาเฟ่|อาหาร|ร้านอาหาร|แหล่ง)/,
+  /สถานที่[^?]{0,24}น่า/,
+  /เที่ยวที่ไหน/,
+  /ที่น่าไป/,
+  /\bwhere to go\b/i,
+  /\bthings to do\b/i,
+  /\bwhat to do\b/i,
+];
+
+const FACT_QUESTION_PATTERNS = [
+  /ราคา/,
+  /เท่าไหร่/,
+  /เปิด(วัน|ตอน|เวลา|ไหม)/,
+  /ปิด(วัน|ตอน|กี่|ไหม)/,
+  /เบอร์/,
+  /โทร/,
+  /ที่อยู่/,
+  /อยู่ที่ไหน/,
+  /อยู่ตรงไหน/,
+  /เส้นทาง/,
+];
+
+const PLAN_QUESTION_PATTERNS = [
+  /แพลน/,
+  /วางแผน/,
+  /จัดทริป/,
+  /ทริป/,
+  /กี่วัน/,
+  /ตาราง(เวลา)?/,
+  /ไทม์ไลน์/i,
+  /itinerary/i,
+  /แผนการเดินทาง/,
+  /ประมาณการค่าใช้จ่าย/,
+  /ลำดับการเดินทาง/,
+];
+
+function shouldOfferDiscovery(text: string): boolean {
+  const t = (text ?? "").trim();
+  if (!t) return false;
+  if (PLAN_QUESTION_PATTERNS.some((re) => re.test(t))) return false;
+  if (FACT_QUESTION_PATTERNS.some((re) => re.test(t))) return false;
+  return DISCOVERY_PATTERNS.some((re) => re.test(t));
+}
 
 /**
  * ดึงพิกัด "lat,lng" ออกจากข้อมูลที่คลิปบันทึกไว้
@@ -329,6 +398,32 @@ export default function AiChatScreen({
   /** Modal เลือกจุดหมายปลายทาง (โฟลเดอร์ / ค้นหา / ให้ AI คิดให้) เมื่อไม่มีสถานที่สำหรับวางแผน */
   const [showDestinationPicker, setShowDestinationPicker] = useState<boolean>(false);
   const [pendingPlanMessageId, setPendingPlanMessageId] = useState<string | null>(null);
+
+  // ── เส้นทาง "ถามแนะนำสถานที่" (ป๊อปอัปเลือกสไตล์ → การ์ดสถานที่) ──
+  /** ป๊อปอัปเลือกสไตล์เปิดอยู่ไหม */
+  const [stylePickerOpen, setStylePickerOpen] = useState(false);
+  /** สไตล์ที่เอไaiเสนอตามคำถาม (กำลังโหลดอยู่ → แอปมีชุดสำรองให้แทน) */
+  const [discoveryStyles, setDiscoveryStyles] = useState<DiscoveryStyle[]>([]);
+  const [discoveryStylesLoading, setDiscoveryStylesLoading] = useState(false);
+  /** กำลังดึงการ์ดสถานที่จริงจาก Google (หลังผู้ใช้เลือกสไตล์แล้ว) */
+  const [discoveryLoading, setDiscoveryLoading] = useState(false);
+  /** คำถามที่กำลังรอเลือกสไตล์ (แสดงในหัวป๊อปอัป) */
+  const [discoveryQuestion, setDiscoveryQuestion] = useState("");
+  /** สถานที่ที่ผู้ใช้ติ๊กในการ์ด — key = id ข้อความ */
+  const [selectedPlaceCards, setSelectedPlaceCards] = useState<Record<string, string[]>>({});
+  /** คำถามที่กำลังรอเลือกสไตล์ (เก็บใน ref เพราะ handler อาจถูกเรียกจากป๊อปอัปที่ค้างอยู่) */
+  const discoveryQuestionRef = useRef("");
+  /** ข้อความที่จะถูกแทนที่เมื่อกด "สถานที่อื่น / เปลี่ยนสไตล์" (null = ข้อความใหม่) */
+  const discoveryReplaceIdRef = useRef<string | null>(null);
+  /** ผู้ใช้เลือกสไตล์ไปแล้วไหม → ถ้าเลือกแล้ว สไตล์จากเอไaiที่มาช้าต้องไม่ทับรายการ */
+  const discoveryPickedRef = useRef(false);
+  /**
+   * กันส่งซ้ำขณะที่เอไaiกำลังตอบ
+   * -------------------------------------------------------------
+   * ใช้ ref ไม่ใช่ state เพราะ handler ที่ถูกเรียกจากป๊อปอัป/แอลเอิร์ต
+   * จะเห็นค่า state เก่า (ตอนกด "ยกเลิก" → state ยังไม่ได้อัปเดต)
+   */
+  const sendingRef = useRef(false);
 
   const listRef = useRef<FlatList<AiChatMessage>>(null);
   const autoSentRef = useRef(false);
@@ -696,15 +791,23 @@ export default function AiChatScreen({
   };
 
   /** กด "ส่งข้อมูล" ในการ์ดช่องข้อมูล → นำค่าที่กรอกไปคำนวณแผน */
-  const handleCreatePlan = async (messageId: string) => {
+  const handleCreatePlan = async (
+    messageId: string,
+    opts?: {
+      /** จุดที่ผู้ใช้เพิ่งเลือก (ค่าใหม่ → ใช้ค่านี้ทันที ไม่ต้องรอ state) */
+      extraStops?: PlanTripRequest["extraStops"];
+      /** ข้อความที่จะอัปเดตการ์ดแผน (ข้ามการอ้างอิงข้อความที่กำลังแก้อยู่) */
+      targetId?: string;
+    }
+  ) => {
     // ถ้ากำลังแก้แผนเดิมอยู่ → แผนใหม่ต้องไปทับแผนเดิม ไม่ใช่สร้างการ์ดใหม่
-    const targetId = editingPlanMessageId ?? messageId;
+    const targetId = opts?.targetId ?? editingPlanMessageId ?? messageId;
     // ใช้ค่าล่าสุดเสมอ (ผู้ใช้อาจแก้การ์ดระหว่างที่รอเอไaiตอบ)
     const rawSlots = draftSlotsRef.current;
     console.log("[AiChatScreen] handleCreatePlan called, rawSlots:", rawSlots);
 
     // ตรวจสอบก่อนว่ามีสถานที่ให้วางแผนหรือไม่ (ถ้าไม่มีทั้งโฟลเดอร์ และไม่มี extraStops)
-    const currentExtra = extraStops[targetId] ?? [];
+    const currentExtra = opts?.extraStops ?? extraStops[targetId] ?? [];
     const hasFolder = Boolean(attachedFolderId || thread?.folderId);
     if (!hasFolder && currentExtra.length === 0) {
       console.log("[AiChatScreen] ไม่มีสถานที่และไม่มีโฟลเดอร์ เปิด TripDestinationPickerModal ทันที");
@@ -737,7 +840,7 @@ export default function AiChatScreen({
       const plan = await runPlan(
         targetId,
         buildPlanRequest(slots, {
-          extraStops: extraStops[targetId] ?? [],
+          extraStops: opts?.extraStops ?? extraStops[targetId] ?? [],
           fuelPriceOverride: fuelOverride[targetId] ?? null,
         })
       );
@@ -754,6 +857,71 @@ export default function AiChatScreen({
     } finally {
       setPlanning(false);
     }
+  };
+
+  /**
+   * ปุ่ม "สร้างแพลนทริปจาก N แห่งที่เลือก" (ใต้การ์ดสถานที่)
+   * -------------------------------------------------------------
+   * สถานที่ที่ติ๊กมีพิกัดจาก Google → ส่งเป็นจุดของแผน
+   * แล้วเรียกตัวสร้างแผนเดิมของแอป (ผู้ใช้ต้องกดเอง ไม่อัตโนมัติ)
+   *
+   * ค่าเริ่มต้นของแผนต้องมาจากสถานที่ที่ผู้ใช้ติ๊กจริง ไม่ใช่ค่าเริ่มต้นของระบบ
+   * (ค่าเริ่มต้นของระบบคือ "เชียงใหม่ (จุดเริ่มต้น)" + 1 วัน → ถ้าสถานที่ที่เลือก
+   *  อยู่คนละจังหวัด แผนจะออกมาเพี้ยนทันที) จึงคิดให้เองดังนี้
+   *   · จุดเริ่มต้น = สถานที่แรกที่ติ๊ก (ถ้าผู้ใช้เคยกรอกจุดเริ่มต้นไว้แล้ว → ใช้ค่าของผู้ใช้)
+   *   · จำนวนวัน = 3 จุดต่อวัน (1 วันถ้าเลือกไม่เกิน 3 แห่ง · ไม่เกิน 7 วัน)
+   *   · วันที่ = วันนี้ (ถ้าผู้ใช้เคยเลือกช่วงวันที่ไว้แล้ว → ใช้ค่าของผู้ใช้)
+   */
+  const handleCreatePlanFromCards = async (messageId: string) => {
+    const msg = thread?.messages.find((m) => m.id === messageId);
+    const cards = msg?.placeCards ?? [];
+    const chosen = selectedPlaceCards[messageId] ?? [];
+    const picked = cards.filter(
+      (c) => chosen.includes(c.placeId) && c.lat != null && c.lng != null
+    );
+    if (picked.length === 0) {
+      Alert.alert(
+        "ยังไม่ได้เลือกสถานที่",
+        "ติ๊กกล่องสถานที่ที่อยากไปก่อน แล้วกดปุ่มสร้างแพลนทริปอีกครั้ง"
+      );
+      return;
+    }
+    const stops: PlanTripRequest["extraStops"] = picked.map((p) => ({
+      label: p.name,
+      address: p.address ?? null,
+      coords: { lat: p.lat as number, lng: p.lng as number },
+    }));
+    setExtraStops((prev) => ({ ...prev, [messageId]: stops }));
+
+    // ── ค่าเริ่มต้นของแผน: มาจากสถานที่ที่ผู้ใช้ติ๊กจริง ──────────────
+    const base = draftSlotsRef.current;
+    const first = picked[0];
+    const startPoint: TripPlanPoint = base.startPoint?.coords
+      ? base.startPoint
+      : {
+          label: first.name,
+          address: first.address ?? null,
+          coords: { lat: first.lat as number, lng: first.lng as number },
+        };
+    const autoDays = Math.min(
+      TRIP_MAX_DAYS,
+      Math.max(1, Math.ceil(picked.length / 3))
+    );
+    const startDate = base.startDate ?? tripTodayIso();
+    const endDate = base.endDate ?? tripAddDays(startDate, autoDays - 1);
+
+    applyDraftSlots({
+      ...base,
+      startPoint,
+      returnMode: base.returnMode ?? "same_as_start",
+      endPoint: base.returnMode === "custom" ? base.endPoint : null,
+      startDate,
+      endDate,
+      startTime: base.startTime ?? "08:00",
+      style: msg?.discoveryStyle?.label ?? base.style ?? null,
+    });
+
+    await handleCreatePlan(messageId, { extraStops: stops, targetId: messageId });
   };
 
   /** เมื่อผู้ใช้เลือกโฟลเดอร์จาก TripDestinationPickerModal */
@@ -1200,10 +1368,25 @@ export default function AiChatScreen({
       planContext?: unknown;
       /** ช่องข้อมูลแผนทริปที่จะส่งไปเป็นรอบนี้ (สำหรับกรณีที่เพิ่งได้ค่าใหม่ แต่ state ยังไม่ทันอัปเดต) */
       tripDraftOverride?: TripSlots;
+      /** ข้ามการเปิดป๊อปอัปเลือกสไตล์ (ใช้ตอนผู้ใช้กด "ยกเลิก" ในป๊อปอัปเอง) */
+      skipDiscovery?: boolean;
     }
   ) => {
     const body = text.trim();
-    if (!body || !thread || sending) return;
+    if (!body || !thread || sendingRef.current) return;
+
+    // คำถามแบบ "อยากรู้ว่ามีที่ไหนน่าเที่ยว" → เปิดป๊อปอัปเลือกสไตล์ก่อนตอบ
+    // · โหมด "ถามเกี่ยวกับธุรกิจ" · ถามต่อจากสถานที่ที่เลือก · แก้แผน → ไม่เปิด
+    const canOfferDiscovery =
+      !opts?.skipDiscovery &&
+      chatMode !== "host-self" &&
+      !opts?.placeId &&
+      !opts?.planContext &&
+      !opts?.useClipPlace;
+    if (canOfferDiscovery && shouldOfferDiscovery(body)) {
+      void startDiscovery(body);
+      return;
+    }
 
     // ช่องข้อมูลแผนทริปที่จะส่งไปรอบนี้ (ค่าที่เพิ่งได้ใหม่ ถ้ามี → ใช้ค่านั้น)
     const slotsForRequest = opts?.tripDraftOverride ?? draftSlots;
@@ -1238,6 +1421,7 @@ export default function AiChatScreen({
       folder: folderAttachment,
     });
     setDraft("");
+    sendingRef.current = true;
     setSending(true);
     // ผู้ใช้ส่งข้อความ → ต้องเห็นข้อความตัวเอง → เลื่อนลงล่าง
     // แบบ "ไม่มีแอนิเมชัน" เพราะการเลื่อนแบบแอนิเมชันจะไปแย่งนิ้วผู้ใช้
@@ -1371,10 +1555,133 @@ export default function AiChatScreen({
     } finally {
       // Without this, any throw above wedged `sending` on forever and the
       // composer could never be used again without remounting the screen.
+      sendingRef.current = false;
       setSending(false);
       // ไม่เลื่อนที่นี่ — ตอนคำตอบของเอไaiมา ขนาดเนื้อหาในลิสต์เปลี่ยนเอง
       // → handleContentSizeChange จะเลื่อนให้เอง (แบบไม่มีแอนิเมชัน)
     }
+  };
+
+  // ── เส้นทาง "ถามแนะนำสถานที่" (ประเภท D) ─────────────────────────
+  /** ประวัติแชทย่อ (สำหรับเส้นทาง /ai-chat/discovery) */
+  const buildDiscoveryHistory = (question: string) => [
+    ...(thread?.messages ?? []).map((m) => ({ role: m.role, content: m.content })),
+    { role: "user" as const, content: question },
+  ];
+
+  /**
+   * เปิดป๊อปอัปเลือกสไตล์
+   * -------------------------------------------------------------
+   * · ครั้งแรก = คำถามใหม่ที่ผู้ใช้พิมพ์
+   * · ครั้งหลัง = กด "สถานที่อื่น / เปลี่ยนสไตล์" (ส่ง id ข้อความเดิมมาให้แทนที่)
+   */
+  const startDiscovery = async (question: string, replaceMessageId?: string) => {
+    discoveryQuestionRef.current = question;
+    discoveryReplaceIdRef.current = replaceMessageId ?? null;
+    discoveryPickedRef.current = false;
+    setDiscoveryQuestion(question);
+    // โชว์สไตล์สำรองทันที (ผู้ใช้เลือกได้เลย ไม่ต้องรอ) → สไตล์จากเอไaiค่อยทับเมื่อมา
+    setDiscoveryStyles(FALLBACK_DISCOVERY_STYLES);
+    setDiscoveryStylesLoading(true);
+    setStylePickerOpen(true);
+    // เคลียร์ช่องพิมพ์ (คำถามจะไปโผล่ในแชทตอนผู้ใช้เลือกสไตล์)
+    setDraft("");
+    const styles = await requestDiscoveryStyles({
+      messages: buildDiscoveryHistory(question),
+    });
+    // ผู้ใช้เลือกไปแล้ว → ไม่ทับรายการที่เขากำลังดู
+    if (discoveryPickedRef.current) return;
+    setDiscoveryStyles(styles);
+    setDiscoveryStylesLoading(false);
+  };
+
+  /** ผู้ใช้เลือกสไตล์แล้ว → ดึงการ์ดสถานที่จริงจาก Google → แนบในแชท */
+  const handleDiscoveryPick = async (style: DiscoveryStyle, area: string) => {
+    const question = discoveryQuestionRef.current;
+    const replaceId = discoveryReplaceIdRef.current;
+    if (!question.trim()) return;
+    discoveryPickedRef.current = true;
+    setDiscoveryLoading(true);
+    sendingRef.current = true;
+    setSending(true);
+    let fallbackQuestion: string | null = null;
+    try {
+      const result = await requestDiscoveryPlaces({
+        messages: buildDiscoveryHistory(question),
+        area: area || null,
+        style,
+      });
+      setStylePickerOpen(false);
+      if (replaceId) {
+        // เปลี่ยนสไตล์ → แทนการ์ดชุดเดิมในข้อความเดิม
+        updateMessage(threadId, replaceId, {
+          content: result.reply,
+          placeCards: result.places,
+          discoveryStyle: result.style,
+        });
+        setSelectedPlaceCards((prev) => {
+          const next = { ...prev };
+          delete next[replaceId];
+          return next;
+        });
+      } else {
+        appendMessage(threadId, { role: "user", content: question });
+        appendMessage(threadId, {
+          role: "assistant",
+          content: result.reply,
+          placeCards: result.places,
+          discoveryStyle: result.style,
+        });
+      }
+    } catch (err) {
+      const aiErr = asAiError(err);
+      setStylePickerOpen(false);
+      Alert.alert(
+        "หาสถานที่ไม่สำเร็จ",
+        aiErr?.message ?? "เชื่อมต่อบริการแนะนำสถานที่ไม่สำเร็จ ลองใหม่อีกครั้ง"
+      );
+      // ถามเป็นแชทธรรมดาแทน (ผู้ใช้ไม่ค้างคิว)
+      if (!replaceId) fallbackQuestion = question;
+    } finally {
+      setDiscoveryLoading(false);
+      sendingRef.current = false;
+      setSending(false);
+    }
+    if (fallbackQuestion) {
+      void send(fallbackQuestion, { skipDiscovery: true });
+    }
+  };
+
+  /** ผู้ใช้กดยกเลิก/ปิดป๊อปอัป */
+  const handleDiscoveryCancel = () => {
+    setStylePickerOpen(false);
+    // กำลังดึงสถานที่อยู่ → ปิดไปก่อน การ์ดจะเข้าแชทเองเมื่อเสร็จ
+    if (discoveryLoading) return;
+    const replaceId = discoveryReplaceIdRef.current;
+    const question = discoveryQuestionRef.current;
+    // เปลี่ยนสไตล์ (คำถามเดิมอยู่ในแชทแล้ว) → ปิดไป การ์ดเดิมยังอยู่
+    if (replaceId) return;
+    if (!question.trim()) return;
+    void send(question, { skipDiscovery: true });
+  };
+
+  /** ติ๊ก/เอาออกสถานที่ในการ์ด (เก็บแยกต่อข้อความ) */
+  const togglePlaceCard = (messageId: string, placeId: string) => {
+    setSelectedPlaceCards((prev) => {
+      const cur = prev[messageId] ?? [];
+      const next = cur.includes(placeId)
+        ? cur.filter((id) => id !== placeId)
+        : [...cur, placeId];
+      return { ...prev, [messageId]: next };
+    });
+  };
+
+  /** คำถามของผู้ใช้ก่อนข้อความนี้ (ใช้ตอนกด "สถานที่อื่น / เปลี่ยนสไตล์") */
+  const questionBefore = (messageId: string) => {
+    const list = thread?.messages ?? [];
+    const idx = list.findIndex((m) => m.id === messageId);
+    const before = idx >= 0 ? list.slice(0, idx) : list;
+    return [...before].reverse().find((m) => m.role === "user")?.content ?? "";
   };
 
   /** ป้ายสถานที่สั้น ๆ เช่น "บ้านปาย (ต.ป่าแดง อ.เมือง จ.เชียงใหม่)" */
@@ -1953,6 +2260,57 @@ export default function AiChatScreen({
                     <View className="mt-2.5">{renderQuestionFlow(item.id)}</View>
                   ) : null}
 
+                  {/* การ์ดสถานที่ที่แนะนำ (ประเภท D) — กล่องต่อกล่อง เรียงลงมา ติ๊กเลือกได้
+                      (พอสร้างแพลนจากที่เลือกแล้ว → ซ่อน เพราะการ์ดแผนมาต่อท้ายแทน) */}
+                  {!mine && !failed && !item.plan && item.placeCards && item.placeCards.length > 0 ? (
+                    <View className="mt-2.5 self-stretch">
+                      {item.placeCards.map((p) => {
+                        const picked = (selectedPlaceCards[item.id] ?? []).includes(p.placeId);
+                        return (
+                          <ChatPlaceCard
+                            key={`${item.id}-${p.placeId}`}
+                            place={p}
+                            selected={picked}
+                            onToggle={() => togglePlaceCard(item.id, p.placeId)}
+                            styleLabel={item.discoveryStyle?.label ?? null}
+                            styleEmoji={item.discoveryStyle?.emoji ?? null}
+                          />
+                        );
+                      })}
+
+                      {/* ปุ่มใต้รายการ: สร้างแพลนจากที่เลือก · ขอสถานที่อื่น/เปลี่ยนสไตล์ */}
+                      <View className="flex-row items-center flex-wrap mt-1">
+                        <TouchableOpacity
+                          onPress={() => void handleCreatePlanFromCards(item.id)}
+                          activeOpacity={0.85}
+                          className={`flex-row items-center bg-violet-600 rounded-full px-3.5 py-2 mr-2 mb-2 ${
+                            (selectedPlaceCards[item.id] ?? []).length === 0
+                              ? "opacity-50"
+                              : ""
+                          }`}
+                        >
+                          <SparklesIcon size={14} color="#FFFFFF" />
+                          <Text className="text-white text-[12.5px] font-bold ml-1.5">
+                            สร้างแพลนทริปจาก{" "}
+                            {(selectedPlaceCards[item.id] ?? []).length} แห่งที่เลือก
+                          </Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          onPress={() =>
+                            void startDiscovery(questionBefore(item.id), item.id)
+                          }
+                          activeOpacity={0.85}
+                          className="flex-row items-center bg-white border border-gray-300 rounded-full px-3.5 py-2 mb-2"
+                        >
+                          <ArrowPathIcon size={13} color="#4B5563" />
+                          <Text className="text-gray-700 text-[12.5px] font-bold ml-1.5">
+                            สถานที่อื่น / เปลี่ยนสไตล์
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  ) : null}
+
                   {/* ชื่อสถานที่ซ้ำหลายแห่ง → ให้ผู้ใช้เลือกแห่งที่ถูก
                       (แตะ = ถามคำเดิมซ้ำพร้อม placeId → ได้คำตอบใหม่ต่อท้าย) */}
                   {!mine &&
@@ -2362,6 +2720,21 @@ export default function AiChatScreen({
             : draftSlots.startPoint?.label?.replace("จุดเริ่มต้น", "").trim() || ""
         }
         initialStyle={draftSlots.style || ""}
+      />
+
+      {/* ป๊อปอัปเลือกสไตล์ก่อนหาสถานที่ (ประเภท D) — มีปุ่มปิด/ยกเลิกเสมอ */}
+      <ChatStylePickerModal
+        visible={stylePickerOpen}
+        styles={discoveryStyles}
+        loading={discoveryStylesLoading}
+        busy={discoveryLoading}
+        question={discoveryQuestion}
+        onPick={(style, area) => void handleDiscoveryPick(style, area)}
+        onCancel={handleDiscoveryCancel}
+        onRetry={() => {
+          const q = discoveryQuestionRef.current;
+          if (q) void startDiscovery(q, discoveryReplaceIdRef.current ?? undefined);
+        }}
       />
     </View>
   );

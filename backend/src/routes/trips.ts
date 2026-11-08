@@ -37,6 +37,7 @@ import {
 } from "../fuelPrice";
 import { findLodging } from "../lodging";
 import { config, isPlacesConfigured } from "../config";
+import { findPlacesForStyle } from "../discovery";
 
 const router = Router();
 
@@ -1526,6 +1527,72 @@ router.get("/fuel-price", async (_req: Request, res: Response) => {
     staleNotice: table.staleNotice ?? null,
     bangkokDate: table.bangkokDate ?? null,
   });
+});
+
+/**
+ * POST /trips/suggest-places
+ * -------------------------------------------------------------
+ * แนะนำสถานที่ท่องเที่ยวตามสไตล์และจังหวัด เพื่อให้ผู้ใช้เลือกสร้างแพลน
+ * โดยใช้ AI คิดสถานที่ + Google Places API ดึงรูปจริง พิกัด และดาวรีวิว
+ *
+ * logic การหาสถานที่อยู่ที่ `backend/src/discovery.ts` (ใช้ร่วมกับ flow
+ * "ถามแนะนำสถานที่" ในแชท) — endpoint นี้แค่เรียกใช้แล้วแปลงรูปแบบ
+ */
+router.post("/suggest-places", async (req: Request, res: Response) => {
+  try {
+    const { destination, style, count = 6 } = req.body ?? {};
+    const destName = (destination || "").trim() || "พระนครศรีอยุธยา";
+    const styleName = (style || "").trim() || "ท่องเที่ยวทั่วไป ถ่ายรูป พักผ่อน";
+
+    console.log(`[trips/suggest-places] ขอคำแนะนำสถานที่: dest="${destName}", style="${styleName}"`);
+
+    const limit = Math.max(1, Math.min(Number(count) || 6, 8));
+
+    const found = await findPlacesForStyle({
+      question: `ขอสถานที่ท่องเที่ยวใน ${destName} สไตล์ ${styleName}`,
+      area: destName,
+      style: { id: "custom", label: styleName, query: styleName },
+      count: limit,
+      // endpoint นี้ไม่ต้องการลิงก์เว็บไซต์ → ไม่ต้องยิง details (ประหยัดค่า Google)
+      withDetails: false,
+      // โหมดเดิม: เอาผลค้นอันแรกที่ยังไม่ปิดถาวร (ไม่ใช้ gate ชื่อแบบเข้มงวด)
+      strictNameMatch: false,
+      // ถ้า AI ไม่ได้คืนผลลัพธ์ ให้ใช้คำค้นกว้างกับ Google ตรง ๆ
+      fallbackProposals: [
+        { name: `${destName} ที่เที่ยวสำคัญ`, description: `สถานที่ท่องเที่ยวแนะนำใน ${destName}` },
+        { name: `${destName} วัด`, description: `วัดและโบราณสถานน่าเที่ยวใน ${destName}` },
+        { name: `${destName} คาเฟ่`, description: `ร้านกาแฟและจุดพักผ่อนบรรยากาศดีใน ${destName}` },
+      ],
+    });
+
+    const validPlaces = found.places.map((p) => ({
+      name: p.name,
+      description: p.description,
+      address: p.address ?? null,
+      placeId: p.placeId,
+      latitude: p.lat,
+      longitude: p.lng,
+      province: p.area ?? destName,
+      district: p.district,
+      subdistrict: p.subdistrict,
+      rating: p.rating ?? null,
+      userRatingCount: p.userRatingsTotal ?? null,
+      photoUrl: p.photoUrl ?? null,
+      googleMapsUri: p.googleMapsUrl ?? null,
+      types: p.types ?? [],
+    }));
+
+    console.log(`[trips/suggest-places] ค้นพบสถานที่จริง ${validPlaces.length} แห่ง`);
+
+    return res.json({
+      places: validPlaces,
+      destination: destName,
+      style: styleName,
+    });
+  } catch (err: any) {
+    console.error("[trips/suggest-places] Error:", err?.message);
+    return res.status(500).json({ error: "SUGGEST_PLACES_FAILED", message: err?.message });
+  }
 });
 
 export default router;

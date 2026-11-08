@@ -7,6 +7,8 @@ import type {
   TripSlotsWire,
   PlaceTag,
   ChatSource,
+  ChatPlaceCard,
+  DiscoveryStyle,
 } from "../data/tripsData";
 import { slotsFromWire } from "../data/tripsData";
 
@@ -145,6 +147,218 @@ function parseSources(raw: unknown): ChatSource[] | undefined {
     if (list.length >= 5) break;
   }
   return list.length > 0 ? list : undefined;
+}
+
+/**
+ * แปลงการ์ดสถานที่จาก backend (ประเภท D)
+ * ข้อมูลผิดรูปแบบ → ทิ้งทีละใบ (ไม่ทำให้การ์ดทั้งก้อนพัง)
+ */
+function parsePlaceCards(raw: unknown): ChatPlaceCard[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const num = (v: unknown) =>
+    typeof v === "number" && Number.isFinite(v) ? v : null;
+  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+  const list: ChatPlaceCard[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const p = item as Record<string, unknown>;
+    const placeId = str(p.placeId);
+    const name = str(p.name);
+    if (!placeId || !name) continue;
+    list.push({
+      placeId,
+      name,
+      description: typeof p.description === "string" ? p.description : "",
+      address: str(p.address),
+      area: str(p.area),
+      district: str(p.district),
+      subdistrict: str(p.subdistrict),
+      category: str(p.category),
+      photoUrl: str(p.photoUrl),
+      rating: num(p.rating),
+      userRatingsTotal: num(p.userRatingsTotal),
+      website: str(p.website),
+      googleMapsUrl: str(p.googleMapsUrl),
+      lat: num(p.lat),
+      lng: num(p.lng),
+      openingHours: str(p.openingHours),
+      priceLevel: num(p.priceLevel),
+      types: Array.isArray(p.types)
+        ? p.types.filter((t): t is string => typeof t === "string")
+        : [],
+    });
+  }
+  return list.length > 0 ? list : undefined;
+}
+
+/**
+ * แปลงสไตล์ที่เอไaiเสนอจาก backend
+ * ข้อมูลผิดรูปแบบ → ทิ้งทีละแบบ (ถ้าเหลือน้อยกว่า 2 → ใช้ชุดสำรองแทน)
+ */
+function parseDiscoveryStyles(raw: unknown): DiscoveryStyle[] {
+  if (!Array.isArray(raw)) return [];
+  const list: DiscoveryStyle[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const s = item as Record<string, unknown>;
+    const label = typeof s.label === "string" ? s.label.trim() : "";
+    if (!label) continue;
+    const id =
+      typeof s.id === "string" && s.id.trim()
+        ? s.id.trim()
+        : `style-${list.length + 1}`;
+    list.push({
+      id,
+      label,
+      emoji: typeof s.emoji === "string" && s.emoji.trim() ? s.emoji.trim() : "📍",
+      desc: typeof s.desc === "string" ? s.desc.trim() : "",
+      query: typeof s.query === "string" && s.query.trim() ? s.query.trim() : label,
+    });
+    if (list.length >= 6) break;
+  }
+  return list;
+}
+
+/**
+ * สไตล์สำรอง — ใช้ตอนเอไaiเสนอสไตล์ไม่ได้/ช้าเกินไป
+ * (ต้องมีอยู่เสมอ เพื่อให้ผู้ใช้เลือกได้โดยไม่ต้องรอ)
+ */
+export const FALLBACK_DISCOVERY_STYLES: DiscoveryStyle[] = [
+  {
+    id: "culture",
+    label: "วัด ประวัติศาสตร์ วัฒนธรรม",
+    emoji: "🏛️",
+    desc: "โบราณสถาน วัดสำคัญ วิถีชีวิตท้องถิ่น",
+    query: "วัด",
+  },
+  {
+    id: "nature",
+    label: "ธรรมชาติ ภูเขา และวิวสวย",
+    emoji: "🌿",
+    desc: "จุดชมวิว อุทยานแห่งชาติ น้ำตก",
+    query: "อุทยานแห่งชาติ",
+  },
+  {
+    id: "cafe",
+    label: "คาเฟ่ ถ่ายรูป ชิคๆ",
+    emoji: "☕",
+    desc: "ร้านกาแฟบรรยากาศดี มุมถ่ายรูป",
+    query: "คาเฟ่",
+  },
+  {
+    id: "food",
+    label: "ตะลุยกิน สตรีทฟู้ด ร้านเด็ด",
+    emoji: "🍜",
+    desc: "ของกินขึ้นชื่อ ตลาดกลางคืน",
+    query: "ร้านอาหาร",
+  },
+  {
+    id: "adventure",
+    label: "กิจกรรมลุย ๆ ผจญภัย",
+    emoji: "🚣",
+    desc: "เดินป่า ล่องแก่ง ปีกอินทรี",
+    query: "จุดตกหินน้ำตก",
+  },
+  {
+    id: "relax",
+    label: "พักผ่อน สบาย ๆ ไม่เร่งรีบ",
+    emoji: "🏖️",
+    desc: "แคมป์ปิ้ง ริมน้ำ สปา วิถีสโลว์ไลฟ์",
+    query: "ที่พัก",
+  },
+];
+
+/** คำตอบของเส้นทาง "ถามแนะนำสถานที่" */
+export interface DiscoveryPlacesReply {
+  /** คำตอบข้อความของเอไaiในแชท */
+  reply: string;
+  /** การ์ดสถานที่เรียงลงมา */
+  places: ChatPlaceCard[];
+  /** สไตล์ที่ผู้ใช้เลือก */
+  style: DiscoveryStyle;
+  /** พื้นที่ที่ใช้ค้น (null = ทั่วประเทศไทย) */
+  area: string | null;
+}
+
+/**
+ * ขอ "สไตล์" ที่เอไaiเสนอตามคำถาม
+ * -------------------------------------------------------------
+ * เรียกก่อนที่ผู้ใช้จะเลือกสไตล์ — ถ้าล้มเหลวคืนชุดสำรอง 6 แบบ
+ * (ผู้ใช้ต้องเลือกได้เสมอ)
+ */
+export async function requestDiscoveryStyles(opts: {
+  messages: ChatTurn[];
+  area?: string | null;
+}): Promise<DiscoveryStyle[]> {
+  try {
+    const data = await withToast<{ styles?: unknown }>({
+      label: "ai-chat/discovery",
+      path: "/ai-chat/discovery",
+      method: "POST",
+      body: {
+        messages: opts.messages,
+        area: opts.area ?? undefined,
+      },
+      timeoutMs: API_TIMEOUT_MS * 3,
+    });
+    const styles = parseDiscoveryStyles(data?.styles);
+    return styles.length >= 2 ? styles : FALLBACK_DISCOVERY_STYLES;
+  } catch {
+    // ล้มเหลว = ใช้ชุดสำรอง (ผู้ใช้ยังเลือกสไตล์ได้)
+    return FALLBACK_DISCOVERY_STYLES;
+  }
+}
+
+/**
+ * ขอสถานที่ตามสไตล์ที่ผู้ใช้เลือก
+ * -------------------------------------------------------------
+ * คืนคำตอบข้อความ + การ์ดสถานที่ (ข้อมูลจริงจาก Google Places)
+ */
+export async function requestDiscoveryPlaces(opts: {
+  messages: ChatTurn[];
+  area?: string | null;
+  style: DiscoveryStyle;
+}): Promise<DiscoveryPlacesReply> {
+  const data = await withToast<{
+    reply?: unknown;
+    places?: unknown;
+    style?: unknown;
+    area?: unknown;
+  }>({
+    label: "ai-chat/discovery",
+    path: "/ai-chat/discovery",
+    method: "POST",
+    body: {
+      messages: opts.messages,
+      area: opts.area ?? undefined,
+      style: opts.style,
+    },
+    timeoutMs: API_TIMEOUT_MS * 5,
+  });
+
+  if (typeof data?.reply !== "string") {
+    throw new AiError({
+      kind: "bad-shape",
+      status: 200,
+      body: JSON.stringify(data ?? null),
+      requestId: null,
+      label: "ai-chat/discovery",
+      url: "",
+      durationMs: 0,
+      timeoutMs: API_TIMEOUT_MS * 5,
+    });
+  }
+
+  const places = parsePlaceCards(data.places) ?? [];
+  const parsedStyles = parseDiscoveryStyles(
+    Array.isArray(data.style) ? data.style : data.style ? [data.style] : []
+  );
+  return {
+    reply: data.reply,
+    places,
+    style: parsedStyles[0] ?? opts.style,
+    area: typeof data.area === "string" && data.area.trim() ? data.area.trim() : null,
+  };
 }
 
 /** Every call raises a toast on failure, then rethrows for the caller to render. */function withToast<T>(opts: AiFetchOptions): Promise<T> {
