@@ -1,6 +1,7 @@
 # แผน: เอไอตอบตามบริบท + การ์ด "สถานที่แนะนำ" ในแชท
 
 > สถานะ: **อนุมัติแล้ว + แก้โค้ดครบทั้ง 11 ไฟล์** (เหลือรัน typecheck/lint + ทดสอบบนเครื่องจริง)
+> รวมเข้ากับฐาน `3116e15` แล้ว (HEAD = `eec535f`) · ตรวจตามแผนผ่านทั้งหมด (ดู §12)
 > ตัดสินใจแล้ว (ผู้ใช้): popup เช็คฝั่งแอปทันที · สไตล์ให้ AI เสนอตามคำถาม ·
 > ติ๊กแล้วมีปุ่ม "สร้างแพลนทริปจากที่เลือก" · ลิงก์ในการ์ด = เพจ/เว็บไซต์สถานที่ + ลิงก์แมพ
 
@@ -42,6 +43,7 @@
    - ถ้าไม่แน่ใจว่าจะวางแผนหรือไม่ → **ยังไม่วางแผน** (ถามก่อน / ให้ผู้ใช้กดปุ่มเอง)
 4. **กฎใช้ข้อมูลการ์ดสถานที่**: ถ้า system prompt มีบล็อก `[สถานที่ที่แนะนำ]` → ต้องเอ่ยชื่อจากบล็อกนั้นเท่านั้น ห้ามแต่งชื่อสถานที่เพิ่ม
 5. เพิ่มตัวอย่างเปรียบเทียบ 1 คู่ (❌/✅) ของคำถามแนะนำสถานที่ → เพื่อให้ "เทรน" เห็นรูปแบบที่ต้องการ
+   ✅ **เสร็จแล้ว 2026-11-08** — `backend/src/tripPrompt.ts:201-210` (❌ = เริ่มวางแผนทั้งที่ยังไม่ได้ขอ · ✅ = ตอบสั้น ๆ แล้วชวนเลือกสไตล์)
 
 **เพิ่ม (ป้องกันชั้นโค้ด ไม่พึ่ง prompt อย่างเดียว)** — `backend/src/routes/aiChat.ts:906-932`
 → เปิดการ์ดวางแผนเฉพาะเมื่อ **สล็อตที่โมเดลใส่มาอย่างน้อย 1 ค่าที่ไม่เป็น null** (วัน/วันที่/เวลา/งบ/จุดเริ่มต้น…) หรือผู้ใช้ใช้คำขอแผนชัดเจน — ถ้าสล็อตว่างหมด → ไม่ส่ง `tripDraft` กลับ → ไม่มีการ์ดแผนโผล่มา
@@ -218,3 +220,31 @@ body: { messages, mode, area?, style? }
 **หลักการ:** error ทั้ง 53 ตัวเป็น false positive ของ `eslint-plugin-import` + ไฟล์ build output
 ไม่ใช่โค้ดของฟีเจอร์นี้เสีย — `eslint-config-expo/flat` เหลือ resolver แค่ตัว `node`
 (ตัว typescript ถูก override ทิ้ง) → resolve ได้ไฟล์ ESM จริง และปลั๊กอินไม่ตาม `export *` เลย
+
+---
+
+## 12) ตรวจงานหลังรวม commit (2026-11-08)
+
+**ฐานที่เลือก:** `3116e15` ("Return backend to 1b353d3") + commit ของงานนี้ทับ
+→ HEAD = `eec535f` · `main` ตรงกับ `origin/main` แล้ว
+
+**ผลตรวจ:** ตรงกับแผนทุกข้อ
+
+| ส่วน | ผล |
+|---|---|
+| §3 prompt | ประเภท D ครบ · ตัด "จะไปที่ไหน" ออกจากเงื่อนไข TRIP_DRAFT แล้ว · กฎ "ตอบตามเจตนา" ครบ · ตัวอย่าง ❌/✅ ของประเภท D เพิ่มแล้ว (201-210) |
+| §4.1 `discovery.ts` | `proposeStyles` / `proposePlaceNames` / `verifyAgainstGoogle` / `findPlacesForStyle` / `discoverPlaces` ครบ · ใช้ cache เดิม |
+| §4.2 route | `POST /ai-chat/discovery` ต่อที่ `app.use("/ai-chat", …)` → path `/ai-chat/discovery` ตรงกับที่แอปเรียก |
+| §4.3 `places.ts` | Legacy map `photos[0].photo_reference` → `photoUrl` แล้ว (บรรทัด 407 / 595) |
+| §4.4 `trips.ts` | `/trips/suggest-places` ใช้ `findPlacesForStyle` จาก `discovery.ts` · ไม่มี circular import |
+| §5.1 คอมโพเนนต์ใหม่ | `ChatStylePickerModal` (มีปุ่ม X + "ยกเลิก") · `ChatPlaceCard` (รูป/ชื่อ/สไตล์/คำอธิบาย/⭐+รีวิว/ลิงก์เพจ/ลิงก์แมพ/checkbox) |
+| §5.2 `AiChatScreen` | เช็คเจตนาฝั่งแอป · popup เปิดทันที + fallback สไตล์ · การ์ดเรียงลงมา · checkbox · ปุ่ม "สร้างแพลนทริปจาก N แห่งที่เลือก" · "สถานที่อื่น / เปลี่ยนสไตล์" · ยกเลิก popup → ส่งเป็นแชทธรรมดา |
+| §5.3 service / types | `parseDiscoveryStyles` + `requestDiscoveryStyles` / `requestDiscoveryPlaces` · `ChatPlaceCard` / `DiscoveryStyle` / `placeCards` / `discoveryStyle` |
+| §10 ของเพิ่ม 1–8 | ครบทุกข้อ |
+| §11 แก้ typecheck/lint 9–15 | `aiChat.ts` (lastUserText จุดเดียว · `folder?.folderName`) · `AiChatScreen` import รวม · `AuthContext` เป็น `import type` · `eslint.config.js` ignore `dist` + `import/ignore` + backend rule · root `tsconfig` exclude `backend` |
+
+**ยังไม่ได้ทำ (ต้องรันเอง — Bash ในเซสชันนี้รันโค้ดไม่ได้):**
+- `cd backend && npm install` (หลัง rebase `backend/package.json` ถูกย้อนกลับเป็นของ `1b353d3` → `backend/node_modules` ต้อง sync ใหม่)
+- `cd backend && npx tsc --noEmit` · `cd .. && npx tsc --noEmit` · `npx expo lint`
+- ทดสอบบนเครื่องจริงตาม §7 ข้อ 1–6
+- deploy backend (ต้องขออนุมัติก่อน) ไม่งั้นแอปที่ชี้ production เดิมจะยังเป็นเวอร์ชันเก่า
