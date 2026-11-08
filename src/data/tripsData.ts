@@ -184,6 +184,12 @@ export interface ChatPlaceCard {
   priceLevel: number | null;
   /** ประเภทดิบจาก Google (ใช้กรอง/แสดงผล) */
   types: string[];
+  /** id ของแท็กที่สถานที่นี้มา (null = ไม่รู้) */
+  styleId: string | null;
+  /** ชื่อแท็กที่แสดงบนการ์ด (มาจาก backend) */
+  styleLabel: string | null;
+  /** อีโมจิของแท็กที่แสดงบนการ์ด */
+  styleEmoji: string | null;
 }
 
 export interface AiChatMessage {
@@ -211,6 +217,19 @@ export interface AiChatMessage {
    * สไตล์ที่ผู้ใช้เลือกจากป๊อปอัป (การ์ดสถานที่จะแสดงป้ายสไตล์นี้บนชื่อสถานที่)
    */
   discoveryStyle?: DiscoveryStyle;
+  /**
+   * แท็กที่ผู้ใช้เลือก (เลือกได้หลายอัน) — ใช้ตอนกด "รีเฟช" เพื่อดึงที่ใหม่ด้วยแท็กเดิม
+   */
+  discoveryTags?: DiscoveryStyle[];
+  /**
+   * placeId ทุกใบที่เคยโผล่ในการ์ดของข้อความนี้ (รวมที่ถูกรีเฟชออกไปแล้ว)
+   * → ใช้ตัด "ไม่ซ้ำ" ตอนกด "รีเฟช"
+   */
+  discoverySeen?: string[];
+  /**
+   * ชื่อสถานที่ที่เคยโผล่ในการ์ดของข้อความนี้ → บอก AI ว่าห้ามเสนอซ้ำ
+   */
+  discoverySeenNames?: string[];
   /** placeId ที่ผู้ใช้เลือกจาก `placeCandidates` (ส่งกลับไปให้ backend ดึงรายละเอียดของอันนี้) */
   chosenPlaceId?: string;
   /**

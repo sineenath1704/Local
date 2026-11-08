@@ -4,7 +4,6 @@ import {
   View,
   Text,
   TouchableOpacity,
-  TextInput,
   ScrollView,
   ActivityIndicator,
 } from "react-native";
@@ -12,69 +11,84 @@ import {
   XMarkIcon,
   SparklesIcon,
   MapPinIcon,
-  ArrowPathIcon,
+  CheckIcon,
 } from "react-native-heroicons/outline";
 import type { DiscoveryStyle } from "../data/tripsData";
 
 /**
- * ChatStylePickerModal — ป๊อปอัปให้ผู้ใช้เลือก "สไตล์" ก่อนหาสถานที่
+ * ChatStylePickerModal — ป๊อปอัปกลางจอให้ผู้ใช้เลือก "แท็ก" ก่อนหาสถานที่
  * -------------------------------------------------------------
  * เปิดทันทีที่ผู้ใช้ถามแบบกว้าง ๆ (เช่น "มีที่ไหนน่าเที่ยวบ้าง")
- * แล้วให้ AI เสนอสไตล์ที่ตรงกับคำถาม → ผู้ใช้เลือก 1 แบบ
+ * แล้วให้ผู้ใช้เลือกแท็กที่ชอบ (ได้หลายอัน) จากคลังแท็กของระบบ
  *
- * มีปุ่มปิด (X) + ปุ่ม "ยกเลิก" เสมอ → กดยกเลิก = ถามเป็นแชทธรรมดา
- * (ไม่มีทางติด ไม่ต้องหลอกผู้ใช้ว่าต้องเลือก)
+ * ปุ่ม 3 ตัว (กดได้เสมอ ผู้ใช้ไม่เคยติด):
+ *   · "ยกเลิก"                → ถามเป็นแชทธรรมดา
+ *   · "ให้เอไaiคิดให้"        → ให้ AI เลือกแท็กเองจากคำถาม แล้วดึงการ์ดเลย
+ *   · "ยืนยันแท็กที่เลือก"     → ใช้แท็กที่ผู้ใช้ติ๊กไว้
+ *
+ * ไม่มีช่องพิมพ์ — กดแท็กเท่านั้น (พื้นที่ที่เดาได้แสดงเป็นบรรทัดอ่านอย่างเดียว)
  */
 export interface ChatStylePickerModalProps {
   visible: boolean;
-  /** สไตล์ที่ AI เสนอ (ถ้ายังไม่ได้ → null แล้วแสดงสำรอง 6 แบบ) */
-  styles: DiscoveryStyle[];
-  /** กำลังโหลดสไตล์จาก AI */
+  /** คลังแท็ก (จาก backend · ถ้ายังไม่ได้ → แอปใช้ชุดสำรองของตัวเอง) */
+  tags: DiscoveryStyle[];
+  /** กำลังโหลดคลังแท็ก */
   loading?: boolean;
-  /** กำลังดึงการ์ดสถานที่จริงจาก Google (ผู้ใช้เลือกสไตล์แล้ว) */
+  /** กำลังดึงการ์ดสถานที่จริงจาก Google (กดยืนยัน/ให้เอไaiคิดแล้ว) */
   busy?: boolean;
-  /** พื้นที่ที่เดามาจากคำถาม (ใช้เติมในช่องพื้นที่) */
+  /** พื้นที่ที่เดามาจากคำถาม (แสดงอ่านอย่างเดียว — ให้แก้ไขที่แชทแทน) */
   initialArea?: string;
-  /** ข้อความคำถามเดิม (ให้ผู้ใช้เห็นว่ากำลังเลือกสไตล์ให้กับคำถามอะไร) */
+  /** ข้อความคำถามเดิม (ให้ผู้ใช้เห็นว่ากำลังเลือกแท็กให้กับคำถามอะไร) */
   question?: string;
-  /** ผู้ใช้เลือกสไตล์แล้ว (พร้อมพื้นที่ที่แก้ไข) */
-  onPick: (style: DiscoveryStyle, area: string) => void;
+  /** ผู้ใช้ยืนยันแท็กที่เลือก */
+  onConfirm: (tags: DiscoveryStyle[]) => void;
+  /** ผู้ใช้กด "ให้เอไaiคิดให้" → ให้ AI เลือกแท็กเองแล้วดึงการ์ดเลย */
+  onAiPick: () => void;
   /** ผู้ใช้กดยกเลิก/ปิด → ถามเป็นแชทธรรมดา */
   onCancel: () => void;
-  /** ขอโหลดสไตล์ใหม่ (ปุ่ม "ลองใหม่") */
-  onRetry?: () => void;
 }
 
 export function ChatStylePickerModal({
   visible,
-  styles,
+  tags,
   loading = false,
   busy = false,
   initialArea = "",
   question = "",
-  onPick,
+  onConfirm,
+  onAiPick,
   onCancel,
-  onRetry,
 }: ChatStylePickerModalProps) {
-  const [area, setArea] = useState(initialArea);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
-  // เปิดใหม่ทุกครั้ง → เริ่มจากพื้นที่ที่เดามาได้
+  // เปิดใหม่ทุกครั้ง → เริ่มจากไม่ได้เลือกอะไร
   useEffect(() => {
-    if (visible) setArea(initialArea);
-  }, [visible, initialArea]);
+    if (visible) setSelectedIds([]);
+  }, [visible]);
 
-  const list = styles ?? [];
+  const list = tags ?? [];
+  const selected = list.filter((t) => selectedIds.includes(t.id));
+
+  const toggle = (id: string) => {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  };
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
-      <View className="flex-1 bg-black/60 justify-end">
-        <View className="bg-white rounded-t-3xl max-h-[85%] flex-col">
-          {/* Header: ปุ่มปิด (X) */}
-          <View className="flex-row items-center justify-between px-5 pt-4 pb-3 border-b border-gray-100">
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
+      <View className="flex-1 bg-black/60 items-center justify-center px-5">
+        <View className="bg-white rounded-3xl w-full max-w-[420px] overflow-hidden">
+          {/* หัวเรื่อง */}
+          <View className="flex-row items-start justify-between px-5 pt-5 pb-3">
             <View className="flex-1 mr-3">
-              <Text className="text-[17px] font-bold text-gray-900">อยากไปสไตล์ไหน?</Text>
-              <Text className="text-[12px] text-gray-500 mt-0.5" numberOfLines={1}>
-                {question ? `สำหรับ "${question}"` : "เลือกสไตล์ที่ชอบ แล้วเราจะหาสถานที่จริงให้"}
+              <Text className="text-[17px] font-bold text-gray-900">
+                อยากไปแท็กไหน?
+              </Text>
+              <Text className="text-[12px] text-gray-500 mt-1" numberOfLines={2}>
+                {question
+                  ? `สำหรับ "${question}"`
+                  : "เลือกแท็กที่ชอบได้หลายอัน แล้วเราจะหาสถานที่จริงให้"}
               </Text>
             </View>
             <TouchableOpacity onPress={onCancel} className="p-1 rounded-full bg-gray-100">
@@ -82,92 +96,80 @@ export function ChatStylePickerModal({
             </TouchableOpacity>
           </View>
 
-          {/* พื้นที่ */}
-          <View className="px-5 pt-4">
-            <Text className="text-[12px] font-bold text-gray-500 mb-2">
-              พื้นที่ (เว้นว่างไว้ = ให้ระบบเดาจากคำถาม)
-            </Text>
-            <View className="flex-row items-center bg-gray-100 rounded-xl px-3.5 py-2.5 border border-gray-200">
-              <MapPinIcon size={18} color="#6B7280" />
-              <TextInput
-                value={area}
-                onChangeText={setArea}
-                placeholder="เช่น เชียงใหม่, อยุธยา"
-                placeholderTextColor="#9CA3AF"
-                className="flex-1 text-[13.5px] text-gray-900 ml-2 py-0"
-              />
+          {/* พื้นที่ที่เดามาได้ (อ่านอย่างเดียว) */}
+          {initialArea ? (
+            <View className="mx-5 mb-1 flex-row items-center bg-violet-50 border border-violet-100 rounded-xl px-3 py-2">
+              <MapPinIcon size={15} color="#7C3AED" />
+              <Text
+                className="text-[12.5px] text-violet-700 font-bold ml-1.5 flex-1"
+                numberOfLines={1}
+              >
+                {initialArea} (จากคำถาม)
+              </Text>
             </View>
-          </View>
+          ) : null}
 
-          {/* รายการสไตล์ */}
-          <ScrollView
-            className="flex-1 px-5 pt-4"
-            contentContainerStyle={{ paddingBottom: 20 }}
-          >
-            {busy ? (
-              <View className="items-center py-10">
-                <ActivityIndicator size="large" color="#7C3AED" />
-                <Text className="text-gray-700 font-bold text-[14px] mt-4">
-                  กำลังหาสถานที่จาก Google Maps...
-                </Text>
-                <Text className="text-gray-500 text-[12px] mt-1 text-center px-6">
-                  อาจใช้เวลาสัก 10-20 วินาที การ์ดสถานที่จะขึ้นในแชทเอง
-                </Text>
-              </View>
-            ) : loading && list.length === 0 ? (
-              <View className="items-center py-10">
-                <ActivityIndicator size="large" color="#7C3AED" />
-                <Text className="text-gray-700 font-bold text-[14px] mt-4">
-                  กำลังคิดสไตล์ที่เหมาะกับคำถามคุณ...
-                </Text>
-                <Text className="text-gray-500 text-[12px] mt-1 text-center px-6">
-                  เดี๋ยวก่อนนะคะ กำลังดูว่าคำถามนี้ควรเป็นสไตล์ไหน
-                </Text>
-              </View>
-            ) : (
-              <>
-                <Text className="text-[12px] font-bold text-gray-500 mb-2">
-                  {loading ? "กำลังอัปเดตสไตล์..." : "เลือกสไตล์ที่ชอบ"}
-                </Text>
-                {list.map((style) => (
+          {/* แท็ก */}
+          {busy ? (
+            <View className="items-center py-8 px-5">
+              <ActivityIndicator size="large" color="#7C3AED" />
+              <Text className="text-gray-700 font-bold text-[14px] mt-4">
+                กำลังหาสถานที่จาก Google Maps...
+              </Text>
+              <Text className="text-gray-500 text-[12px] mt-1 text-center">
+                อาจใช้เวลาสัก 10-20 วินาที การ์ดสถานที่จะขึ้นในแชทเอง
+              </Text>
+            </View>
+          ) : loading && list.length === 0 ? (
+            <View className="items-center py-8 px-5">
+              <ActivityIndicator size="large" color="#7C3AED" />
+              <Text className="text-gray-700 font-bold text-[14px] mt-4">
+                กำลังดูแท็กที่เหมาะกับคำถามคุณ...
+              </Text>
+              <Text className="text-gray-500 text-[12px] mt-1 text-center">
+                เดี๋ยวก่อนนะคะ กำลังเอาคลังแท็กมาให้เลือก
+              </Text>
+            </View>
+          ) : (
+            <ScrollView
+              className="px-5 py-3"
+              style={{ maxHeight: 300 }}
+              contentContainerStyle={{ flexDirection: "row", flexWrap: "wrap" }}
+            >
+              {list.map((tag) => {
+                const on = selectedIds.includes(tag.id);
+                return (
                   <TouchableOpacity
-                    key={style.id}
-                    onPress={() => onPick(style, area.trim())}
+                    key={tag.id}
+                    onPress={() => toggle(tag.id)}
                     activeOpacity={0.85}
-                    className="bg-white border border-gray-200 rounded-2xl p-3.5 mb-2.5 flex-row items-center shadow-xs"
+                    className={
+                      on
+                        ? "flex-row items-center bg-violet-600 border border-violet-600 rounded-full px-3.5 py-2 mr-2 mb-2"
+                        : "flex-row items-center bg-white border border-gray-200 rounded-full px-3.5 py-2 mr-2 mb-2"
+                    }
                   >
-                    <View className="w-11 h-11 rounded-xl bg-violet-50 border border-violet-100 items-center justify-center mr-3">
-                      <Text className="text-[20px]">{style.emoji}</Text>
-                    </View>
-                    <View className="flex-1">
-                      <Text className="text-[14px] font-bold text-gray-900">{style.label}</Text>
-                      {style.desc ? (
-                        <Text className="text-[12px] text-gray-500 mt-0.5" numberOfLines={2}>
-                          {style.desc}
-                        </Text>
-                      ) : null}
-                    </View>
-                  </TouchableOpacity>
-                ))}
-
-                {onRetry ? (
-                  <TouchableOpacity
-                    onPress={onRetry}
-                    activeOpacity={0.8}
-                    className="flex-row items-center justify-center py-2.5 mt-1"
-                  >
-                    <ArrowPathIcon size={15} color="#6B7280" />
-                    <Text className="text-[12.5px] font-bold text-gray-600 ml-1.5">
-                      ลองเสนอสไตล์ใหม่อีกครั้ง
+                    <Text className="text-[15px] mr-1.5">{tag.emoji}</Text>
+                    <Text
+                      className={
+                        on
+                          ? "text-[13px] font-bold text-white"
+                          : "text-[13px] font-bold text-gray-700"
+                      }
+                    >
+                      {tag.label}
                     </Text>
+                    {on ? (
+                      <CheckIcon size={14} color="#FFFFFF" style={{ marginLeft: 5 }} />
+                    ) : null}
                   </TouchableOpacity>
-                ) : null}
-              </>
-            )}
-          </ScrollView>
+                );
+              })}
+            </ScrollView>
+          )}
 
-          {/* ปุ่มยกเลิก (กดได้เสมอ) */}
-          <View className="px-5 pb-5 pt-2 border-t border-gray-100">
+          {/* ปุ่ม 3 ตัว */}
+          <View className="px-5 pt-1 pb-5">
             <TouchableOpacity
               onPress={onCancel}
               activeOpacity={0.85}
@@ -175,12 +177,44 @@ export function ChatStylePickerModal({
             >
               <XMarkIcon size={17} color="#4B5563" />
               <Text className="text-gray-700 font-bold text-[13.5px] ml-1.5">
-                {busy
-                  ? "ปิด (สถานที่จะขึ้นในแชทเอง)"
-                  : "ยกเลิก (ถามเป็นแชทธรรมดาแทน)"}
+                ยกเลิก
               </Text>
             </TouchableOpacity>
-            <View className="flex-row items-center justify-center mt-2.5">
+
+            <TouchableOpacity
+              onPress={onAiPick}
+              activeOpacity={0.85}
+              disabled={busy}
+              className="rounded-xl py-3 items-center justify-center flex-row bg-white border border-violet-300 mt-2.5"
+            >
+              <SparklesIcon size={17} color="#7C3AED" />
+              <Text className="text-violet-700 font-bold text-[13.5px] ml-1.5">
+                ให้เอไaiคิดให้
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={() => onConfirm(selected)}
+              activeOpacity={0.85}
+              disabled={busy || selected.length === 0}
+              className={
+                busy || selected.length === 0
+                  ? "rounded-xl py-3 items-center justify-center flex-row bg-gray-200 mt-2.5"
+                  : "rounded-xl py-3 items-center justify-center flex-row bg-violet-600 mt-2.5"
+              }
+            >
+              <Text
+                className={
+                  busy || selected.length === 0
+                    ? "text-gray-400 font-bold text-[13.5px]"
+                    : "text-white font-bold text-[13.5px]"
+                }
+              >
+                ยืนยันแท็กที่เลือก
+              </Text>
+            </TouchableOpacity>
+
+            <View className="flex-row items-center justify-center mt-3">
               <SparklesIcon size={13} color="#9CA3AF" />
               <Text className="text-[11.5px] text-gray-400 ml-1">
                 สถานที่ทั้งหมดมาจาก Google Maps จริง

@@ -36,7 +36,14 @@ import {
 import type { FolderPlace } from "../folderContext";
 import { lookupPlace, findNameMatches } from "../placeLookup";
 import type { PlaceChoice } from "../placeLookup";
-import { discoverPlaces, proposeStyles } from "../discovery";
+import {
+  DISCOVERY_TAGS,
+  FALLBACK_STYLES,
+  discoverPlaces,
+  normalizeStyle,
+  proposeTagsFromCatalog,
+} from "../discovery";
+import type { DiscoveryStyle } from "../discovery";
 import type { LocationScope } from "../placeScope";
 import { detectProvinceInText } from "../communityContext";
 
@@ -1113,12 +1120,15 @@ router.post("/", async (req: Request, res: Response) => {
  * Body: {
  *   messages: { role, content }[],   // ประวัติแชท (เอาไว้หาคำถามล่าสุด)
  *   area?: string,                   // พื้นที่ที่ผู้ใช้เลือก/ระบุ
- *   style?: { id, label, emoji, desc, query }   // ถ้ายังไม่เลือกสไตล์ → ไม่ต้องส่ง
+ *   tags?: { id, label, emoji, desc, query }[],   // แท็กที่ผู้ใช้เลือก (ได้หลายอัน)
+ *   aiPicks?: boolean,               // ผู้ใช้กด "ให้เอไaiคิดให้" → ให้ AI เลือกแท็กเอง
+ *   excludePlaceIds?: string[],      // สถานที่ที่เคยส่งไปแล้ว (ตอนกด "รีเฟช") → ห้ามซ้ำ
+ *   excludeNames?: string[],
  * }
  *
  * Response:
- *   · ไม่ส่ง style → { styles: [...] }        (AI เสนอสไตล์ตามคำถาม)
- *   · ส่ง style    → { reply, places: [...] }  (คำตอบ + การ์ดสถานที่)
+ *   · ไม่ส่ง tags/aiPicks → { tags: [...] }   (คลังแท็กจากทะเบียน OTOP — ไม่ต้องเรียก AI)
+ *   · ส่ง tags หรือ aiPicks → { reply, places, tags }  (คำตอบ + การ์ดสถานที่)
  */
 router.post("/discovery", async (req: Request, res: Response) => {
   const body = req.body ?? {};
@@ -1126,8 +1136,20 @@ router.post("/discovery", async (req: Request, res: Response) => {
   const area = typeof body.area === "string" ? body.area.trim().slice(0, 80) : "";
   const styleInput =
     body.style && typeof body.style === "object" ? (body.style as any) : null;
+  const tagsInput = Array.isArray(body.tags) ? (body.tags as any[]) : [];
+  const aiPicks = body.aiPicks === true;
+  const excludePlaceIds: string[] = Array.isArray(body.excludePlaceIds)
+    ? (body.excludePlaceIds as unknown[])
+        .filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+        .slice(0, 80)
+    : [];
+  const excludeNames: string[] = Array.isArray(body.excludeNames)
+    ? (body.excludeNames as unknown[])
+        .filter((n): n is string => typeof n === "string" && n.trim().length > 0)
+        .slice(0, 80)
+    : [];
 
-  // คำถามล่าสุดของผู้ใช้ = เกณฑ์ในการเสนอสไตล์/หาสถานที่
+  // คำถามล่าสุดของผู้ใช้ = เกณฑ์ในการเลือกแท็ก/หาสถานที่
   const lastUserAsk = [...messages]
     .reverse()
     .find((m) => m.role === "user")
@@ -1135,29 +1157,47 @@ router.post("/discovery", async (req: Request, res: Response) => {
   const question = (lastUserAsk ?? "").slice(0, 500);
 
   try {
-    // ── (1) ยังไม่เลือกสไตล์ → เสนอสไตล์ให้เลือกก่อน ──
-    if (!styleInput) {
-      const styles = await proposeStyles({ question, area });
+    // ── (1) ยังไม่เลือกแท็ก → ส่งคลังแท็กจากทะเบียน OTOP ให้แอป (ไม่ต้องเรียก AI) ──
+    const requestedTags = (tagsInput.length > 0 ? tagsInput : styleInput ? [styleInput] : [])
+      .map((t) => normalizeStyle(t))
+      .filter((t): t is DiscoveryStyle => Boolean(t));
+
+    if (!aiPicks && requestedTags.length === 0) {
       console.log(
-        `[ai-chat/discovery] เสนอสไตล์ ${styles.length} แบบ · คำถาม="${question.slice(0, 60)}"`
+        `[ai-chat/discovery] ส่งคลังแท็ก ${DISCOVERY_TAGS.length} แบบ · คำถาม="${question.slice(0, 60)}"`
       );
-      return res.json({ styles });
+      // `styles` คงไว้ให้แอปเวอร์ชันเก่าที่ยังเรียกแบบนี้
+      return res.json({ tags: DISCOVERY_TAGS, styles: DISCOVERY_TAGS });
     }
 
-    // ── (2) เลือกสไตล์แล้ว → หาสถานที่จริง + ให้เอไaiตอบตามบริบท ──
+    // ── (2) ผู้ใช้กด "ให้เอไaiคิดให้" → ให้ AI เลือกแท็กเอง (2-3 อัน) ──
+    let tags = requestedTags;
+    if (aiPicks) {
+      tags = await proposeTagsFromCatalog({ question, area, catalog: DISCOVERY_TAGS });
+      console.log(
+        `[ai-chat/discovery] เอไaiเลือกแท็กเอง: ${tags.map((t) => t.id).join(", ")}`
+      );
+    }
+    if (tags.length === 0) tags = [normalizeStyle(FALLBACK_STYLES[0])!];
+
+    // ── (3) เลือกแท็กแล้ว → หาสถานที่จริง + ให้เอไaiตอบตามบริบท ──
     const result = await discoverPlaces({
       question,
       area,
-      style: styleInput,
+      tags,
       count: 6,
+      excludePlaceIds,
+      excludeNames,
     });
     console.log(
-      `[ai-chat/discovery] สไตล์="${result.style.label}" · พื้นที่="${result.area ?? "-"}" · ` +
-        `ได้สถานที่ ${result.places.length} แห่ง`
+      `[ai-chat/discovery] แท็ก="${result.tags.map((t) => t.label).join(", ")}" · ` +
+        `พื้นที่="${result.area ?? "-"}" · ได้สถานที่ ${result.places.length} แห่ง` +
+        (excludePlaceIds.length > 0 ? ` · ตัดของเดิม ${excludePlaceIds.length} แห่ง` : "")
     );
     return res.json({
       reply: result.reply,
       places: result.places,
+      tags: result.tags,
       style: result.style,
       area: result.area,
     });

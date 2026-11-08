@@ -73,6 +73,12 @@ export interface DiscoveryPlace {
   priceLevel: number | null;
   /** ประเภทจาก Google (ใช้กรอง/แสดงผล) */
   types: string[];
+  /** id ของแท็ก/สไตล์ที่สถานที่นี้มา (null = ไม่รู้) */
+  styleId: string | null;
+  /** ชื่อแท็กที่แสดงบนการ์ด */
+  styleLabel: string | null;
+  /** อีโมจิของแท็กที่แสดงบนการ์ด */
+  styleEmoji: string | null;
 }
 
 export interface DiscoveryResult {
@@ -80,7 +86,10 @@ export interface DiscoveryResult {
   reply: string;
   /** การ์ดสถานที่เรียงลงมา */
   places: DiscoveryPlace[];
+  /** แท็กแรกที่ใช้ (ของเดิม — เก็บไว้ให้โค้ดเก่าใช้ต่อได้) */
   style: DiscoveryStyle;
+  /** ทุกแท็กที่ใช้หาสถานที่ */
+  tags: DiscoveryStyle[];
   area: string | null;
 }
 
@@ -130,6 +139,89 @@ export const FALLBACK_STYLES: DiscoveryStyle[] = [
   },
 ];
 
+/**
+ * คลัง "แท็ก" ที่ผู้ใช้เลือกในป๊อปอัป (กดแท็ก ไม่ต้องพิมพ์)
+ * -------------------------------------------------------------
+ * รวมหมวดหมู่จากทะเบียนของระบบไว้ที่เดียว:
+ *   · `placeTypes.ts` → PLACE_CATEGORIES (ที่พัก · ร้านอาหาร · คาเฟ่ · กิจกรรม · ธรรมชาติ · วัด)
+ *   · `geminiSearch.ts` → TRAVEL_TOPIC_TAGS (แหล่งท่องเที่ยว · …)
+ * แล้วแตก "ธรรมชาติ" ให้เลือกแยกตามสไตล์ (ภูเขา · ทะเล · น้ำตก) ตามที่ผู้ใช้ต้องการ
+ *
+ * `query` = คำค้นภาษาไทยที่ใช้ยิง Google → ต้องเป็นคำที่ Google มีผลจริง
+ */
+export const DISCOVERY_TAGS: DiscoveryStyle[] = [
+  {
+    id: "temple",
+    label: "วัด วัฒนธรรม",
+    emoji: "🏛️",
+    desc: "วัดสำคัญ โบราณสถาน ประเพณีท้องถิ่น",
+    query: "วัด",
+  },
+  {
+    id: "attraction",
+    label: "แหล่งท่องเที่ยว ตลาด",
+    emoji: "🎭",
+    desc: "จุดถ่ายรูป ตลาดนัด แหล่งท่องเที่ยวดัง",
+    query: "แหล่งท่องเที่ยว",
+  },
+  {
+    id: "nature",
+    label: "ธรรมชาติ จุดชมวิว",
+    emoji: "🌿",
+    desc: "อุทยานแห่งชาติ จุดชมวิว สวนสาธารณะ",
+    query: "จุดชมวิว",
+  },
+  {
+    id: "mountain",
+    label: "ภูเขา",
+    emoji: "⛰️",
+    desc: "จุดเดินป่า สระ ดอย วิวมอง",
+    query: "ภูเขา",
+  },
+  {
+    id: "sea",
+    label: "ทะเล ชายหาด",
+    emoji: "🌊",
+    desc: "หาดทราย เกาะ จุดดำน้ำ",
+    query: "ชายหาด",
+  },
+  {
+    id: "waterfall",
+    label: "น้ำตก",
+    emoji: "💧",
+    desc: "น้ำตก ธาร ผา ถ้ำ",
+    query: "น้ำตก",
+  },
+  {
+    id: "activity",
+    label: "กิจกรรม เดินป่า",
+    emoji: "🏕️",
+    desc: "แคมป์ปิ้ง ล่องแก่ง จุดตกหินน้ำตก",
+    query: "จุดตกหินน้ำตก",
+  },
+  {
+    id: "cafe",
+    label: "คาเฟ่ ถ่ายรูป",
+    emoji: "☕",
+    desc: "ร้านกาแฟบรรยากาศดี มุมถ่ายรูป",
+    query: "คาเฟ่",
+  },
+  {
+    id: "food",
+    label: "ร้านอาหาร สตรีทฟู้ด",
+    emoji: "🍜",
+    desc: "ของกินขึ้นชื่อ ตลาดกลางคืน",
+    query: "ร้านอาหาร",
+  },
+  {
+    id: "stay",
+    label: "ที่พัก พักผ่อน",
+    emoji: "🛏️",
+    desc: "โรงแรม โฮมสเตย์ แคมป์ปิ้ง",
+    query: "ที่พัก",
+  },
+];
+
 // ─────────────────────────────────────────────────────────────
 //  cache (คีย์เดียวกับ placeLookup → ใช้ cache ชุดเดียวกัน)
 // ─────────────────────────────────────────────────────────────
@@ -141,24 +233,28 @@ function deps(): ReturnType<typeof defaultDeps> {
   return depsCache;
 }
 
-function searchCacheKey(query: string): string {
+function searchCacheKey(query: string, maxResults = 5): string {
   const hash = createHash("sha1").update(normalizeAdmin(query)).digest("hex").slice(0, 24);
-  return `search:${hash}`;
+  // เอาจำนวนผลลัพธ์ไปรวมในคีย์ด้วย — cache ที่มีแค่ 5 รายการไม่ควรถูกใช้แทนคำขอ 15 รายการ
+  return `search:${hash}:n${maxResults}`;
 }
 
 /** ค้น Google + cache — คำค้นเดิมไม่เสียเงินซ้ำ (30 วัน) */
-async function searchWithCache(query: string): Promise<PlaceCandidate[]> {
+async function searchWithCache(
+  query: string,
+  maxResults = 5,
+): Promise<PlaceCandidate[]> {
   const clean = query.trim();
   if (!clean) return [];
   const cache = deps().cache;
-  const key = searchCacheKey(clean);
+  const key = searchCacheKey(clean, maxResults);
   try {
     const hit = await cache?.getSearch(key);
     if (hit && hit.length > 0) return hit;
   } catch {
     // cache อ่านไม่ได้ = ไม่มี cache ไม่ใช่ห้ามตอบ
   }
-  const fresh = await searchPlaceCandidates(clean, { maxResults: 5 });
+  const fresh = await searchPlaceCandidates(clean, { maxResults });
   try {
     await cache?.putSearch(key, clean, fresh);
   } catch {
@@ -236,7 +332,7 @@ const STYLE_PROMPT = `คุณเป็นผู้ช่วยแนะนำ 
 - desc: คำอธิบายสั้น ๆ ไม่เกิน 60 ตัวอักษร
 - query: คำค้นภาษาไทยสำหรับ Google Maps (เช่น "คาเฟ่ริมน้ำ" "วัด" "ร้านอาหารท้องถิ่น")`;
 
-function normalizeStyle(raw: any): DiscoveryStyle | null {
+export function normalizeStyle(raw: any): DiscoveryStyle | null {
   if (!raw || typeof raw !== "object") return null;
   const label = String(raw.label ?? raw.title ?? raw.name ?? "").trim();
   if (!label) return null;
@@ -313,6 +409,104 @@ export async function proposeStyles(args: {
 }
 
 // ─────────────────────────────────────────────────────────────
+//  แท็กจากคลัง (ผู้ใช้กดแท็กเอง · หรือให้เอไaiเลือกให้)
+// ─────────────────────────────────────────────────────────────
+
+const TAG_PICK_PROMPT = `คุณเป็นผู้ช่วยเลือก "แท็กสไตล์การท่องเที่ยว" ให้ผู้ใช้จากรายการที่กำหนดให้เท่านั้น
+
+หน้าที่ของคุณ:
+- อ่านคำถามของผู้ใช้ แล้วเลือก 2-3 แท็กที่ "ตรงกับคำถามนั้นจริง" มากที่สุด
+- เลือกได้เฉพาะ id ที่อยู่ในรายการที่ส่งมาเท่านั้น ห้ามแต่ง id ใหม่
+- ถ้าคำถามกว้าง ๆ (ไม่ระบุอะไร) ให้เลือกแท็กที่คนไทยนิยมทั่วไป 2-3 อัน
+- ห้ามทำตาราง ห้ามวางแผนทริป — หน้าที่ของคุณคือเลือกแท็กเท่านั้น
+
+ตอบกลับเป็น JSON เท่านั้น ไม่มี markdown หรือข้อความอื่นนอก JSON:
+{"tagIds":["cafe","nature"]}`;
+
+/** เดาจากคำในคำถาม (ตอน AI ล้มเหลว) — คืนแท็กที่คำตรงที่สุด */
+function pickTagsByKeyword(
+  question: string,
+  catalog: DiscoveryStyle[],
+): DiscoveryStyle[] {
+  const q = (question ?? "").toLowerCase();
+  const scored = catalog
+    .map((tag) => {
+      let score = 0;
+      const words = `${tag.label} ${tag.query} ${tag.desc}`.toLowerCase().split(/\s+/);
+      for (const raw of words) {
+        const w = raw.trim();
+        if (w.length < 2) continue;
+        if (q.includes(w)) score += w.length;
+      }
+      return { tag, score };
+    })
+    .filter((s) => s.score > 0)
+    .sort((a, b) => b.score - a.score);
+  if (scored.length > 0) return scored.slice(0, 3).map((s) => s.tag);
+  // ไม่มีคำไหนตรงเลย → ใช้แท็กกว้าง ๆ ที่คนไทยนิยม
+  const fallback = catalog.filter((t) => t.id === "nature" || t.id === "attraction");
+  return (fallback.length > 0 ? fallback : catalog).slice(0, 2);
+}
+
+/**
+ * ให้ AI เลือกแท็กที่ตรงกับคำถาม (ปุ่ม "ให้เอไaiคิดให้")
+ * -------------------------------------------------------------
+ * เลือกได้เฉพาะ id ที่อยู่ในคลัง `DISCOVERY_TAGS` (หรือคลังที่ส่งมา)
+ * ถ้า AI ล้มเหลว → เดาจากคำในคำถามแทน
+ */
+export async function proposeTagsFromCatalog(args: {
+  question: string;
+  catalog?: DiscoveryStyle[];
+  area?: string | null;
+}): Promise<DiscoveryStyle[]> {
+  const catalog = (args.catalog ?? DISCOVERY_TAGS).slice(0, 12);
+  const question = (args.question ?? "").trim();
+  if (!isAiConfigured() || catalog.length === 0) {
+    return pickTagsByKeyword(question, catalog);
+  }
+
+  try {
+    const aiResponse = await callAi({
+      system: TAG_PICK_PROMPT,
+      messages: [
+        {
+          role: "user",
+          content:
+            `คำถามของผู้ใช้: "${question}"\n` +
+            `พื้นที่: "${(args.area ?? "").trim() || "ไม่ระบุ — ทั่วประเทศไทย"}"\n\n` +
+            "แท็กที่เลือกได้:\n" +
+            catalog
+              .map((t) => `- ${t.id}: ${t.label} (คำค้น: ${t.query})`)
+              .join("\n"),
+        },
+      ],
+      maxTokens: 300,
+    });
+
+    const parsed = extractJson(aiResponse);
+    const raw: unknown[] = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray((parsed as any)?.tagIds)
+        ? (parsed as any).tagIds
+        : [];
+
+    const picked: DiscoveryStyle[] = [];
+    for (const item of raw) {
+      const id = String(item ?? "").trim().toLowerCase();
+      const tag = catalog.find((t) => t.id === id);
+      if (!tag) continue;
+      if (picked.some((t) => t.id === tag.id)) continue;
+      picked.push(tag);
+      if (picked.length >= 3) break;
+    }
+    return picked.length > 0 ? picked : pickTagsByKeyword(question, catalog);
+  } catch (err: any) {
+    console.warn("[discovery] proposeTagsFromCatalog ล้มเหลว:", err?.message);
+    return pickTagsByKeyword(question, catalog);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 //  สถานที่ (AI เสนอชื่อ → ตรวจกับ Google → เติมข้อมูลจริง)
 // ─────────────────────────────────────────────────────────────
 
@@ -342,9 +536,12 @@ async function proposePlaceNames(args: {
   area: string | null;
   style: DiscoveryStyle;
   count: number;
+  /** ชื่อที่เคยส่งให้ผู้ใช้ไปแล้ว → ห้ามเสนอซ้ำ (ตอนกด "รีเฟช") */
+  excludeNames?: string[];
 }): Promise<PlaceProposal[]> {
   if (!isAiConfigured()) return [];
   try {
+    const excluded = (args.excludeNames ?? []).filter(Boolean).slice(0, 20);
     const aiResponse = await callAi({
       system: PLACE_PROMPT,
       messages: [
@@ -354,7 +551,11 @@ async function proposePlaceNames(args: {
             `คำถามของผู้ใช้: "${args.question}"\n` +
             `พื้นที่: "${args.area ?? "ไม่ระบุ — ทั่วประเทศไทย"}"\n` +
             `สไตล์ที่ผู้ใช้เลือก: "${args.style.label}" (คำค้น: "${args.style.query}")\n` +
-            `จำนวนที่ต้องการ: ${args.count}`,
+            `จำนวนที่ต้องการ: ${args.count}` +
+            (excluded.length > 0
+              ? `\n\nห้ามเสนอสถานที่เหล่านี้ซ้ำเด็ดขาด (ผู้ใช้เห็นมาแล้ว): ` +
+                excluded.join(", ")
+              : ""),
         },
       ],
       maxTokens: 1200,
@@ -458,6 +659,10 @@ export interface FindPlacesArgs {
   area?: string | null;
   /** สไตล์ที่ผู้ใช้เลือก */
   style?: Partial<DiscoveryStyle> | null;
+  /**
+   * แท็กที่ผู้ใช้เลือก (เลือกได้หลายอัน — ถ้ามี จะใช้แท็กชุดนี้แทน `style`)
+   */
+  tags?: Array<Partial<DiscoveryStyle>>;
   /** จำนวนการ์ด */
   count?: number;
   /**
@@ -474,6 +679,19 @@ export interface FindPlacesArgs {
    * ข้อเสนอสำรองกรณี AI ไม่คืนชื่อ — ใช้คำค้นกว้างกับ Google
    */
   fallbackProposals?: Array<{ name: string; description: string }>;
+  /**
+   * placeId ที่เคยส่งให้ผู้ใช้ไปแล้ว → ต้องไม่ส่งซ้ำ (ตอนกด "รีเฟช")
+   */
+  excludePlaceIds?: string[];
+  /**
+   * ชื่อสถานที่ที่เคยส่งไปแล้ว → ใช้บอก AI และกรองซ้ำ
+   */
+  excludeNames?: string[];
+  /**
+   * เติมการ์ดให้ครบ `count` เสมอ (ค้น Google เพิ่มถ้าของจาก AI ไม่พอ)
+   * · ปิดไว้ = พฤติกรรมเดิม (เติมเมื่อได้ไม่ถึง 2 แห่ง)
+   */
+  fillToCount?: boolean;
 }
 
 export interface FindPlacesResult {
@@ -494,22 +712,51 @@ export async function findPlacesForStyle(args: FindPlacesArgs): Promise<FindPlac
   const style = normalizeStyle(args.style ?? {}) ?? FALLBACK_STYLES[0];
   const area = (args.area ?? "").trim() || detectProvinceInText(question) || null;
 
+  // ของเดิมที่เคยส่งไปแล้ว (ตอนกด "รีเฟช") → ห้ามส่งซ้ำ
+  const excludeIds = new Set((args.excludePlaceIds ?? []).filter(Boolean));
+  const excludeNames = new Set(
+    (args.excludeNames ?? [])
+      .map((n) => (n ?? "").trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const isExcluded = (candidate: PlaceCandidate): boolean => {
+    if (candidate.placeId && excludeIds.has(candidate.placeId)) return true;
+    const name = (candidate.name ?? "").trim().toLowerCase();
+    return name.length > 0 && excludeNames.has(name);
+  };
+
   // 1) AI เสนอชื่อสถานที่
-  const aiProposals = await proposePlaceNames({ question, area, style, count });
+  const aiProposals = await proposePlaceNames({
+    question,
+    area,
+    style,
+    count,
+    excludeNames: args.excludeNames,
+  });
   const proposals =
     aiProposals.length > 0 ? aiProposals : (args.fallbackProposals ?? []);
 
   // 2) ตรวจชื่อกับ Google
   const strict = args.strictNameMatch !== false;
   let verified = await verifyAgainstGoogle(proposals, area, strict);
+  // ทิ้งของที่เคยส่งไปแล้ว
+  verified = verified.filter((item) => !isExcluded(item.candidate));
 
   // เจอน้อยเกินไป → ค้น Google ตรง ๆ ด้วยคำค้นของสไตล์ (กันการ์ดว่าง)
-  if (verified.length < 2) {
+  // · ปกติ (เส้นทางเดิมของ /trips/suggest-places) → เติมเมื่อได้ไม่ถึง 2 แห่ง (พฤติกรรมเดิม)
+  // · เส้นทางแท็กหลายอัน / ตอนกด "รีเฟช" → เติมให้ครบตามจำนวนที่ขอ
+  const fillToCount =
+    args.fillToCount === true || excludeIds.size > 0 || excludeNames.size > 0;
+  const threshold = fillToCount ? count : 2;
+  if (verified.length < threshold) {
     try {
       const query = `${style.query} ${area ?? "ประเทศไทย"}`.trim();
-      const raw = await searchWithCache(query);
+      // เผื่อไว้เท่าจำนวนที่ต้องตัดออก เพื่อให้ยังเติมครบหลังกรอง
+      const want = Math.min(count + excludeIds.size + 5, 20);
+      const raw = await searchWithCache(query, want);
       const fallback = raw
         .filter((c) => c.businessStatus !== "CLOSED_PERMANENTLY")
+        .filter((c) => !isExcluded(c))
         .sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
       for (const candidate of fallback) {
         if (verified.length >= count) break;
@@ -559,6 +806,9 @@ export async function findPlacesForStyle(args: FindPlacesArgs): Promise<FindPlac
       openingHours: c.openingHours ?? null,
       priceLevel: c.priceLevel ?? null,
       types: c.types ?? [],
+      styleId: style.id,
+      styleLabel: style.label,
+      styleEmoji: style.emoji,
     };
   });
 
@@ -572,36 +822,121 @@ export async function findPlacesForStyle(args: FindPlacesArgs): Promise<FindPlac
  */
 export async function discoverPlaces(args: FindPlacesArgs): Promise<DiscoveryResult> {
   const question = (args.question ?? "").trim();
+
+  // ผู้ใช้เลือกหลายแท็ก → หาสถานที่ตามแต่ละแท็ก แล้วรวมเป็นชุดเดียว
+  if (Array.isArray(args.tags) && args.tags.length > 0) {
+    const found = await findPlacesForTags({ ...args, withDetails: true });
+    const reply = await writeReply({
+      question,
+      area: found.area,
+      tags: found.tags,
+      places: found.places,
+    });
+    return {
+      reply,
+      places: found.places,
+      style: found.tags[0],
+      tags: found.tags,
+      area: found.area,
+    };
+  }
+
   const found = await findPlacesForStyle({ ...args, withDetails: true });
   const reply = await writeReply({
     question,
     area: found.area,
-    style: found.style,
+    tags: [found.style],
     places: found.places,
   });
   return {
     reply,
     places: found.places,
     style: found.style,
+    tags: [found.style],
     area: found.area,
   };
+}
+
+/**
+ * หาสถานที่ตามหลายแท็ก (ผู้ใช้เลือกได้หลายอันในป๊อปอัป)
+ * -------------------------------------------------------------
+ * แบ่งจำนวนการ์ดเท่า ๆ กันตามจำนวนแท็ก → รวมผลแล้วตัดของซ้ำออก
+ * แต่ละใบติดป้ายแท็กของตัวเอง (ให้แอปแสดงถูกใบ)
+ */
+export async function findPlacesForTags(args: FindPlacesArgs): Promise<{
+  places: DiscoveryPlace[];
+  tags: DiscoveryStyle[];
+  area: string | null;
+}> {
+  const question = (args.question ?? "").trim();
+  const count = Math.max(1, Math.min(args.count ?? 6, 8));
+  const area = (args.area ?? "").trim() || detectProvinceInText(question) || null;
+
+  const tags = (args.tags ?? [])
+    .map((t) => normalizeStyle(t ?? {}))
+    .filter((t): t is DiscoveryStyle => Boolean(t))
+    .slice(0, 6);
+  const useTags = tags.length > 0 ? tags : [FALLBACK_STYLES[0]];
+
+  // แบ่งจำนวนการ์ดเท่า ๆ กัน (เช่น 6 ใบ 2 แท็ก = 3+3)
+  const per = Math.max(1, Math.ceil(count / useTags.length));
+
+  const excludeIds = new Set((args.excludePlaceIds ?? []).filter(Boolean));
+  const excludeNames = new Set(
+    (args.excludeNames ?? [])
+      .map((n) => (n ?? "").trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const seen = new Set<string>();
+  const merged: DiscoveryPlace[] = [];
+
+  // หาแต่ละแท็กพร้อมกัน (แต่ละแท็ก = 1 รอบ AI + Google) → ไม่ต้องรอทีละแท็ก
+  const foundPerTag = await Promise.all(
+    useTags.map((tag) =>
+      findPlacesForStyle({
+        ...args,
+        question,
+        area,
+        style: tag,
+        count: per,
+        withDetails: args.withDetails,
+        excludePlaceIds: args.excludePlaceIds,
+        excludeNames: args.excludeNames,
+        fillToCount: true,
+      }),
+    ),
+  );
+
+  for (const found of foundPerTag) {
+    for (const place of found.places) {
+      const key = place.placeId || place.name;
+      if (!key || seen.has(key)) continue;
+      if (place.placeId && excludeIds.has(place.placeId)) continue;
+      if (excludeNames.has(place.name.trim().toLowerCase())) continue;
+      seen.add(key);
+      merged.push(place);
+    }
+  }
+
+  return { places: merged.slice(0, count), tags: useTags, area };
 }
 
 /** ให้เอไaiเขียนคำตอบตามบริบทคำถาม โดยยึดรายการที่ยืนยันกับ Google แล้ว */
 async function writeReply(args: {
   question: string;
   area: string | null;
-  style: DiscoveryStyle;
+  tags: DiscoveryStyle[];
   places: DiscoveryPlace[];
 }): Promise<string> {
+  const tagText = args.tags.map((t) => t.label).join(" · ");
   const fallback =
     args.places.length > 0
-      ? `ได้เลยค่ะ นี่คือสถานที่สไตล์${args.style.label}` +
+      ? `ได้เลยค่ะ นี่คือสถานที่สไตล์${tagText}` +
         (args.area ? `ใน${args.area}` : "") +
         ` ที่หาเจอจาก Google Maps ทั้งหมด ${args.places.length} แห่ง ` +
         `ติ๊กที่อยากไปได้เลยค่ะ`
-      : "ขอโทษค่ะ ตอนนี้ยังหาสถานที่ที่ตรงกับสไตล์นี้ไม่เจอใน Google Maps " +
-        "ลองเปลี่ยนสไตล์หรือพื้นที่ดูอีกครั้งนะคะ";
+      : "ขอโทษค่ะ ตอนนี้ยังหาสถานที่ที่ตรงกับแท็กนี้ไม่เจอใน Google Maps " +
+        "ลองเปลี่ยนแท็กหรือพื้นที่ดูอีกครั้งนะคะ";
 
   if (!isAiConfigured() || args.places.length === 0) return fallback;
 
@@ -626,7 +961,7 @@ async function writeReply(args: {
           role: "user",
           content:
             `คำถามของผู้ใช้: "${args.question}"\n` +
-            `สไตล์ที่ผู้ใช้เลือก: ${args.style.label}\n` +
+            `แท็กที่ผู้ใช้เลือก: ${tagText}\n` +
             `พื้นที่: ${args.area ?? "ไม่ระบุ — ทั่วประเทศไทย"}\n\n` +
             "ตอบผู้ใช้สั้น ๆ ตามคำถาม และบอกว่าด้านล่างมีการ์ดสถานที่ให้ติ๊กเลือก",
         },

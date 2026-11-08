@@ -186,6 +186,9 @@ function parsePlaceCards(raw: unknown): ChatPlaceCard[] | undefined {
       types: Array.isArray(p.types)
         ? p.types.filter((t): t is string => typeof t === "string")
         : [],
+      styleId: str(p.styleId),
+      styleLabel: str(p.styleLabel),
+      styleEmoji: str(p.styleEmoji),
     });
   }
   return list.length > 0 ? list : undefined;
@@ -214,56 +217,85 @@ function parseDiscoveryStyles(raw: unknown): DiscoveryStyle[] {
       desc: typeof s.desc === "string" ? s.desc.trim() : "",
       query: typeof s.query === "string" && s.query.trim() ? s.query.trim() : label,
     });
-    if (list.length >= 6) break;
+    if (list.length >= 12) break;
   }
   return list;
 }
 
 /**
- * สไตล์สำรอง — ใช้ตอนเอไaiเสนอสไตล์ไม่ได้/ช้าเกินไป
- * (ต้องมีอยู่เสมอ เพื่อให้ผู้ใช้เลือกได้โดยไม่ต้องรอ)
+ * คลังแท็กสำรอง — ชุดเดียวกับ `DISCOVERY_TAGS` ของ backend
+ * (ดึงหมวดหมู่มาจากทะเบียน OTOP ของระบบ) · ใช้ตอนเรียก backend ไม่สำเร็จ
+ * (ผู้ใช้ต้องเลือกแท็กได้เสมอ แม้ไม่มีเน็ต)
  */
-export const FALLBACK_DISCOVERY_STYLES: DiscoveryStyle[] = [
+export const FALLBACK_DISCOVERY_TAGS: DiscoveryStyle[] = [
   {
-    id: "culture",
-    label: "วัด ประวัติศาสตร์ วัฒนธรรม",
+    id: "temple",
+    label: "วัด วัฒนธรรม",
     emoji: "🏛️",
-    desc: "โบราณสถาน วัดสำคัญ วิถีชีวิตท้องถิ่น",
+    desc: "วัดสำคัญ โบราณสถาน ประเพณีท้องถิ่น",
     query: "วัด",
   },
   {
+    id: "attraction",
+    label: "แหล่งท่องเที่ยว ตลาด",
+    emoji: "🎭",
+    desc: "จุดถ่ายรูป ตลาดนัด แหล่งท่องเที่ยวดัง",
+    query: "แหล่งท่องเที่ยว",
+  },
+  {
     id: "nature",
-    label: "ธรรมชาติ ภูเขา และวิวสวย",
+    label: "ธรรมชาติ จุดชมวิว",
     emoji: "🌿",
-    desc: "จุดชมวิว อุทยานแห่งชาติ น้ำตก",
-    query: "อุทยานแห่งชาติ",
+    desc: "อุทยานแห่งชาติ จุดชมวิว สวนสาธารณะ",
+    query: "จุดชมวิว",
+  },
+  {
+    id: "mountain",
+    label: "ภูเขา",
+    emoji: "⛰️",
+    desc: "จุดเดินป่า สระ ดอย วิวมอง",
+    query: "ภูเขา",
+  },
+  {
+    id: "sea",
+    label: "ทะเล ชายหาด",
+    emoji: "🌊",
+    desc: "หาดทราย เกาะ จุดดำน้ำ",
+    query: "ชายหาด",
+  },
+  {
+    id: "waterfall",
+    label: "น้ำตก",
+    emoji: "💧",
+    desc: "น้ำตก ธาร ผา ถ้ำ",
+    query: "น้ำตก",
   },
   {
     id: "cafe",
-    label: "คาเฟ่ ถ่ายรูป ชิคๆ",
+    label: "คาเฟ่ ถ่ายรูป",
     emoji: "☕",
     desc: "ร้านกาแฟบรรยากาศดี มุมถ่ายรูป",
     query: "คาเฟ่",
   },
   {
     id: "food",
-    label: "ตะลุยกิน สตรีทฟู้ด ร้านเด็ด",
+    label: "ร้านอาหาร สตรีทฟู้ด",
     emoji: "🍜",
     desc: "ของกินขึ้นชื่อ ตลาดกลางคืน",
     query: "ร้านอาหาร",
   },
   {
-    id: "adventure",
-    label: "กิจกรรมลุย ๆ ผจญภัย",
-    emoji: "🚣",
-    desc: "เดินป่า ล่องแก่ง ปีกอินทรี",
+    id: "activity",
+    label: "กิจกรรม เดินป่า",
+    emoji: "🏕️",
+    desc: "แคมป์ปิ้ง ล่องแก่ง จุดตกหินน้ำตก",
     query: "จุดตกหินน้ำตก",
   },
   {
-    id: "relax",
-    label: "พักผ่อน สบาย ๆ ไม่เร่งรีบ",
-    emoji: "🏖️",
-    desc: "แคมป์ปิ้ง ริมน้ำ สปา วิถีสโลว์ไลฟ์",
+    id: "stay",
+    label: "ที่พัก พักผ่อน",
+    emoji: "🛏️",
+    desc: "โรงแรม โฮมสเตย์ แคมป์ปิ้ง ริมน้ำ สปา วิถีสโลว์ไลฟ์",
     query: "ที่พัก",
   },
 ];
@@ -274,55 +306,65 @@ export interface DiscoveryPlacesReply {
   reply: string;
   /** การ์ดสถานที่เรียงลงมา */
   places: ChatPlaceCard[];
-  /** สไตล์ที่ผู้ใช้เลือก */
-  style: DiscoveryStyle;
+  /** แท็กที่ใช้หาสถานที่ (ผู้ใช้เลือกเอง หรือให้เอไaiเลือกให้) */
+  tags: DiscoveryStyle[];
   /** พื้นที่ที่ใช้ค้น (null = ทั่วประเทศไทย) */
   area: string | null;
 }
 
 /**
- * ขอ "สไตล์" ที่เอไaiเสนอตามคำถาม
+ * ขอ "คลังแท็ก" ที่ผู้ใช้จะเลือกในป๊อปอัป
  * -------------------------------------------------------------
- * เรียกก่อนที่ผู้ใช้จะเลือกสไตล์ — ถ้าล้มเหลวคืนชุดสำรอง 6 แบบ
- * (ผู้ใช้ต้องเลือกได้เสมอ)
+ * backend ส่งคลังคงที่กลับมา (ไม่ต้องรอ AI → ป๊อปอัปขึ้นทันที)
+ * ถ้าล้มเหลวคืนชุดสำรองในแอป (ผู้ใช้ต้องเลือกได้เสมอ)
  */
-export async function requestDiscoveryStyles(opts: {
-  messages: ChatTurn[];
+export async function requestDiscoveryTags(opts: {
+  messages?: ChatTurn[];
   area?: string | null;
 }): Promise<DiscoveryStyle[]> {
   try {
-    const data = await withToast<{ styles?: unknown }>({
+    const data = await withToast<{ tags?: unknown; styles?: unknown }>({
       label: "ai-chat/discovery",
       path: "/ai-chat/discovery",
       method: "POST",
       body: {
-        messages: opts.messages,
+        messages: opts.messages ?? [],
         area: opts.area ?? undefined,
       },
       timeoutMs: API_TIMEOUT_MS * 3,
     });
-    const styles = parseDiscoveryStyles(data?.styles);
-    return styles.length >= 2 ? styles : FALLBACK_DISCOVERY_STYLES;
+    const tags = parseDiscoveryStyles(data?.tags ?? data?.styles);
+    return tags.length >= 2 ? tags : FALLBACK_DISCOVERY_TAGS;
   } catch {
-    // ล้มเหลว = ใช้ชุดสำรอง (ผู้ใช้ยังเลือกสไตล์ได้)
-    return FALLBACK_DISCOVERY_STYLES;
+    // ล้มเหลว = ใช้ชุดสำรอง (ผู้ใช้ยังเลือกแท็กได้)
+    return FALLBACK_DISCOVERY_TAGS;
   }
 }
 
 /**
- * ขอสถานที่ตามสไตล์ที่ผู้ใช้เลือก
+ * ขอสถานที่ตามแท็กที่ผู้ใช้เลือก (หรือให้เอไaiเลือกให้)
  * -------------------------------------------------------------
  * คืนคำตอบข้อความ + การ์ดสถานที่ (ข้อมูลจริงจาก Google Places)
+ *
+ * `excludePlaceIds` / `excludeNames` = สถานที่ที่เคยได้ไปแล้ว
+ * → รอบนี้จะไม่ย้ำสถานที่เดิม (ใช้ตอนกด "รีเฟช")
  */
 export async function requestDiscoveryPlaces(opts: {
   messages: ChatTurn[];
   area?: string | null;
-  style: DiscoveryStyle;
+  /** แท็กที่ผู้ใช้ยืนยัน (ยืนยันแล้วค่อยส่ง) */
+  tags?: DiscoveryStyle[];
+  /** สถานที่ที่เคยได้ไปแล้ว — ห้ามย้ำ */
+  excludePlaceIds?: string[];
+  /** ชื่อสถานที่ที่เคยได้ไปแล้ว — ห้ามย้ำ */
+  excludeNames?: string[];
+  /** true = ให้เอไaiเลือกแท็กเองจากคำถาม (ไม่ต้องยืนยัน) */
+  aiPicks?: boolean;
 }): Promise<DiscoveryPlacesReply> {
   const data = await withToast<{
     reply?: unknown;
     places?: unknown;
-    style?: unknown;
+    tags?: unknown;
     area?: unknown;
   }>({
     label: "ai-chat/discovery",
@@ -331,7 +373,10 @@ export async function requestDiscoveryPlaces(opts: {
     body: {
       messages: opts.messages,
       area: opts.area ?? undefined,
-      style: opts.style,
+      tags: opts.tags,
+      excludePlaceIds: opts.excludePlaceIds,
+      excludeNames: opts.excludeNames,
+      aiPicks: opts.aiPicks ? true : undefined,
     },
     timeoutMs: API_TIMEOUT_MS * 5,
   });
@@ -350,13 +395,13 @@ export async function requestDiscoveryPlaces(opts: {
   }
 
   const places = parsePlaceCards(data.places) ?? [];
-  const parsedStyles = parseDiscoveryStyles(
-    Array.isArray(data.style) ? data.style : data.style ? [data.style] : []
+  const tags = parseDiscoveryStyles(
+    Array.isArray(data.tags) ? data.tags : data.tags ? [data.tags] : []
   );
   return {
     reply: data.reply,
     places,
-    style: parsedStyles[0] ?? opts.style,
+    tags,
     area: typeof data.area === "string" && data.area.trim() ? data.area.trim() : null,
   };
 }

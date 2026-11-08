@@ -42,8 +42,8 @@ import { useAuth } from "../../state/AuthContext";
 import {
   sendChat,
   requestDiscoveryPlaces,
-  requestDiscoveryStyles,
-  FALLBACK_DISCOVERY_STYLES,
+  requestDiscoveryTags,
+  FALLBACK_DISCOVERY_TAGS,
 } from "../../services/aiChatService";
 import { asAiError } from "../../services/aiHttp";
 import { getFolderContext, type FolderContextInfo } from "../../services/folderContextService";
@@ -122,6 +122,9 @@ interface AiChatScreenProps {
   /** แผนทริปที่กำลังจะให้เอไaiช่วยแก้ (จากหน้าแผนทริป) */
   initialPlanContext?: unknown;
 }
+
+/** การ์ดสถานที่ 1 ใบ (ใช้กับตัวแปรของการรีเฟช) */
+type DiscoveryCard = NonNullable<AiChatMessage["placeCards"]>[number];
 
 const SUGGESTIONS = [
   "ช่วยวางแผนทริป 3 วันจากคลิปที่เซฟไว้",
@@ -421,23 +424,23 @@ export default function AiChatScreen({
   const [showDestinationPicker, setShowDestinationPicker] = useState<boolean>(false);
   const [pendingPlanMessageId, setPendingPlanMessageId] = useState<string | null>(null);
 
-  // ── เส้นทาง "ถามแนะนำสถานที่" (ป๊อปอัปเลือกสไตล์ → การ์ดสถานที่) ──
-  /** ป๊อปอัปเลือกสไตล์เปิดอยู่ไหม */
+  // ── เส้นทาง "ถามแนะนำสถานที่" (ป๊อปอัปเลือกแท็ก → การ์ดสถานที่) ──
+  /** ป๊อปอัปเลือกแท็กเปิดอยู่ไหม */
   const [stylePickerOpen, setStylePickerOpen] = useState(false);
-  /** สไตล์ที่เอไaiเสนอตามคำถาม (กำลังโหลดอยู่ → แอปมีชุดสำรองให้แทน) */
-  const [discoveryStyles, setDiscoveryStyles] = useState<DiscoveryStyle[]>([]);
-  const [discoveryStylesLoading, setDiscoveryStylesLoading] = useState(false);
-  /** กำลังดึงการ์ดสถานที่จริงจาก Google (หลังผู้ใช้เลือกสไตล์แล้ว) */
+  /** คลังแท็ก (จาก backend · ถ้ายังไม่ได้ → แอปมีชุดสำรองให้แทน) */
+  const [discoveryTags, setDiscoveryTags] = useState<DiscoveryStyle[]>([]);
+  const [discoveryTagsLoading, setDiscoveryTagsLoading] = useState(false);
+  /** กำลังดึงการ์ดสถานที่จริงจาก Google (หลังผู้ใช้ยืนยันแท็กแล้ว) */
   const [discoveryLoading, setDiscoveryLoading] = useState(false);
-  /** คำถามที่กำลังรอเลือกสไตล์ (แสดงในหัวป๊อปอัป) */
+  /** คำถามที่กำลังรอเลือกแท็ก (แสดงในหัวป๊อปอัป) */
   const [discoveryQuestion, setDiscoveryQuestion] = useState("");
   /** สถานที่ที่ผู้ใช้ติ๊กในการ์ด — key = id ข้อความ */
   const [selectedPlaceCards, setSelectedPlaceCards] = useState<Record<string, string[]>>({});
-  /** คำถามที่กำลังรอเลือกสไตล์ (เก็บใน ref เพราะ handler อาจถูกเรียกจากป๊อปอัปที่ค้างอยู่) */
+  /** คำถามที่กำลังรอเลือกแท็ก (เก็บใน ref เพราะ handler อาจถูกเรียกจากป๊อปอัปที่ค้างอยู่) */
   const discoveryQuestionRef = useRef("");
-  /** ข้อความที่จะถูกแทนที่เมื่อกด "สถานที่อื่น / เปลี่ยนสไตล์" (null = ข้อความใหม่) */
+  /** ข้อความที่จะถูกแทนที่เมื่อกด "เปลี่ยนแท็ก" (null = ข้อความใหม่) */
   const discoveryReplaceIdRef = useRef<string | null>(null);
-  /** ผู้ใช้เลือกสไตล์ไปแล้วไหม → ถ้าเลือกแล้ว สไตล์จากเอไaiที่มาช้าต้องไม่ทับรายการ */
+  /** ผู้ใช้ยืนยันแท็กไปแล้วไหม → คลังแท็กจาก backend ที่มาช้าต้องไม่ทับรายการ */
   const discoveryPickedRef = useRef(false);
   /**
    * กันส่งซ้ำขณะที่เอไaiกำลังตอบ
@@ -940,7 +943,11 @@ export default function AiChatScreen({
       startDate,
       endDate,
       startTime: base.startTime ?? "08:00",
-      style: msg?.discoveryStyle?.label ?? base.style ?? null,
+      style:
+        msg?.discoveryTags?.map((t) => t.label).join(" · ") ||
+        msg?.discoveryStyle?.label ||
+        base.style ||
+        null,
     });
 
     await handleCreatePlan(messageId, { extraStops: stops, targetId: messageId });
@@ -1597,35 +1604,49 @@ export default function AiChatScreen({
   ];
 
   /**
-   * เปิดป๊อปอัปเลือกสไตล์
+   * เปิดป๊อปอัปเลือกแท็ก
    * -------------------------------------------------------------
    * · ครั้งแรก = คำถามใหม่ที่ผู้ใช้พิมพ์
-   * · ครั้งหลัง = กด "สถานที่อื่น / เปลี่ยนสไตล์" (ส่ง id ข้อความเดิมมาให้แทนที่)
+   * · ครั้งหลัง = กด "เปลี่ยนแท็ก" (ส่ง id ข้อความเดิมมาให้แทนที่)
    */
   const startDiscovery = async (question: string, replaceMessageId?: string) => {
     discoveryQuestionRef.current = question;
     discoveryReplaceIdRef.current = replaceMessageId ?? null;
     discoveryPickedRef.current = false;
     setDiscoveryQuestion(question);
-    // โชว์สไตล์สำรองทันที (ผู้ใช้เลือกได้เลย ไม่ต้องรอ) → สไตล์จากเอไaiค่อยทับเมื่อมา
-    setDiscoveryStyles(FALLBACK_DISCOVERY_STYLES);
-    setDiscoveryStylesLoading(true);
+    // โชว์คลังแท็กสำรองทันที (ผู้ใช้เลือกได้เลย ไม่ต้องรอ) → คลังจาก backend ค่อยทับเมื่อมา
+    setDiscoveryTags(FALLBACK_DISCOVERY_TAGS);
+    setDiscoveryTagsLoading(true);
     setStylePickerOpen(true);
-    // เคลียร์ช่องพิมพ์ (คำถามจะไปโผล่ในแชทตอนผู้ใช้เลือกสไตล์)
+    // เคลียร์ช่องพิมพ์ (คำถามจะไปโผล่ในแชทตอนผู้ใช้ยืนยันแท็ก)
     setDraft("");
-    const styles = await requestDiscoveryStyles({
+    const tags = await requestDiscoveryTags({
       messages: buildDiscoveryHistory(question),
     });
-    // ผู้ใช้เลือกไปแล้ว → ไม่ทับรายการที่เขากำลังดู
+    // ผู้ใช้ยืนยันไปแล้ว → ไม่ทับรายการที่เขากำลังดู
+    setDiscoveryTagsLoading(false);
     if (discoveryPickedRef.current) return;
-    setDiscoveryStyles(styles);
-    setDiscoveryStylesLoading(false);
+    setDiscoveryTags(tags);
   };
 
-  /** ผู้ใช้เลือกสไตล์แล้ว → ดึงการ์ดสถานที่จริงจาก Google → แนบในแชท */
-  const handleDiscoveryPick = async (style: DiscoveryStyle, area: string) => {
+  /**
+   * ดึงการ์ดสถานที่แล้วผนวกเข้าแชท
+   * -------------------------------------------------------------
+   * · `tags` = แท็กที่ผู้ใช้ยืนยัน · ไม่ส่ง `tags` + `aiPicks` = ให้เอไaiเลือกเอง
+   * · `replaceId` = แทนการ์ดในข้อความเดิม (กด "เปลี่ยนแท็ก")
+   * · `keepCards` = การ์ดที่ต้องเก็บไว้ (ใบที่ผู้ใช้ติ๊กไว้ตอนรีเฟช)
+   * · `excludePlaceIds` / `excludeNames` = สถานที่ที่เคยได้แล้ว (ห้ามย้ำ)
+   */
+  const runDiscovery = async (opts: {
+    tags?: DiscoveryStyle[];
+    aiPicks?: boolean;
+    replaceId?: string | null;
+    excludePlaceIds?: string[];
+    excludeNames?: string[];
+    keepCards?: DiscoveryCard[];
+  }) => {
     const question = discoveryQuestionRef.current;
-    const replaceId = discoveryReplaceIdRef.current;
+    const replaceId = opts.replaceId ?? discoveryReplaceIdRef.current ?? null;
     if (!question.trim()) return;
     discoveryPickedRef.current = true;
     setDiscoveryLoading(true);
@@ -1635,20 +1656,44 @@ export default function AiChatScreen({
     try {
       const result = await requestDiscoveryPlaces({
         messages: buildDiscoveryHistory(question),
-        area: area || null,
-        style,
+        tags: opts.tags,
+        aiPicks: opts.aiPicks,
+        excludePlaceIds: opts.excludePlaceIds,
+        excludeNames: opts.excludeNames,
       });
       setStylePickerOpen(false);
+      const kept = opts.keepCards ?? [];
+      const cards = [...kept, ...result.places];
+      const usedTags = result.tags.length > 0 ? result.tags : (opts.tags ?? []);
       if (replaceId) {
-        // เปลี่ยนสไตล์ → แทนการ์ดชุดเดิมในข้อความเดิม
+        // เปลี่ยนแท็ก → แทนการ์ดชุดเดิมในข้อความเดิม
+        const prevMsg = (thread?.messages ?? []).find((m) => m.id === replaceId);
+        const seen = Array.from(
+          new Set([
+            ...(prevMsg?.discoverySeen ?? []),
+            ...cards.map((c) => c.placeId),
+          ])
+        );
+        const seenNames = Array.from(
+          new Set([
+            ...(prevMsg?.discoverySeenNames ?? []),
+            ...cards.map((c) => c.name),
+          ])
+        );
         updateMessage(threadId, replaceId, {
           content: result.reply,
-          placeCards: result.places,
-          discoveryStyle: result.style,
+          placeCards: cards,
+          discoveryTags: usedTags,
+          discoveryStyle: usedTags[0],
+          discoverySeen: seen,
+          discoverySeenNames: seenNames,
         });
         setSelectedPlaceCards((prev) => {
           const next = { ...prev };
-          delete next[replaceId];
+          // ใบที่ผู้ใช้ติ๊กไว้ยังติ๊กอยู่ · ใบใหม่ยังไม่ติ๊ก
+          next[replaceId] = kept
+            .map((c) => c.placeId)
+            .filter((id) => (prev[replaceId] ?? []).includes(id));
           return next;
         });
       } else {
@@ -1656,8 +1701,11 @@ export default function AiChatScreen({
         appendMessage(threadId, {
           role: "assistant",
           content: result.reply,
-          placeCards: result.places,
-          discoveryStyle: result.style,
+          placeCards: cards,
+          discoveryTags: usedTags,
+          discoveryStyle: usedTags[0],
+          discoverySeen: cards.map((c) => c.placeId),
+          discoverySeenNames: cards.map((c) => c.name),
         });
       }
     } catch (err) {
@@ -1676,6 +1724,78 @@ export default function AiChatScreen({
     }
     if (fallbackQuestion) {
       void send(fallbackQuestion, { skipDiscovery: true, discoveryDismissed: true });
+    }
+  };
+
+  /** ผู้ใช้ยืนยันแท็กที่เลือกในป๊อปอัป → ดึงการ์ดสถานที่จริงจาก Google */
+  const handleDiscoveryConfirm = async (tags: DiscoveryStyle[]) => {
+    if (!tags || tags.length === 0) return;
+    await runDiscovery({ tags });
+  };
+
+  /** ผู้ใช้กด "ให้เอไaiคิดให้" → เอไaiเลือกแท็กเองจากคำถาม แล้วดึงการ์ดเลย */
+  const handleDiscoveryAiPick = async () => {
+    await runDiscovery({ aiPicks: true });
+  };
+
+  /**
+   * รีเฟชการ์ดสถานที่ (ใช้แท็กเดิมเสมอ · ของใหม่ต้องไม่ซ้ำของเดิม)
+   * -------------------------------------------------------------
+   * · ใบที่ผู้ใช้ติ๊กไว้ → เก็บไว้ (ยังติ๊กอยู่)
+   * · ที่เหลือ → แทนที่ด้วยของใหม่ที่ไม่ซ้ำ
+   */
+  const handleDiscoveryRefresh = async (messageId: string) => {
+    const msg = (thread?.messages ?? []).find((m) => m.id === messageId);
+    if (!msg) return;
+    const tags = msg.discoveryTags ?? (msg.discoveryStyle ? [msg.discoveryStyle] : []);
+    if (tags.length === 0) return;
+    const question = questionBefore(messageId) || discoveryQuestionRef.current;
+    if (!question.trim()) return;
+    const cards = msg.placeCards ?? [];
+    const seen = msg.discoverySeen ?? cards.map((c) => c.placeId);
+    const seenNames = msg.discoverySeenNames ?? cards.map((c) => c.name);
+    const picked = selectedPlaceCards[messageId] ?? [];
+    const keepCards = cards.filter((c) => picked.includes(c.placeId));
+    discoveryQuestionRef.current = question;
+    setDiscoveryLoading(true);
+    try {
+      const result = await requestDiscoveryPlaces({
+        messages: buildDiscoveryHistory(question),
+        tags,
+        excludePlaceIds: seen,
+        excludeNames: seenNames,
+      });
+      if (result.places.length === 0) {
+        Alert.alert(
+          "ไม่มีที่ใหม่ในแท็กนี้แล้ว",
+          "ลองเปลี่ยนแท็ก หรือกดค้นหาอีกครั้ง"
+        );
+        return;
+      }
+      const nextCards = [...keepCards, ...result.places];
+      updateMessage(threadId, messageId, {
+        placeCards: nextCards,
+        discoveryTags: tags,
+        discoverySeen: Array.from(
+          new Set([...seen, ...result.places.map((p) => p.placeId)])
+        ),
+        discoverySeenNames: Array.from(
+          new Set([...seenNames, ...result.places.map((p) => p.name)])
+        ),
+      });
+      // ใบที่เก็บไว้ยังติ๊กอยู่ · ใบใหม่ยังไม่ติ๊ก
+      setSelectedPlaceCards((prev) => ({
+        ...prev,
+        [messageId]: keepCards.map((c) => c.placeId),
+      }));
+    } catch (err) {
+      const aiErr = asAiError(err);
+      Alert.alert(
+        "รีเฟชไม่สำเร็จ",
+        aiErr?.message ?? "ลองใหม่อีกครั้ง"
+      );
+    } finally {
+      setDiscoveryLoading(false);
     }
   };
 
@@ -2299,13 +2419,17 @@ export default function AiChatScreen({
                             place={p}
                             selected={picked}
                             onToggle={() => togglePlaceCard(item.id, p.placeId)}
-                            styleLabel={item.discoveryStyle?.label ?? null}
-                            styleEmoji={item.discoveryStyle?.emoji ?? null}
+                            styleLabel={
+                              p.styleLabel ?? item.discoveryTags?.[0]?.label ?? null
+                            }
+                            styleEmoji={
+                              p.styleEmoji ?? item.discoveryTags?.[0]?.emoji ?? null
+                            }
                           />
                         );
                       })}
 
-                      {/* ปุ่มใต้รายการ: สร้างแพลนจากที่เลือก · ขอสถานที่อื่น/เปลี่ยนสไตล์ */}
+                      {/* ปุ่มใต้รายการ: สร้างแพลนจากที่เลือก · รีเฟช(ที่ใหม่ ไม่ซ้ำ) · เปลี่ยนแท็ก */}
                       <View className="flex-row items-center flex-wrap mt-1">
                         <TouchableOpacity
                           onPress={() => void handleCreatePlanFromCards(item.id)}
@@ -2323,6 +2447,16 @@ export default function AiChatScreen({
                           </Text>
                         </TouchableOpacity>
                         <TouchableOpacity
+                          onPress={() => void handleDiscoveryRefresh(item.id)}
+                          activeOpacity={0.85}
+                          className="flex-row items-center bg-white border border-violet-300 rounded-full px-3.5 py-2 mr-2 mb-2"
+                        >
+                          <ArrowPathIcon size={13} color="#6D28D9" />
+                          <Text className="text-violet-700 text-[12.5px] font-bold ml-1.5">
+                            รีเฟช (ที่ใหม่ ไม่ซ้ำ)
+                          </Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
                           onPress={() =>
                             void startDiscovery(questionBefore(item.id), item.id)
                           }
@@ -2331,7 +2465,7 @@ export default function AiChatScreen({
                         >
                           <ArrowPathIcon size={13} color="#4B5563" />
                           <Text className="text-gray-700 text-[12.5px] font-bold ml-1.5">
-                            สถานที่อื่น / เปลี่ยนสไตล์
+                            เปลี่ยนแท็ก
                           </Text>
                         </TouchableOpacity>
                       </View>
@@ -2749,19 +2883,16 @@ export default function AiChatScreen({
         initialStyle={draftSlots.style || ""}
       />
 
-      {/* ป๊อปอัปเลือกสไตล์ก่อนหาสถานที่ (ประเภท D) — มีปุ่มปิด/ยกเลิกเสมอ */}
+      {/* ป๊อปอัปเลือกแท็กก่อนหาสถานที่ (ประเภท D) — มีปุ่มปิด/ยกเลิกเสมอ */}
       <ChatStylePickerModal
         visible={stylePickerOpen}
-        styles={discoveryStyles}
-        loading={discoveryStylesLoading}
+        tags={discoveryTags}
+        loading={discoveryTagsLoading}
         busy={discoveryLoading}
         question={discoveryQuestion}
-        onPick={(style, area) => void handleDiscoveryPick(style, area)}
+        onConfirm={(tags) => void handleDiscoveryConfirm(tags)}
+        onAiPick={() => void handleDiscoveryAiPick()}
         onCancel={handleDiscoveryCancel}
-        onRetry={() => {
-          const q = discoveryQuestionRef.current;
-          if (q) void startDiscovery(q, discoveryReplaceIdRef.current ?? undefined);
-        }}
       />
     </View>
   );

@@ -32,9 +32,15 @@ module.exports = defineConfig([
     // The backend is plain Node, not the Expo client. `expo/no-dynamic-env-var`
     // targets client code, where `process.env.FOO` is inlined at build time by
     // Babel — in Node, `process.env[name]` resolves normally at runtime.
+    //
+    // `react-hooks/rules-of-hooks` is a React rule: it flags any `useXxx()`
+    // call that isn't inside a component/hook. The backend has no React at
+    // all, so a plain helper like `useFallbackOrOlder()` in fuelPrice.ts is a
+    // false positive — turn it off for the backend only (the app still gets it).
     files: ["backend/**"],
     rules: {
       "expo/no-dynamic-env-var": "off",
+      "react-hooks/rules-of-hooks": "off",
     },
   }
 ]);
