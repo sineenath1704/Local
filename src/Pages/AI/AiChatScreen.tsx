@@ -57,6 +57,7 @@ import {
 import { updateMyTripPlan } from "../../services/tripPlanService";
 import {
   AiChatMessage,
+  ChatPlaceCard as ChatPlaceCardData,
   ClipContext,
   ItineraryDay,
   PlaceChoice,
@@ -384,6 +385,17 @@ export default function AiChatScreen({
     null
   );
   /**
+   * จุดเริ่มต้นที่ยังไม่มี → รอผู้ใช้เลือกจาก popup (ที่บันทึกไว้) ก่อนทำเส้นทาง
+   * -------------------------------------------------------------
+   * · เกิดตอนผู้ใช้กด "สร้างแพลนทริปจาก N แห่งที่เลือก" แต่ยังไม่มีจุดเริ่มต้นที่มีพิกัด
+   * · เก็บสถานที่ที่ผู้ใช้ติ๊กไว้ → พอเลือกจุดเริ่มต้นเสร็จ ค่อยไปสร้างการ์ดตั้งค่าต่อ
+   */
+  const [pendingStartPick, setPendingStartPick] = useState<{
+    messageId: string;
+    picked: ChatPlaceCardData[];
+    stops: PlanTripRequest["extraStops"];
+  } | null>(null);
+  /**
    * sheet ที่กำลังเปิดจากการ์ด (ปฏิทินช่วงวันที่ · ล้อเวลา)
    * → อยู่ที่ระดับหน้าจอ ไม่ใช่ในแถวของลิสต์ (Modal ในแถวที่ recycle ทิ้งจะกลืนการแตะ)
    */
@@ -555,6 +567,60 @@ export default function AiChatScreen({
   };
 
   /**
+   * เริ่มทำแพลนจากสถานที่ที่ผู้ใช้ติ๊ก (หลังได้จุดเริ่มต้นจากที่บันทึกแล้ว)
+   * -------------------------------------------------------------
+   * · **จุดเริ่มต้น** = สถานที่ที่บันทึกไว้ของผู้ใช้ (ไม่ใช่สถานที่ที่ติ๊ก)
+   * · **จุดสิ้นสุด** = เลือก 1 สถานที่ → จบที่สถานที่นั้น · เลือกหลายสถานที่ → กลับจุดเริ่มต้น
+   * · สถานที่ที่ติ๊กทั้งหมด = จุดที่ต้องไปของเส้นทาง (ระบบจัดลำดับให้ตามเวลาเดินทาง + เวลาเปิดปิด)
+   */
+  const startPlanFromCards = (
+    messageId: string,
+    picked: ChatPlaceCardData[],
+    stops: PlanTripRequest["extraStops"]
+  ) => {
+    const msg = thread?.messages.find((m) => m.id === messageId);
+    const base = draftSlotsRef.current;
+
+    // จุดสิ้นสุด: เลือก 1 สถานที่ → จบที่สถานที่นั้น · เลือกหลายสถานที่ → กลับจุดเริ่มต้น
+    const single = picked.length === 1 ? picked[0] : null;
+    const singleEnd: TripPlanPoint | null = single
+      ? {
+          label: single.name,
+          address: single.address ?? null,
+          coords: { lat: single.lat as number, lng: single.lng as number },
+        }
+      : null;
+
+    applyDraftSlots({
+      ...base,
+      returnMode: single ? "custom" : "same_as_start",
+      endPoint: single ? singleEnd : null,
+      style:
+        msg?.discoveryTags?.map((t) => t.label).join(" · ") ||
+        msg?.discoveryStyle?.label ||
+        base.style ||
+        null,
+    });
+
+    // ── ข้อความฝั่งผู้ใช้ (ระบบสร้างให้เอง) ─────────────────────────
+    // → โผล่ทันที ไม่ยิงให้เอไaiตอบกลับ แต่ข้อความจะติดไปกับประวัติแชท
+    //   รอบถัดไปที่ผู้ใช้พิมพ์เอง เอไaiจะเห็นบริบทนี้
+    appendMessage(threadId, {
+      role: "user",
+      content: `สร้างแพลนทริปจาก ${picked.map((p) => p.name).join(", ")}`,
+    });
+
+    // ── การ์ดตั้งค่า (ข้อความใหม่ของเอไai) ───────────────────────
+    const setupId = appendMessage(threadId, {
+      role: "assistant",
+      content:
+        "กรอกข้อมูลที่ต้องการเพิ่มเติมได้เลย (ข้ามข้อไหนไม่ได้ก็ได้) แล้วกดยืนยันเพื่อสร้างแพลน",
+      planSetup: true,
+    });
+    setExtraStops((prev) => ({ ...prev, [setupId]: stops }));
+  };
+
+  /**
    * ผู้ใช้เลือกจุดจากตัวเลือกจุดของการ์ด
    * (จุดเริ่มต้น · จุดสิ้นสุดตอนกลับ · จุดจบของแต่ละวัน)
    */
@@ -574,7 +640,24 @@ export default function AiChatScreen({
     };
     const prev = draftSlotsRef.current;
     if (target === "start") {
+      // ถ้ารอจุดเริ่มต้นอยู่ (กด "สร้างแพลนทริปจาก N แห่งที่เลือก" แต่ยังไม่มีจุดเริ่มต้น)
+      // → จุดเริ่มต้นต้องมีพิกัด ถึงจะวางเส้นทางได้
+      const pending = pendingStartPick;
+      if (pending && !point.coords) {
+        Alert.alert(
+          "หาพิกัดไม่ได้",
+          "จุดเริ่มต้นต้องมีพิกัด จึงจะวางเส้นทางได้\n\n" +
+            "ลองเลือกจากที่บันทึกไว้ หรือพิมพ์ชื่อสถานที่ให้ละเอียดกว่านี้"
+        );
+        setCardOriginTarget("start");
+        return;
+      }
       applyDraftSlots({ ...prev, startPoint: point });
+      // → ทำขั้นต่อไปต่อเลย (ตั้งค่าจุดสิ้นสุด + สร้างการ์ดตั้งค่า)
+      if (pending) {
+        setPendingStartPick(null);
+        startPlanFromCards(pending.messageId, pending.picked, pending.stops);
+      }
       return;
     }
     if (target === "end") {
@@ -914,15 +997,17 @@ export default function AiChatScreen({
    * ปุ่ม "สร้างแพลนทริปจาก N แห่งที่เลือก" (ใต้การ์ดสถานที่)
    * -------------------------------------------------------------
    * **ขั้นที่ 1 ของ flow ใหม่ — ยังไม่คำนวณแผน**
-   *   1. สร้างฟองผู้ใช้ "สร้างแพลนทริปจาก <ชื่อที่เลือก>" (โผล่ทันที ไม่ยิงให้เอไaiตอบกลับ)
-   *   2. ต่อท้ายการ์ด "ตั้งค่าแพลนทริป" (TripQuestionFlow โหมด setup) ให้ผู้ใช้กรอกเอง
+   *   1. สถานที่ที่ผู้ใช้ติ๊ก = **จุดปลายทางของเส้นทาง** (ไม่ใช่จุดเริ่มต้น!)
+   *      · เลือก 1 สถานที่ → ใส่เป็น "จุดสิ้นสุด" ของทริป
+   *      · เลือกหลายสถานที่ → ปล่อยให้ระบบจัดเส้นทางเอง
+   *        (ประหยัดเวลาเดินทางที่สุด + เคารพเวลาเปิดปิดของแต่ละสถานที่)
+   *   2. **จุดเริ่มต้น** = สถานที่ที่บันทึกไว้ของผู้ใช้
+   *      · ยังไม่มี → เด้ง popup ให้เลือก/กรอกจุดเริ่มต้นจากที่บันทึกก่อน (ทำรูทไม่ได้ถ้าไม่มี)
+   *   3. สร้างฟองผู้ใช้ "สร้างแพลนทริปจาก <ชื่อที่เลือก>" (โผล่ทันที ไม่ยิงให้เอไaiตอบกลับ)
+   *   4. ต่อท้ายการ์ด "ตั้งค่าแพลนทริป" (TripQuestionFlow โหมด setup) ให้ผู้ใช้กรอกเอง
    * → ผู้ใช้กด "ยืนยันและสร้างแพลน" ในการ์ดตั้งค่า → ค่อยไปขั้นที่ 2 (คำนวณแพลน)
-   *
-   * จุดเริ่มต้นที่เตรียมไว้ให้ = สถานที่แรกที่ผู้ใช้ติ๊ก (ไม่ใช่ "เชียงใหม่" ของระบบ)
-   * เพราะถ้าสถานที่ที่เลือกอยู่คนละจังหวัด แผนจะออกมาเพี้ยนทันที
-   * → ผู้ใช้แก้ได้ในการ์ดตั้งค่า (แถว "จุดเริ่มต้น" → แก้ไข)
    */
-  const handleCreatePlanFromCards = async (messageId: string) => {
+  const handleCreatePlanFromCards = (messageId: string) => {
     const msg = thread?.messages.find((m) => m.id === messageId);
     const cards = msg?.placeCards ?? [];
     const chosen = selectedPlaceCards[messageId] ?? [];
@@ -940,8 +1025,11 @@ export default function AiChatScreen({
       label: p.name,
       address: p.address ?? null,
       coords: { lat: p.lat as number, lng: p.lng as number },
+      // ส่งเวลาเปิด-ปิดไปด้วย → ระบบรู้ว่าจะรอ (ถึงก่อนเปิด) หรือย้ายวัน (ปิดแล้ว)
+      // ถ้าไม่ส่ง → ระบบเตือนว่า "ไม่ทราบเวลาเปิด-ปิด" แล้วจัดลำดับเวลาเปิดให้ไม่ได้
+      openingHours: p.openingHours ?? null,
+      website: p.website ?? null,
     }));
-    setExtraStops((prev) => ({ ...prev, [messageId]: stops }));
 
     // มีการ์ดตั้งค่าค้างอยู่แล้ว → ไม่สร้างซ้ำ (กันการ์ดตั้งค่า 2 ใบ)
     if ((thread?.messages ?? []).some((m) => m.planSetup)) {
@@ -951,45 +1039,19 @@ export default function AiChatScreen({
       );
       return;
     }
+    setExtraStops((prev) => ({ ...prev, [messageId]: stops }));
 
-    // ── ข้อความฝั่งผู้ใช้ (ระบบสร้างให้เอง) ─────────────────────────
-    // → โผล่ทันที ไม่ยิงให้เอไaiตอบกลับ แต่ข้อความจะติดไปกับประวัติแชท
-    //   รอบถัดไปที่ผู้ใช้พิมพ์เอง เอไaiจะเห็นบริบทนี้
-    appendMessage(threadId, {
-      role: "user",
-      content: `สร้างแพลนทริปจาก ${picked.map((p) => p.name).join(", ")}`,
-    });
+    // ── จุดเริ่มต้นต้องมาจาก "ที่บันทึก" ของผู้ใช้ ─────────────────
+    // สถานที่ที่ผู้ใช้ติ๊กไว้ไม่ใช่จุดเริ่มต้น (เป็นจุดปลายทางของเส้นทาง)
+    //   → ถ้ายังไม่มีจุดเริ่มต้นที่มีพิกัด เด้ง popup ให้เลือก/กรอกจากที่บันทึกไว้ก่อน
+    //     (ทำเส้นทางไม่ได้ถ้าไม่มีจุดเริ่มต้น) แล้วค่อยไปต่อขั้นถัดไป
+    if (!draftSlotsRef.current.startPoint?.coords) {
+      setPendingStartPick({ messageId, picked, stops });
+      setCardOriginTarget("start");
+      return;
+    }
 
-    // ── การ์ดตั้งค่า (ข้อความใหม่ของเอไai) ───────────────────────
-    const setupId = appendMessage(threadId, {
-      role: "assistant",
-      content:
-        "กรอกข้อมูลที่ต้องการเพิ่มเติมได้เลย (ข้ามข้อไหนไม่ได้ก็ได้) แล้วกดยืนยันเพื่อสร้างแพลน",
-      planSetup: true,
-    });
-    setExtraStops((prev) => ({ ...prev, [setupId]: stops }));
-
-    // ── ค่าเริ่มต้นที่ใช้ได้เลย (ผู้ใช้แก้ได้ในการ์ดตั้งค่า) ──
-    const base = draftSlotsRef.current;
-    const first = picked[0];
-    const startPoint: TripPlanPoint = base.startPoint?.coords
-      ? base.startPoint
-      : {
-          label: first.name,
-          address: first.address ?? null,
-          coords: { lat: first.lat as number, lng: first.lng as number },
-        };
-
-    applyDraftSlots({
-      ...base,
-      startPoint,
-      endPoint: base.returnMode === "custom" ? base.endPoint : null,
-      style:
-        msg?.discoveryTags?.map((t) => t.label).join(" · ") ||
-        msg?.discoveryStyle?.label ||
-        base.style ||
-        null,
-    });
+    startPlanFromCards(messageId, picked, stops);
   };
 
   /**
@@ -2616,7 +2678,7 @@ export default function AiChatScreen({
                       {/* ปุ่มใต้รายการ: สร้างแพลนจากที่เลือก · รีเฟช(ที่ใหม่ ไม่ซ้ำ) · เปลี่ยนแท็ก */}
                       <View className="flex-row items-center flex-wrap mt-1">
                         <TouchableOpacity
-                          onPress={() => void handleCreatePlanFromCards(item.id)}
+                          onPress={() => handleCreatePlanFromCards(item.id)}
                           activeOpacity={0.85}
                           className={`flex-row items-center bg-violet-600 rounded-full px-3.5 py-2 mr-2 mb-2 ${
                             (selectedPlaceCards[item.id] ?? []).length === 0
@@ -3001,7 +3063,12 @@ export default function AiChatScreen({
       {/* ตัวเลือกจุดของการ์ดช่องข้อมูล — อยู่ที่ระดับหน้าจอ (นอกลิสต์) เพื่อไม่ให้ค้างกลืนการแตะ */}
       <OriginSelectorModal
         visible={cardOriginTarget !== null}
-        onClose={() => setCardOriginTarget(null)}
+        onClose={() => {
+          setCardOriginTarget(null);
+          // ปิดหน้าต่างเลือกจุดเริ่มต้นโดยยังไม่ได้เลือก → ยกเลิกงานที่ค้างไว้
+          // (ไม่งั้นผู้ใช้จะเลือกจุดเริ่มต้นทีหลังจากการ์ดตั้งค่า แล้ว flow เดิมกลับมาทำงานซ้ำ)
+          setPendingStartPick(null);
+        }}
         onSelectOrigin={handleCardOriginSelected}
         title={
           cardOriginTarget === "destination"
