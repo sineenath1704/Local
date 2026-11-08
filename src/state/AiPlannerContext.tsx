@@ -58,7 +58,15 @@ interface AiPlannerState {
   startGeneralThread: () => string;
   /** Start (or reuse) the thread tied to a folder. Returns thread id. */
   startFolderThread: (folderId: string, folderName: string) => string;
-  appendMessage: (threadId: string, msg: Omit<AiChatMessage, "id" | "at">) => void;
+  /**
+   * เพิ่มข้อความใหม่ในเธรด แล้ว **คืน id ของข้อความนั้น**
+   * → flow แผนทริปต้องผูกการ์ด (แพลน/สรุป) ไว้ *ท้องหลัง* ข้อความฝั่งผู้ใช้
+   *   จึงต้องรู้ id ของข้อความที่เพิ่งเพิ่มทันที
+   */
+  appendMessage: (
+    threadId: string,
+    msg: Omit<AiChatMessage, "id" | "at">
+  ) => string;
   /**
    * แก้ไขข้อความเดิมในเธรด (ไม่ใช่เพิ่มข้อความใหม่)
    * → ใช้ตอนแนบ/แก้แผนทริปที่วาดไว้กับข้อความนั้น
@@ -188,13 +196,16 @@ export function AiPlannerProvider({ children }: { children: React.ReactNode }) {
 
   const appendMessage = useCallback(
     (threadId: string, msg: Omit<AiChatMessage, "id" | "at">) => {
+      // สร้าง id นอก setThreads → คืนให้ผู้เรียกได้ทันที (ไม่ต้องรอ re-render)
+      const id = uid("m");
       setThreads((prev) =>
         prev.map((t) =>
           t.id === threadId
-            ? { ...t, messages: [...t.messages, { ...msg, id: uid("m"), at: Date.now() }] }
+            ? { ...t, messages: [...t.messages, { ...msg, id, at: Date.now() }] }
             : t
         )
       );
+      return id;
     },
     []
   );

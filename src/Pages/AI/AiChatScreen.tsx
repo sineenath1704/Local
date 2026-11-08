@@ -70,6 +70,8 @@ import {
   TRIP_MAX_DAYS,
   computeTripMissing,
   formatPlanSummary,
+  formatStopsSelectionText,
+  formatTripSetupText,
   isTripPlanReady,
   normalizeTripSlotsShape,
   slotsToWire,
@@ -815,7 +817,17 @@ export default function AiChatScreen({
     }
   };
 
-  /** กด "ส่งข้อมูล" ในการ์ดช่องข้อมูล → นำค่าที่กรอกไปคำนวณแผน */
+  /**
+   * ต่อท้ายข้อความ "สรุปแพลน" ลงในแชท (เส้นทางเดิมของแอป)
+   * → flow ใหม่จะไม่เรียกฟังก์ชันนี้ (ผู้ใช้ยืนยันลำดับจุดก่อนค่อยสรุป)
+   */
+  const appendPlanSummaryMessage = (plan: TripPlan) => {
+    appendMessage(threadId, {
+      role: "assistant",
+      content: formatPlanSummary(plan),
+    });
+  };
+
   const handleCreatePlan = async (
     messageId: string,
     opts?: {
@@ -823,6 +835,12 @@ export default function AiChatScreen({
       extraStops?: PlanTripRequest["extraStops"];
       /** ข้อความที่จะอัปเดตการ์ดแผน (ข้ามการอ้างอิงข้อความที่กำลังแก้อยู่) */
       targetId?: string;
+      /**
+       * ต่อท้ายข้อความ "สรุปแพลน" ในแชทหรือไม่
+       * · true (ค่าเริ่มต้น) = ต่อท้ายเหมือนเดิม (เส้นทางแชทเดิม)
+       * · false = ไม่ต่อท้าย (flow ใหม่: ผู้ใช้ยืนยันลำดับจุดก่อนค่อยสรุป)
+       */
+      appendSummary?: boolean;
     }
   ) => {
     // ถ้ากำลังแก้แผนเดิมอยู่ → แผนใหม่ต้องไปทับแผนเดิม ไม่ใช่สร้างการ์ดใหม่
@@ -844,6 +862,15 @@ export default function AiChatScreen({
     setPlanning(true);
 
     // ถ้าผู้ใช้กดข้ามจุดเริ่มต้น หรือจุดยังไม่มีพิกัด ให้เตรียมค่าเริ่มต้นที่ใช้งานได้
+    // วันที่: ผู้ใช้ข้ามไม่ระบุ → ใช้วันนี้ (จำนวนวันคิดจากจำนวนจุดที่เลือก · 3 จุดต่อวัน)
+    const pickedCount = (opts?.extraStops ?? extraStops[targetId] ?? []).length;
+    const fallbackDays = Math.min(
+      TRIP_MAX_DAYS,
+      Math.max(1, Math.ceil(pickedCount / 3))
+    );
+    const startDate = rawSlots.startDate ?? tripTodayIso();
+    const endDate = rawSlots.endDate ?? tripAddDays(startDate, fallbackDays - 1);
+
     const slots: TripSlots = {
       ...rawSlots,
       startPoint: rawSlots.startPoint?.coords
@@ -854,6 +881,8 @@ export default function AiChatScreen({
       returnMode: rawSlots.returnMode ?? "same_as_start",
       budgetPerPerson: rawSlots.budgetPerPerson ?? 3000,
       startTime: rawSlots.startTime ?? "08:00",
+      startDate,
+      endDate,
     };
 
     // รถยังไม่ได้ระบุ → การ์ดแผนจะถามอีกรอบตอนสรุปค่าใช้จ่าย
@@ -874,10 +903,7 @@ export default function AiChatScreen({
         setEditingPlanMessageId(null);
         // สรุปแผนทั้งหมดกลับให้ผู้ใช้ในแชท (ข้อ 2.3)
         // → การ์ดแพลนดูรายละเอียด แต่ในแชทต้องมีภาพรวมทั้งทริปด้วย
-        appendMessage(threadId, {
-          role: "assistant",
-          content: formatPlanSummary(plan),
-        });
+        if (opts?.appendSummary !== false) appendPlanSummaryMessage(plan);
       }
     } finally {
       setPlanning(false);
@@ -887,15 +913,14 @@ export default function AiChatScreen({
   /**
    * ปุ่ม "สร้างแพลนทริปจาก N แห่งที่เลือก" (ใต้การ์ดสถานที่)
    * -------------------------------------------------------------
-   * สถานที่ที่ติ๊กมีพิกัดจาก Google → ส่งเป็นจุดของแผน
-   * แล้วเรียกตัวสร้างแผนเดิมของแอป (ผู้ใช้ต้องกดเอง ไม่อัตโนมัติ)
+   * **ขั้นที่ 1 ของ flow ใหม่ — ยังไม่คำนวณแผน**
+   *   1. สร้างฟองผู้ใช้ "สร้างแพลนทริปจาก <ชื่อที่เลือก>" (โผล่ทันที ไม่ยิงให้เอไaiตอบกลับ)
+   *   2. ต่อท้ายการ์ด "ตั้งค่าแพลนทริป" (TripQuestionFlow โหมด setup) ให้ผู้ใช้กรอกเอง
+   * → ผู้ใช้กด "ยืนยันและสร้างแพลน" ในการ์ดตั้งค่า → ค่อยไปขั้นที่ 2 (คำนวณแพลน)
    *
-   * ค่าเริ่มต้นของแผนต้องมาจากสถานที่ที่ผู้ใช้ติ๊กจริง ไม่ใช่ค่าเริ่มต้นของระบบ
-   * (ค่าเริ่มต้นของระบบคือ "เชียงใหม่ (จุดเริ่มต้น)" + 1 วัน → ถ้าสถานที่ที่เลือก
-   *  อยู่คนละจังหวัด แผนจะออกมาเพี้ยนทันที) จึงคิดให้เองดังนี้
-   *   · จุดเริ่มต้น = สถานที่แรกที่ติ๊ก (ถ้าผู้ใช้เคยกรอกจุดเริ่มต้นไว้แล้ว → ใช้ค่าของผู้ใช้)
-   *   · จำนวนวัน = 3 จุดต่อวัน (1 วันถ้าเลือกไม่เกิน 3 แห่ง · ไม่เกิน 7 วัน)
-   *   · วันที่ = วันนี้ (ถ้าผู้ใช้เคยเลือกช่วงวันที่ไว้แล้ว → ใช้ค่าของผู้ใช้)
+   * จุดเริ่มต้นที่เตรียมไว้ให้ = สถานที่แรกที่ผู้ใช้ติ๊ก (ไม่ใช่ "เชียงใหม่" ของระบบ)
+   * เพราะถ้าสถานที่ที่เลือกอยู่คนละจังหวัด แผนจะออกมาเพี้ยนทันที
+   * → ผู้ใช้แก้ได้ในการ์ดตั้งค่า (แถว "จุดเริ่มต้น" → แก้ไข)
    */
   const handleCreatePlanFromCards = async (messageId: string) => {
     const msg = thread?.messages.find((m) => m.id === messageId);
@@ -918,7 +943,33 @@ export default function AiChatScreen({
     }));
     setExtraStops((prev) => ({ ...prev, [messageId]: stops }));
 
-    // ── ค่าเริ่มต้นของแผน: มาจากสถานที่ที่ผู้ใช้ติ๊กจริง ──────────────
+    // มีการ์ดตั้งค่าค้างอยู่แล้ว → ไม่สร้างซ้ำ (กันการ์ดตั้งค่า 2 ใบ)
+    if ((thread?.messages ?? []).some((m) => m.planSetup)) {
+      Alert.alert(
+        "มีการ์ดตั้งค่าอยู่แล้ว",
+        "กรอกข้อมูลในการ์ดตั้งค่าที่มีอยู่ให้เสร็จก่อน แล้วกดยืนยันได้เลย"
+      );
+      return;
+    }
+
+    // ── ข้อความฝั่งผู้ใช้ (ระบบสร้างให้เอง) ─────────────────────────
+    // → โผล่ทันที ไม่ยิงให้เอไaiตอบกลับ แต่ข้อความจะติดไปกับประวัติแชท
+    //   รอบถัดไปที่ผู้ใช้พิมพ์เอง เอไaiจะเห็นบริบทนี้
+    appendMessage(threadId, {
+      role: "user",
+      content: `สร้างแพลนทริปจาก ${picked.map((p) => p.name).join(", ")}`,
+    });
+
+    // ── การ์ดตั้งค่า (ข้อความใหม่ของเอไai) ───────────────────────
+    const setupId = appendMessage(threadId, {
+      role: "assistant",
+      content:
+        "กรอกข้อมูลที่ต้องการเพิ่มเติมได้เลย (ข้ามข้อไหนไม่ได้ก็ได้) แล้วกดยืนยันเพื่อสร้างแพลน",
+      planSetup: true,
+    });
+    setExtraStops((prev) => ({ ...prev, [setupId]: stops }));
+
+    // ── ค่าเริ่มต้นที่ใช้ได้เลย (ผู้ใช้แก้ได้ในการ์ดตั้งค่า) ──
     const base = draftSlotsRef.current;
     const first = picked[0];
     const startPoint: TripPlanPoint = base.startPoint?.coords
@@ -928,29 +979,111 @@ export default function AiChatScreen({
           address: first.address ?? null,
           coords: { lat: first.lat as number, lng: first.lng as number },
         };
-    const autoDays = Math.min(
-      TRIP_MAX_DAYS,
-      Math.max(1, Math.ceil(picked.length / 3))
-    );
-    const startDate = base.startDate ?? tripTodayIso();
-    const endDate = base.endDate ?? tripAddDays(startDate, autoDays - 1);
 
     applyDraftSlots({
       ...base,
       startPoint,
-      returnMode: base.returnMode ?? "same_as_start",
       endPoint: base.returnMode === "custom" ? base.endPoint : null,
-      startDate,
-      endDate,
-      startTime: base.startTime ?? "08:00",
       style:
         msg?.discoveryTags?.map((t) => t.label).join(" · ") ||
         msg?.discoveryStyle?.label ||
         base.style ||
         null,
     });
+  };
 
-    await handleCreatePlan(messageId, { extraStops: stops, targetId: messageId });
+  /**
+   * ขั้นที่ 2: ผู้ใช้กด "ยืนยันและสร้างแพลน" ในการ์ดตั้งค่า
+   * -------------------------------------------------------------
+   *   · ส่งข้อมูลที่ผู้ใช้กรอกเป็นข้อความฝั่งผู้ใช้ (ตามที่กรอกจริง ๆ)
+   *   · แล้วค่อยคำนวณแพลน → การ์ดแพลนโผล่ "ท้องหลัง" ข้อความผู้ใช้
+   *   · ยังไม่มีสรุปแพลน (สรุปตอนผู้ใช้ยืนยันลำดับจุดแล้ว)
+   */
+  const handleCreatePlanFromSetup = async (setupId: string) => {
+    const slots = draftSlotsRef.current;
+    const stops = extraStops[setupId] ?? [];
+
+    // ── ข้อความฝั่งผู้ใช้: ข้อมูลที่กรอกมา ─────────────────────────
+    appendMessage(threadId, {
+      role: "user",
+      content: formatTripSetupText(slots),
+    });
+
+    // ── ข้อความใหม่ของเอไai = ที่เกาะของการ์ดแพลน ───────────────
+    // planView = "staged" → การ์ดนี้เป็นของ flow ใหม่ (ปุ่ม "ยืนยันแพลนทริป" → การ์ดสรุป)
+    const planId = appendMessage(threadId, {
+      role: "assistant",
+      content: "",
+      planView: "staged",
+    });
+    setExtraStops((prev) => ({ ...prev, [planId]: stops }));
+
+    // ปิดการ์ดตั้งค่า (ไม่ต้องโผล่ซ้ำ)
+    updateMessage(threadId, setupId, { planSetup: false });
+
+    await handleCreatePlan(setupId, {
+      extraStops: stops,
+      targetId: planId,
+      appendSummary: false,
+    });
+  };
+
+  /**
+   * ขั้นที่ 3: ผู้ใช้กด "ยืนยันแพลนทริป" ในการ์ดแพลน (หลังจัดลำดับจุดเรียบร้อย)
+   * -------------------------------------------------------------
+   *   · ส่งรายการจุดที่ผู้ใช้จัดเองเป็นข้อความฝั่งผู้ใช้
+   *   · แล้วขึ้น "การ์ดสรุป" = กล่อง "เวลา — สถานที่" เรียงลงล่าง
+   */
+  const handleConfirmPlanStops = (messageId: string, plan: TripPlan) => {
+    const srcMsg = thread?.messages.find((m) => m.id === messageId);
+
+    // ── ข้อความฝั่งผู้ใช้: รายการจุดที่ผู้ใช้ยืนยัน ───────────────
+    appendMessage(threadId, {
+      role: "user",
+      content: formatStopsSelectionText(plan),
+    });
+
+    // ── การ์ดสรุป (ข้อความใหม่) ────────────────────────────────
+    const sumId = appendMessage(threadId, {
+      role: "assistant",
+      content: "",
+      plan,
+      planMeta: srcMsg?.planMeta,
+      planView: "summary",
+      planFromId: messageId,
+    });
+    setExtraStops((prev) => ({ ...prev, [sumId]: extraStops[messageId] ?? [] }));
+    if (fuelOverride[messageId] != null) {
+      setFuelOverride((prev) => ({ ...prev, [sumId]: fuelOverride[messageId] }));
+    }
+    if (selectedLodging[messageId]) {
+      setSelectedLodging((prev) => ({ ...prev, [sumId]: selectedLodging[messageId] }));
+    }
+
+    // การ์ดสรุปคือตัวแทนการ์ดแพลนแล้ว → ซ่อนการ์ดแพลนเดิม (ไม่ให้เห็นเนื้อหาซ้ำ)
+    // → ถ้าผู้ใช้กด "แก้ไขแพลน" จะคืนการ์ดแพลนนี้กลับมาให้แก้ต่อ
+    updateMessage(threadId, messageId, { plan: undefined });
+  };
+
+  /**
+   * กด "แก้ไขแพลน" ในการ์ดสรุป → ซ่อนการ์ดสรุป + คืนการ์ดแพลนเดิมกลับมา
+   */
+  const handleBackToEditPlan = (summaryId: string) => {
+    const msg = thread?.messages.find((m) => m.id === summaryId);
+    const fromId = msg?.planFromId;
+    const plan = msg?.plan;
+
+    // ซ่อนการ์ดสรุป (ข้อความว่าง → ไม่วาดฟอง)
+    updateMessage(threadId, summaryId, {
+      plan: undefined,
+      planView: undefined,
+      planFromId: undefined,
+      content: "",
+    });
+    // คืนการ์ดแพลนที่ผู้ใช้จัดลำดับไว้ กลับไปแก้ต่อได้
+    if (fromId && plan) {
+      updateMessage(threadId, fromId, { plan, planView: "staged" });
+    }
   };
 
   /** เมื่อผู้ใช้เลือกโฟลเดอร์จาก TripDestinationPickerModal */
@@ -1002,10 +1135,7 @@ export default function AiChatScreen({
       if (plan) {
         clearDraftCards();
         setEditingPlanMessageId(null);
-        appendMessage(threadId, {
-          role: "assistant",
-          content: formatPlanSummary(plan),
-        });
+        appendPlanSummaryMessage(plan);
       }
     } finally {
       setPlanning(false);
@@ -2003,34 +2133,57 @@ export default function AiChatScreen({
     });
   };
 
-  /** การ์ดแผนที่คำนวณเสร็จแล้ว (ผูกกับข้อความที่สร้างมัน) */
-  const renderPlanCard = (messageId: string, plan: TripPlan) => (
-    <TripPlanCard
-      plan={plan}
-      stopClips={buildStopClips(plan)}
-      onOpenClip={(videoId) => void openClipFromStop(videoId)}
-      notSelected={thread?.messages.find((m) => m.id === messageId)?.planMeta?.notSelected}
-      aiWarnings={thread?.messages.find((m) => m.id === messageId)?.planMeta?.aiWarnings}
-      folderWarning={
-        thread?.messages.find((m) => m.id === messageId)?.planMeta?.folderWarning ?? null
-      }
-      busy={replanning === messageId || planning}
-      onConfirm={() => handleConfirmPlan(messageId, plan)}
-      onEditWithAi={() => handleEditWithAi(messageId, plan)}
-      onAddStop={(dIndex) => openNearby(messageId, plan, dIndex ?? 0)}
-      onRemoveStop={(stopId) => handleRemoveStop(messageId, plan, stopId)}
-      onMoveStop={(stopId, dir) => handleMoveStop(messageId, plan, stopId, dir)}
-      onSelectLodging={(lodging) => handleSelectLodging(messageId, plan, lodging)}
-      selectedLodgingName={selectedLodging[messageId] ?? null}
-      onFuelPriceOverride={(price) => handleFuelOverride(messageId, plan, price)}
-      fuelPriceOverride={fuelOverride[messageId] ?? null}
-      vehicleSpecified={vehicleSpecified[messageId] ?? true}
-      onVehicleChange={(vehicle, vehicleModel) =>
-        void handleVehicleChange(messageId, plan, vehicle, vehicleModel)
-      }
-      onTravelersChange={(n) => void handleTravelersChange(messageId, plan, n)}
-    />
-  );
+  /**
+   * การ์ดแผนที่คำนวณเสร็จแล้ว (ผูกกับข้อความที่สร้างมัน)
+   * -------------------------------------------------------------
+   * · planView = "staged"  = การ์ดแพลนของ flow ใหม่ (ผู้ใช้ยังไม่ยืนยันลำดับจุด)
+   *   → ปุ่มหลัก "ยืนยันแพลนทริป" → ขึ้นการ์ดสรุป (กล่องเวลา—สถานที่)
+   * · planView = "summary" = การ์ดสรุปสุดท้าย
+   *   → ปุ่มหลัก "ยืนยันและบันทึกเข้าทริป" → เปิดหน้าทริป
+   * · planView = ไม่มี     = เส้นทางเดิมของแอป (ปุ่ม "สร้างแพลน" → modal → ยืนยันเข้าทริป)
+   */
+  const renderPlanCard = (messageId: string, plan: TripPlan) => {
+    const msg = thread?.messages.find((m) => m.id === messageId);
+    const planView = msg?.planView;
+    const isSummary = planView === "summary";
+    const isStaged = planView === "staged";
+    return (
+      <TripPlanCard
+        plan={plan}
+        view={isSummary ? "summary" : "plan"}
+        showSummary={isSummary}
+        onBackToEdit={isSummary ? () => handleBackToEditPlan(messageId) : undefined}
+        primaryAction={isStaged ? "confirm" : "preview"}
+        primaryLabel={isStaged ? "ยืนยันแพลนทริป" : undefined}
+        stopClips={buildStopClips(plan)}
+        onOpenClip={(videoId) => void openClipFromStop(videoId)}
+        notSelected={msg?.planMeta?.notSelected}
+        aiWarnings={msg?.planMeta?.aiWarnings}
+        folderWarning={msg?.planMeta?.folderWarning ?? null}
+        busy={replanning === messageId || planning}
+        onConfirm={() =>
+          isSummary
+            ? void handleConfirmPlan(messageId, plan)
+            : isStaged
+            ? handleConfirmPlanStops(messageId, plan)
+            : void handleConfirmPlan(messageId, plan)
+        }
+        onEditWithAi={() => handleEditWithAi(messageId, plan)}
+        onAddStop={(dIndex) => openNearby(messageId, plan, dIndex ?? 0)}
+        onRemoveStop={(stopId) => handleRemoveStop(messageId, plan, stopId)}
+        onMoveStop={(stopId, dir) => handleMoveStop(messageId, plan, stopId, dir)}
+        onSelectLodging={(lodging) => handleSelectLodging(messageId, plan, lodging)}
+        selectedLodgingName={selectedLodging[messageId] ?? null}
+        onFuelPriceOverride={(price) => handleFuelPriceOverride(messageId, plan, price)}
+        fuelPriceOverride={fuelOverride[messageId] ?? null}
+        vehicleSpecified={vehicleSpecified[messageId] ?? true}
+        onVehicleChange={(vehicle, vehicleModel) =>
+          void handleVehicleChange(messageId, plan, vehicle, vehicleModel)
+        }
+        onTravelersChange={(n) => void handleTravelersChange(messageId, plan, n)}
+      />
+    );
+  };
 
   /**
    * การ์ด "ถามทีละคำถาม" (ข้อ 2.3) — แทนการ์ดฟอร์ม 4 ขั้นตอนเดิม
@@ -2049,6 +2202,30 @@ export default function AiChatScreen({
       onRequestTime={() => openCardPicker("time")}
     />
   );
+
+  /**
+   * การ์ด "ตั้งค่าแพลนทริป" (ขั้นที่ 1 ของ flow ใหม่)
+   * -------------------------------------------------------------
+   * → ผู้ใช้ติ๊กสถานที่มาแล้ว → กรอกข้อมูลเอง (ข้ามข้อไหนก็ได้) → กดยืนยัน
+   * → ระบบส่งข้อมูลที่กรอกเป็นข้อความฝั่งผู้ใช้ แล้วค่อยคำนวณแพลน
+   */
+  const renderSetupCard = (messageId: string) => {
+    const stops = extraStops[messageId] ?? [];
+    return (
+      <TripQuestionFlow
+        mode="setup"
+        places={stops.map((s) => s.label)}
+        slots={draftSlots}
+        onChange={applyDraftSlots}
+        onSubmitText={(text) => void send(text)}
+        onCreatePlan={() => void handleCreatePlanFromSetup(messageId)}
+        creating={planning}
+        onRequestOrigin={setCardOriginTarget}
+        onRequestDateRange={() => openCardPicker("date")}
+        onRequestTime={() => openCardPicker("time")}
+      />
+    );
+  };
 
   // ผู้ดูคลิปเต็มจอ (แตะคลิปในแชท) — ใช้ตัวดูคลิปเดียวกับหน้าแรก
   // (ไลก์ · คอมเมนต์ · เซฟ · แชร์ ได้ครบ)
@@ -2355,6 +2532,7 @@ export default function AiChatScreen({
                     </>
                   ) : null}
 
+                  {failed || item.content.trim() ? (
                   <View
                     className={
                       failed
@@ -2377,6 +2555,7 @@ export default function AiChatScreen({
                       {renderMessageContent(item)}
                     </Text>
                   </View>
+                  ) : null}
 
                   {/* ลิงก์แหล่งที่มา (แท็กประเภทสถานที่อยู่ในบรรทัดคำตอบแล้ว) */}
                   {!mine && !failed ? (
@@ -2401,6 +2580,11 @@ export default function AiChatScreen({
 
                   {/* แผนที่คำนวณเสร็จแล้ว → การ์ดแผน (แผนที่จริง · เวลา · ต้นทุน · เพิ่ม/ลบจุด) */}
                   {!mine && !failed && item.plan ? renderPlanCard(item.id, item.plan) : null}
+
+                  {/* การ์ด "ตั้งค่าแพลนทริป" (ขั้นที่ 1 ของ flow ใหม่) — ผู้ใช้กรอกเองก่อนสร้างแพลน */}
+                  {!mine && !failed && item.planSetup ? (
+                    <View className="mt-2.5">{renderSetupCard(item.id)}</View>
+                  ) : null}
 
                   {/* การ์ดวางแผนทริป (TripQuestionFlow) ยึดติดกับข้อความที่เป็นเจ้าของ draft เพื่อไม่ให้เลื่อนตามข้อความใหม่ */}
                   {!mine && !failed && !item.plan && item.id === activeDraftMessageId ? (

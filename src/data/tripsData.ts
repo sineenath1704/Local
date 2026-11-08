@@ -273,6 +273,23 @@ export interface AiChatMessage {
    * → แสดงเป็นการ์ดโฟลเดอร์ที่กดเข้าไปดูคลิปข้างในได้ (ไม่ใช่ส่งเป็นข้อความ)
    */
   folder?: ChatFolderAttachment;
+  /**
+   * ข้อความนี้เป็นที่เกาะของ "การ์ดตั้งค่าแพลน" (TripQuestionFlow โหมด setup)
+   * → โผล่หลังผู้ใช้กด "สร้างแพลนทริปจาก N แห่งที่เลือก" เพื่อให้ผู้ใช้กรอกข้อมูลก่อน
+   */
+  planSetup?: boolean;
+  /**
+   * การ์ดแพลนอยู่โหมดไหน
+   * · "plan"    = แผนที่เส้นทาง + จุดแวะ (เส้นทางเดิม: กดยืนยันแล้วบันทึกเข้าทริปเลย)
+   * · "staged"  = แผนที่เส้นทาง + จุดแวะ (flow ใหม่: ผู้ใช้จัดลำดับจุดก่อน → สรุปทีหลัง)
+   * · "summary" = สรุปเป็นกล่อง "เวลา — สถานที่" เรียงลงล่าง
+   */
+  planView?: "plan" | "staged" | "summary";
+  /**
+   * การ์ดสรุปนี้กลับมาจากข้อความการ์ดแพลนไหน (id ของข้อความ)
+   * → ใช้ตอนผู้ใช้กด "แก้ไขแพลน" ในการ์ดสรุป → คืนการ์ดแพลนเดิมกลับมาให้แก้ต่อ
+   */
+  planFromId?: string;
 }
 
 /** ข้อมูลเสริมที่มาคู่กับ `AiChatMessage.plan` */
@@ -745,7 +762,7 @@ export function tripQuestionList(slots: TripSlots): TripQuestionKey[] {
 }
 
 /** คำถามนี้ตอบไปแล้วหรือยัง */
-function isQuestionAnswered(key: TripQuestionKey, slots: TripSlots): boolean {
+export function isQuestionAnswered(key: TripQuestionKey, slots: TripSlots): boolean {
   switch (key) {
     case "startPoint":
       return !!slots.startPoint?.label;
@@ -1022,6 +1039,78 @@ export function formatPlanSummary(plan: TripPlan): string {
     for (const n of notes) lines.push(`  • ${n}`);
   }
 
+  return lines.join("\n");
+}
+
+// ── ข้อความฝั่งผู้ใช้ที่ระบบสร้างให้เอง ────────────────────────────────
+// ใช้ใน flow ใหม่: ผู้ใช้ติ๊กสถานที่ → ระบบส่ง "คำสั่ง" ของผู้ใช้ → ผู้ใช้กรอกข้อมูล
+// → ระบบส่งข้อมูลที่กรอก → ผู้ใช้จัดลำดับจุด → ระบบส่งรายการจุด
+// ข้อความพวกนี้ถูกเก็บลงประวัติแชท (ฝั่งผู้ใช้) แต่ไม่ยิงไปเอไaiตอบกลับทันที
+
+/** ป้ายสั้น ๆ ของรถที่เลือก (ใช้ทั้งในการ์ดและในข้อความสรุป) */
+export function vehicleCategoryLabel(vehicle?: string | null): string {
+  const v = (vehicle ?? "").trim().toLowerCase();
+  if (v === "ev") return "รถไฟฟ้า";
+  if (v === "van") return "รถตู้";
+  if (v === "motorbike" || v === "motorcycle") return "มอเตอร์ไซค์";
+  if (v === "public") return "ขนส่งสาธารณะ";
+  if (v === "private_car") return "รถยนต์ส่วนตัว";
+  return v || "ไม่ระบุ";
+}
+
+/**
+ * ข้อความฝั่งผู้ใช้: "ทริป 1 วัน · ดอยอินทนนท์ → จุดเดิม · 8 พ.ย. · 08:00 · รถไฟฟ้า · 2 คน · งบ 3,000 บาท/คน"
+ * → ข้ามส่วนที่ผู้ใช้ไม่ได้กรอก (ไม่บังคับให้ต้องครบทุกช่อง)
+ */
+export function formatTripSetupText(slots: TripSlots): string {
+  const bits: string[] = [];
+
+  const days = tripRangeDays(slots.startDate, slots.endDate);
+  if (slots.startDate) {
+    bits.push(`ทริป ${days ?? 1} วัน`);
+  }
+
+  const startLabel = slots.startPoint?.label?.trim();
+  const endLabel =
+    slots.returnMode === "custom"
+      ? slots.endPoint?.label?.trim()
+      : slots.returnMode === "same_as_start"
+      ? startLabel
+      : null;
+  if (startLabel) {
+    bits.push(endLabel && endLabel !== startLabel ? `${startLabel} → ${endLabel}` : startLabel);
+  }
+
+  if (slots.startDate) {
+    bits.push(formatThaiDateRange(slots.startDate, slots.endDate));
+  }
+  if (slots.startTime) bits.push(`ออกเดินทาง ${slots.startTime}`);
+  if (slots.vehicle) bits.push(vehicleCategoryLabel(slots.vehicle));
+  if (slots.travelers != null) bits.push(`${slots.travelers} คน`);
+  if (slots.budgetPerPerson != null) {
+    bits.push(`งบ ${slots.budgetPerPerson.toLocaleString("th-TH")} บาท/คน`);
+  }
+
+  return bits.length ? bits.join(" · ") : "สร้างแพลนทริป";
+}
+
+/**
+ * ข้อความฝั่งผู้ใช้: "ยืนยันแพลนทริป · วันที่ 1: 09:00 ดอยอินทนนท์ → 11:30 วัดพระธาตุ"
+ * → สรุปจุดที่ผู้ใช้จัดลำดับเอง (ตามที่กดยืนยันในการ์ดแพลน)
+ */
+export function formatStopsSelectionText(plan: TripPlan): string {
+  const lines: string[] = ["ยืนยันแพลนทริป"];
+  for (const day of plan.days ?? []) {
+    const stops = day.stops ?? [];
+    if (stops.length === 0) continue;
+    const route = stops
+      .map((s) => {
+        const time = s.arriveTime ?? s.leaveTime ?? "";
+        return time ? `${time} ${s.name}` : s.name;
+      })
+      .join(" → ");
+    lines.push(`วันที่ ${day.day}: ${route}`);
+  }
   return lines.join("\n");
 }
 

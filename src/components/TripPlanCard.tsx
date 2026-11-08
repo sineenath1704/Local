@@ -28,6 +28,7 @@ import {
   ChevronDownIcon,
   ChevronUpIcon,
   XMarkIcon,
+  PencilSquareIcon,
 } from "react-native-heroicons/outline";
 import {
   TripPlan,
@@ -39,6 +40,7 @@ import {
   type VehicleClass,
 } from "../data/tripsData";
 import TripRouteMap from "./TripRouteMap";
+import TripRouteTimeline from "./TripRouteTimeline";
 import EditableValueRow from "./EditableValueRow";
 import {
   vehicleModelSuggestions,
@@ -121,6 +123,28 @@ function openHoursBadge(h?: TripPlanOpenHours | null) {
 
 interface TripPlanCardProps {
   plan: TripPlan;
+  /**
+   * โหมดการ์ด
+   * · "plan"   = โหมดเดิม: แผนที่เส้นทาง + จุดแวะ + งบ + ที่พัก (ผู้ใช้จัดลำดับเอง)
+   * · "summary" = โหมดสรุป: กล่อง "เวลา — สถานที่" เรียงลงล่าง + ปุ่มยืนยัน
+   */
+  view?: "plan" | "summary";
+  /**
+   * ซ่อนบรรทัดสรุปของเอไaiที่หัวการ์ดหรือไม่
+   * · false = ซ่อน (ตอนยังไม่ยืนยันแพลน ผู้ใช้ยังไม่อยากเห็นสรุปยาว ๆ)
+   * · true  = แสดง (ตอนเป็นการ์ดสรุปสุดท้าย)
+   */
+  showSummary?: boolean;
+  /** กด "แก้ไขแพลน" (โหมด summary) → กลับไปโหมดแผนที่+จุดแวะ */
+  onBackToEdit?: () => void;
+  /**
+   * ปุ่มหลักของการ์ดโหมด "plan"
+   * · "preview" (ค่าเริ่มต้น) = เปิด modal ดูไทม์ไลน์ก่อน → ยืนยันเข้าทริป (เส้นทางเดิมของแอป)
+   * · "confirm"            = กดแล้วยืนยันเลย (flow ใหม่: ผู้ใช้จัดลำดับจุดเสร็จแล้ว)
+   */
+  primaryAction?: "preview" | "confirm";
+  /** ข้อความบนปุ่มหลัก (ใช้ตอน primaryAction = "confirm") */
+  primaryLabel?: string;
   /** จุดในโฟลเดอร์ที่ AI ไม่ได้เลือก → เสนอให้ผู้ใช้กดเพิ่มเอง */
   notSelected?: { id: string; name: string; type: string }[];
   /** คำเตือนจาก AI */
@@ -169,6 +193,11 @@ interface TripPlanCardProps {
 
 export default function TripPlanCard({
   plan,
+  view = "plan",
+  showSummary = true,
+  onBackToEdit,
+  primaryAction = "preview",
+  primaryLabel,
   notSelected,
   aiWarnings,
   folderWarning,
@@ -215,6 +244,8 @@ export default function TripPlanCard({
   const veh = plan.vehicle;
   const budget = plan.budget;
   const isCustomEnd = plan.returnMode === "custom";
+  /** โหมดสรุป = กล่อง "เวลา — สถานที่" เรียงลงล่าง (ไม่มีแผนที่/งบ/ที่พัก) */
+  const isSummary = view === "summary";
 
   /** คลาสรถที่ใช้จริง (รถยนต์ส่วนตัว / รถไฟฟ้า / รถสาธารณะ) */
   const vehicleClass: VehicleClass | null = vehicleClassOf(veh?.key ?? null);
@@ -338,7 +369,7 @@ export default function TripPlanCard({
             </View>
           )}
         </View>
-        {plan.summary ? (
+        {showSummary && plan.summary ? (
           <Text className="text-gray-700 text-[12.5px] leading-5 mt-1">
             {plan.summary}
           </Text>
@@ -404,6 +435,12 @@ export default function TripPlanCard({
         </View>
       </View>
 
+      {/* ── เนื้อหาการ์ด ─────────────────────────────────────── */}
+      {isSummary ? (
+        /* โหมดสรุป: กล่อง "เวลา — สถานที่" เรียงลงล่าง */
+        <TripRouteTimeline days={days} />
+      ) : (
+        <>
       {/* ── แท็บวัน ───────────────────────────────────────────── */}
       {days.length > 1 ? (
         <View className="flex-row px-3 pt-2.5" style={{ flexWrap: "wrap" }}>
@@ -1219,59 +1256,122 @@ export default function TripPlanCard({
           )}
         </View>
       ) : null}
+        </>
+      )}
 
       {/* ── ปุ่มการกระทำ ─────────────────────────────────────── */}
-      <View className="px-3 pt-3 pb-3.5">
-        <TouchableOpacity
-          onPress={() => {
-            setPreviewDayIndex(dayIndex);
-            setPreviewOpen(true);
-          }}
-          disabled={busy}
-          activeOpacity={0.85}
-          className={`rounded-2xl py-3.5 items-center justify-center flex-row ${
-            busy ? "bg-violet-300" : "bg-violet-600 shadow-md shadow-violet-200"
-          }`}
-        >
-          {busy ? (
-            <ActivityIndicator size="small" color="#FFFFFF" />
-          ) : (
-            <SparklesIcon size={18} color="#FFFFFF" />
-          )}
-          <Text className="text-white text-[15px] font-bold ml-1.5">
-            {busy ? "กำลังคำนวณใหม่..." : "สร้างแพลน"}
-          </Text>
-        </TouchableOpacity>
+      {isSummary ? (
+        /* โหมดสรุป: แก้ไข · เพิ่มจุดแวะ · ยืนยันเข้าทริป */
+        <View className="px-3 pt-3 pb-3.5">
+          <TouchableOpacity
+            onPress={onConfirm}
+            disabled={busy}
+            activeOpacity={0.85}
+            className={`rounded-2xl py-3.5 items-center justify-center flex-row ${
+              busy ? "bg-violet-300" : "bg-emerald-600 shadow-md shadow-emerald-200"
+            }`}
+          >
+            {busy ? (
+              <ActivityIndicator size="small" color="#FFFFFF" />
+            ) : (
+              <CheckBadgeIcon size={18} color="#FFFFFF" />
+            )}
+            <Text className="text-white text-[15px] font-bold ml-1.5">
+              {busy ? "กำลังบันทึก..." : "ยืนยันและบันทึกเข้าทริป"}
+            </Text>
+          </TouchableOpacity>
 
-        <View className="flex-row mt-2">
-          {onAddStop ? (
-            <TouchableOpacity
-              onPress={() => onAddStop(dayIndex)}
-              disabled={busy}
-              activeOpacity={0.8}
-              className="flex-1 flex-row items-center justify-center bg-white border border-violet-200 rounded-2xl py-2.5 mr-1.5"
-            >
-              <MapPinIcon size={15} color="#7C3AED" />
-              <Text className="text-violet-700 text-[13px] font-bold ml-1.5">
-                เพิ่มจุดแวะ
-              </Text>
-            </TouchableOpacity>
-          ) : null}
-          {onEditWithAi ? (
-            <TouchableOpacity
-              onPress={onEditWithAi}
-              disabled={busy}
-              activeOpacity={0.8}
-              className="flex-1 flex-row items-center justify-center bg-white border border-gray-200 rounded-2xl py-2.5"
-            >
-              <SparklesIcon size={15} color="#4B5563" />
-              <Text className="text-gray-700 text-[13px] font-bold ml-1.5">
-                แก้ไขกับเอไai
-              </Text>
-            </TouchableOpacity>
-          ) : null}
+          <View className="flex-row mt-2">
+            {onBackToEdit ? (
+              <TouchableOpacity
+                onPress={onBackToEdit}
+                disabled={busy}
+                activeOpacity={0.8}
+                className="flex-1 flex-row items-center justify-center bg-white border border-violet-200 rounded-2xl py-2.5 mr-1.5"
+              >
+                <PencilSquareIcon size={15} color="#7C3AED" />
+                <Text className="text-violet-700 text-[13px] font-bold ml-1.5">
+                  แก้ไขแพลน
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+            {onAddStop ? (
+              <TouchableOpacity
+                onPress={() => onAddStop(dayIndex)}
+                disabled={busy}
+                activeOpacity={0.8}
+                className="flex-1 flex-row items-center justify-center bg-white border border-gray-200 rounded-2xl py-2.5"
+              >
+                <MapPinIcon size={15} color="#4B5563" />
+                <Text className="text-gray-700 text-[13px] font-bold ml-1.5">
+                  เพิ่มจุดแวะ
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
         </View>
-      </View>
+      ) : (
+        <View className="px-3 pt-3 pb-3.5">
+          <TouchableOpacity
+            onPress={() => {
+              // flow ใหม่: ผู้ใช้จัดลำดับจุดเสร็จแล้ว → ยืนยันได้เลย (ไม่ต้องเปิด modal)
+              if (primaryAction === "confirm") {
+                onConfirm?.();
+                return;
+              }
+              setPreviewDayIndex(dayIndex);
+              setPreviewOpen(true);
+            }}
+            disabled={busy}
+            activeOpacity={0.85}
+            className={`rounded-2xl py-3.5 items-center justify-center flex-row ${
+              busy ? "bg-violet-300" : "bg-violet-600 shadow-md shadow-violet-200"
+            }`}
+          >
+            {busy ? (
+              <ActivityIndicator size="small" color="#FFFFFF" />
+            ) : (
+              <SparklesIcon size={18} color="#FFFFFF" />
+            )}
+            <Text className="text-white text-[15px] font-bold ml-1.5">
+              {busy
+                ? "กำลังคำนวณใหม่..."
+                : primaryAction === "confirm"
+                ? primaryLabel ?? "ยืนยันแพลนทริป"
+                : "สร้างแพลน"}
+            </Text>
+          </TouchableOpacity>
+
+          <View className="flex-row mt-2">
+            {onAddStop ? (
+              <TouchableOpacity
+                onPress={() => onAddStop(dayIndex)}
+                disabled={busy}
+                activeOpacity={0.8}
+                className="flex-1 flex-row items-center justify-center bg-white border border-violet-200 rounded-2xl py-2.5 mr-1.5"
+              >
+                <MapPinIcon size={15} color="#7C3AED" />
+                <Text className="text-violet-700 text-[13px] font-bold ml-1.5">
+                  เพิ่มจุดแวะ
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+            {onEditWithAi ? (
+              <TouchableOpacity
+                onPress={onEditWithAi}
+                disabled={busy}
+                activeOpacity={0.8}
+                className="flex-1 flex-row items-center justify-center bg-white border border-gray-200 rounded-2xl py-2.5"
+              >
+                <SparklesIcon size={15} color="#4B5563" />
+                <Text className="text-gray-700 text-[13px] font-bold ml-1.5">
+                  แก้ไขกับเอไai
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        </View>
+      )}
 
       {/* ── Modal ดูรายละเอียดที่พัก ───────────────────────────── */}
       <Modal

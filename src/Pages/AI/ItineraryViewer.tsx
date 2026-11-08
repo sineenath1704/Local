@@ -30,7 +30,7 @@ import {
   QuestionMarkCircleIcon,
 } from "react-native-heroicons/outline";
 import { useAiPlanner } from "../../state/AiPlannerContext";
-import { ItineraryStop, StopType } from "../../data/tripsData";
+import { ItineraryDay, ItineraryStop, StopType } from "../../data/tripsData";
 import { InitialPostLocation } from "../CreatePostScreen";
 
 interface ItineraryViewerProps {
@@ -82,6 +82,10 @@ export default function ItineraryViewer({ tripId, onBack, onPostCheckin }: Itine
   const { trips, updateTrip, setTripStatus, openChatWithSeed } = useAiPlanner();
   const trip = trips.find((t) => t.id === tripId);
   const [editing, setEditing] = useState(false);
+  /** กำลังเพิ่มจุดแวะในวันไหน (null = ไม่ได้กำลังเพิ่ม) */
+  const [addingDay, setAddingDay] = useState<number | null>(null);
+  const [newStopName, setNewStopName] = useState("");
+  const [newStopTime, setNewStopTime] = useState("09:00");
 
   if (!trip) {
     return (
@@ -98,6 +102,47 @@ export default function ItineraryViewer({ tripId, onBack, onPostCheckin }: Itine
         : d
     );
     updateTrip(tripId, { itinerary });
+  };
+
+  /** เวลาเริ่มต้นของจุดใหม่ = เวลาจุดสุดท้ายของวัน + 1 ชม. (ไม่มีข้อมูล → 09:00) */
+  const suggestNextTime = (day: ItineraryDay): string => {
+    const last = day.stops[day.stops.length - 1];
+    const base = last?.startTime ?? last?.arriveTime ?? last?.leaveTime;
+    if (!base) return "09:00";
+    const m = /^(\d{1,2}):(\d{2})$/.exec(base.trim());
+    if (!m) return "09:00";
+    const total = (Number(m[1]) * 60 + Number(m[2]) + 60) % (24 * 60);
+    return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+  };
+
+  /** เพิ่มจุดแวะท้ายวัน (กล่องใหม่โผล่ท้ายวันในรูปแบบเดียวกับกล่องเดิม) */
+  const addStopToDay = (dayIdx: number) => {
+    const name = newStopName.trim();
+    if (!name) {
+      Alert.alert("ยังไม่ได้ใส่ชื่อ", "พิมพ์ชื่อสถานที่ที่จะเพิ่มก่อน");
+      return;
+    }
+    const itinerary = trip.itinerary.map((d, di) =>
+      di === dayIdx
+        ? {
+            ...d,
+            stops: [
+              ...d.stops,
+              {
+                name,
+                activity: "",
+                stayHours: 1,
+                driveToNextMins: 0,
+                startTime: newStopTime.trim() || "09:00",
+                type: "attraction",
+              },
+            ],
+          }
+        : d
+    );
+    updateTrip(tripId, { itinerary });
+    setNewStopName("");
+    setAddingDay(null);
   };
 
   const b = trip.budget;
@@ -372,6 +417,66 @@ export default function ItineraryViewer({ tripId, onBack, onPostCheckin }: Itine
               </View>
               );
             })}
+
+            {/* ── เพิ่มจุดแวะท้ายวัน ───────────────────────────────── */}
+            <View className="flex-row">
+              <View style={{ width: 24 }} className="mr-3" />
+              <View className="flex-1 mb-3">
+                {addingDay === di ? (
+                  <View className="bg-violet-50 border border-violet-200 rounded-2xl p-3">
+                    <TextInput
+                      value={newStopName}
+                      onChangeText={setNewStopName}
+                      placeholder="ชื่อสถานที่ที่จะเพิ่ม"
+                      placeholderTextColor="#9CA3AF"
+                      className="bg-white border border-gray-200 rounded-xl px-3 py-2.5 text-[14px] text-gray-900"
+                    />
+                    <View className="flex-row items-center mt-2">
+                      <TextInput
+                        value={newStopTime}
+                        onChangeText={setNewStopTime}
+                        placeholder="09:00"
+                        placeholderTextColor="#9CA3AF"
+                        keyboardType="numbers-and-punctuation"
+                        className="bg-white border border-gray-200 rounded-xl px-3 py-2 text-[13px] text-gray-900 w-24"
+                      />
+                      <TouchableOpacity
+                        onPress={() => addStopToDay(di)}
+                        activeOpacity={0.85}
+                        className="bg-violet-600 rounded-xl px-4 py-2 ml-2"
+                      >
+                        <Text className="text-white text-[13px] font-bold">เพิ่ม</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        onPress={() => {
+                          setAddingDay(null);
+                          setNewStopName("");
+                        }}
+                        activeOpacity={0.7}
+                        className="px-3 py-2 ml-1"
+                      >
+                        <Text className="text-gray-500 text-[12.5px] font-bold">ยกเลิก</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    onPress={() => {
+                      setAddingDay(di);
+                      setNewStopName("");
+                      setNewStopTime(suggestNextTime(day));
+                    }}
+                    activeOpacity={0.8}
+                    className="flex-row items-center justify-center bg-white border border-dashed border-violet-300 rounded-2xl py-2.5"
+                  >
+                    <MapPinIcon size={15} color="#7C3AED" />
+                    <Text className="text-violet-700 text-[13px] font-bold ml-1.5">
+                      + เพิ่มจุดแวะ
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
           </View>
         ))}
       </ScrollView>

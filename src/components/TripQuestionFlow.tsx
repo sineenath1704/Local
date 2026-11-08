@@ -15,13 +15,16 @@ import {
   MapPinIcon,
   MagnifyingGlassIcon,
   SparklesIcon,
+  BanknotesIcon,
 } from "react-native-heroicons/outline";
 import {
   TripSlots,
   TripQuestionKey,
   formatThaiDateRange,
+  isQuestionAnswered,
   nextTripQuestion,
   tripQuestionList,
+  vehicleCategoryLabel,
 } from "../data/tripsData";
 import {
   VehicleCategory,
@@ -37,6 +40,14 @@ import { resolvePlaceCoords } from "../services/placesService";
 export type TripOriginTarget = "start" | "end" | "destination" | { day: number };
 
 export interface TripQuestionFlowProps {
+  /**
+   * "ask"   = โหมดเดิม (ถามทีละคำถาม ไม่ข้าม · ต้องครบถึงจะสร้างแพลนได้)
+   * "setup" = โหมด "ตั้งค่าแพลน" หลังผู้ใช้ติ๊กสถานที่
+   *          (ข้ามได้ทุกข้อ · ไม่บังคับต้องครบ · ปุ่มยืนยันแสดงตลอด)
+   */
+  mode?: "ask" | "setup";
+  /** ชื่อสถานที่ที่ผู้ใช้ติ๊กมา (โหมด setup) → แสดงเป็นชิปด้านบนการ์ด */
+  places?: string[];
   /** ข้อมูลที่เก็บสะสมมาแล้ว (จากแชท + จากที่ผู้ใช้เลือกในการ์ดนี้) */
   slots: TripSlots;
   /** ผู้ใช้เลือกตัวเลือก → อัปเดตข้อมูล (ยังไม่คำนวณค่าใช้จ่าย) */
@@ -177,6 +188,8 @@ function SummaryRow({
  *     (คำนวณตอนผู้ใช้กด "สรุปและสร้างแพลน" เท่านั้น)
  */
 export default function TripQuestionFlow({
+  mode = "ask",
+  places,
   slots,
   onChange,
   onSubmitText,
@@ -199,10 +212,39 @@ export default function TripQuestionFlow({
   );
   const [brandText, setBrandText] = useState(slots.vehicleModel ?? "");
   const [editingReturn, setEditingReturn] = useState(false);
+  /** โหมด setup: คำถามที่ผู้ใช้กด "ข้าม" (ข้ามถาวรในการ์ดนี้) */
+  const [skipped, setSkipped] = useState<TripQuestionKey[]>([]);
+  /** โหมด setup: กำลังแก้ไขช่องรถที่ใช้ */
+  const [editingVehicle, setEditingVehicle] = useState(false);
+  /** โหมด setup: งบประมาณต่อคน (พิมพ์เอง · ว่าง = ข้าม) */
+  const [budgetText, setBudgetText] = useState(
+    slots.budgetPerPerson != null ? String(slots.budgetPerPerson) : ""
+  );
 
-  const question = nextTripQuestion(slots);
+  // ถ้าค่างบถูกเปลี่ยนจากที่อื่น (เช่นเอไaiเติมให้) → ช่องกรอกต้องตาม
+  useEffect(() => {
+    const fromSlots = slots.budgetPerPerson != null ? String(slots.budgetPerPerson) : "";
+    if (fromSlots !== budgetText.replace(/[^0-9]/g, "")) setBudgetText(fromSlots);
+  }, [slots.budgetPerPerson, budgetText]);
+
   const questionList = useMemo(() => tripQuestionList(slots), [slots]);
+
+  /**
+   * คำถามที่กำลังถามอยู่
+   * · โหมด ask   = คำถามแรกที่ยังไม่ตอบ (ของเดิม)
+   * · โหมด setup = คำถามแรกที่ยังไม่ตอบ **และไม่ได้ถูกข้าม** (ข้ามได้ทุกข้อ)
+   */
+  const question = useMemo(() => {
+    if (mode !== "setup") return nextTripQuestion(slots);
+    for (const key of questionList) {
+      if (skipped.includes(key)) continue;
+      if (!isQuestionAnswered(key, slots)) return key;
+    }
+    return null;
+  }, [mode, questionList, skipped, slots]);
+
   const questionNumber = question ? questionList.indexOf(question) + 1 : questionList.length;
+  const isSetup = mode === "setup";
 
   /** ตัวเลือกรถที่แนะนำตามที่พิมพ์ */
   const vehicleOptions = useMemo(
@@ -246,6 +288,11 @@ export default function TripQuestionFlow({
     // กลับจุดเดิม / กลับคนละจุด → ให้เอไaiเป็นคนจัดการคำพูด
     if (QUESTION_META[question].kind === "mode") {
       setAnswerText("");
+      // โหมด setup: ไม่ยิงเอไai (ผู้ใช้กด "ข้าม" ได้แทน) → ใช้ค่าเริ่มต้น "กลับจุดเดิม"
+      if (isSetup) {
+        onChange({ ...latest.current, returnMode: "same_as_start", endPoint: null });
+        return;
+      }
       onSubmitText(text);
       return;
     }
@@ -259,6 +306,7 @@ export default function TripQuestionFlow({
         return;
       }
       setAnswerText("");
+      if (isSetup) return; // อ่านไม่ได้ → ข้ามได้ ไม่ต้องยิงเอไai
       onSubmitText(text);
       return;
     }
@@ -266,6 +314,7 @@ export default function TripQuestionFlow({
     // วันที่ → ให้เอไaiเป็นคนแปลง (เดือนไทย/คำอย่าง "3 วัน" เป็นเรื่องของโมเดล)
     if (QUESTION_META[question].kind === "date") {
       setAnswerText("");
+      if (isSetup) return; // โหมด setup ใช้ปฏิทินของแอปแทน (ไม่ยิงเอไai)
       onSubmitText(text);
       return;
     }
@@ -306,6 +355,21 @@ export default function TripQuestionFlow({
 
       // หาพิกัดไม่ได้ → ให้เอไaiช่วยต่อ (มักหาชื่อสถานที่ให้แม่นกว่า)
       setAnswerText("");
+      if (isSetup) {
+        // โหมด setup: เก็บแค่ชื่อไว้ (ยังไม่มีพิกัด) → ผู้ใช้แก้ต่อได้ที่แถวสรุป
+        // ไม่ยิงเอไai (ผู้ใช้ยืนยันแล้วค่อยคำนวณแพลน)
+        const target = originTargetOf(question);
+        const prev = latest.current;
+        const isFirstAsk = question === "startPoint" || question === "endPoint";
+        applyPoint(target, {
+          label:
+            (isFirstAsk ? null : prev[target === "start" ? "startPoint" : "endPoint"]?.label) ||
+            text,
+          address: text,
+          coords: null,
+        });
+        return;
+      }
       onSubmitText(text);
     } finally {
       setResolving(false);
@@ -347,7 +411,7 @@ export default function TripQuestionFlow({
       <View className="flex-row items-center mb-1">
         <SparklesIcon size={16} color="#7C3AED" />
         <Text className="text-[13px] font-black text-violet-800 ml-1.5">
-          วางแผนทริป
+          {isSetup ? "ตั้งค่าแพลนทริป" : "วางแผนทริป"}
         </Text>
         <View className="flex-1" />
         {question ? (
@@ -356,6 +420,25 @@ export default function TripQuestionFlow({
           </Text>
         ) : null}
       </View>
+
+      {/* สถานที่ที่ผู้ใช้ติ๊กมา (โหมด setup) → ให้เห็นว่ากำลังจัดแผนจากอะไร */}
+      {isSetup && places && places.length > 0 ? (
+        <View className="mt-2">
+          <Text className="text-[11px] font-bold text-gray-400 mb-1">
+            สถานที่ที่เลือก ({places.length})
+          </Text>
+          <View className="flex-row flex-wrap gap-1.5">
+            {places.map((name, i) => (
+              <View
+                key={`place-${i}-${name}`}
+                className="bg-violet-50 border border-violet-200 rounded-full px-2.5 py-1"
+              >
+                <Text className="text-[11.5px] font-bold text-violet-800">{name}</Text>
+              </View>
+            ))}
+          </View>
+        </View>
+      ) : null}
 
       {/* ── สรุปสิ่งที่เลือกไว้แล้ว ─────────────────────────────── */}
       <View className="bg-gray-50 rounded-2xl p-3 mt-2">
@@ -429,6 +512,93 @@ export default function TripQuestionFlow({
           value={slots.startTime ?? "ยังไม่ได้เลือก"}
           onEdit={onRequestTime}
         />
+
+        {/* ── โหมด setup: รถ · จำนวนคน · งบ ───────────────────── */}
+        {isSetup ? (
+          <>
+            <SummaryRow
+              icon={<MapPinIcon size={15} color="#7C3AED" />}
+              label="รถที่ใช้"
+              value={vehicleLabel}
+              onEdit={() => setEditingVehicle((v) => !v)}
+            />
+
+            {/* จำนวนผู้เดินทาง — ปุ่ม –/+ (ไม่บังคับต้องกรอก) */}
+            <View className="mb-2">
+              <View className="flex-row items-center">
+                <View className="w-6 items-center">
+                  <SparklesIcon size={15} color="#7C3AED" />
+                </View>
+                <View className="flex-1 ml-1">
+                  <Text className="text-[11px] font-semibold text-gray-400">
+                    ไปกี่คน
+                  </Text>
+                  <Text className="text-[13px] font-bold text-gray-900">
+                    {slots.travelers != null ? `${slots.travelers} คน` : "ยังไม่ได้เลือก"}
+                  </Text>
+                </View>
+                <View className="flex-row items-center bg-white border border-gray-200 rounded-full">
+                  <TouchableOpacity
+                    onPress={() =>
+                      onChange({
+                        ...latest.current,
+                        travelers: Math.max(1, (slots.travelers ?? 1) - 1),
+                      })
+                    }
+                    activeOpacity={0.7}
+                    className="px-3 py-1"
+                  >
+                    <Text className="text-[14px] font-black text-gray-600">−</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() =>
+                      onChange({
+                        ...latest.current,
+                        travelers: Math.min(50, (slots.travelers ?? 1) + 1),
+                      })
+                    }
+                    activeOpacity={0.7}
+                    className="px-3 py-1"
+                  >
+                    <Text className="text-[14px] font-black text-violet-700">+</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+
+            {/* งบประมาณต่อคน — กรอกเอง (ว่าง = ข้าม) */}
+            <View className="mb-2">
+              <View className="flex-row items-center">
+                <View className="w-6 items-center">
+                  <BanknotesIcon size={15} color="#7C3AED" />
+                </View>
+                <View className="flex-1 ml-1">
+                  <Text className="text-[11px] font-semibold text-gray-400">
+                    งบประมาณต่อคน
+                  </Text>
+                  <View className="flex-row items-center bg-white border border-gray-200 rounded-xl px-2 mt-1">
+                    <TextInput
+                      value={budgetText}
+                      onChangeText={(t) => {
+                        const digits = t.replace(/[^0-9]/g, "");
+                        setBudgetText(digits);
+                        onChange({
+                          ...latest.current,
+                          budgetPerPerson: digits ? Number(digits) : null,
+                        });
+                      }}
+                      keyboardType="number-pad"
+                      placeholder="เช่น 3000"
+                      placeholderTextColor="#9CA3AF"
+                      className="flex-1 py-1.5 px-1 text-[13px] text-gray-900"
+                    />
+                    <Text className="text-[12px] font-bold text-gray-500">บาท</Text>
+                  </View>
+                </View>
+              </View>
+            </View>
+          </>
+        ) : null}
       </View>
 
       {/* ── คำถาม (ทีละคำถาม) ─────────────────────────────────── */}
@@ -506,7 +676,7 @@ export default function TripQuestionFlow({
                 <ChevronRightIcon size={16} color="#7C3AED" />
               </TouchableOpacity>
 
-              {originTargetOf(question) === "start" ? (
+              {originTargetOf(question) === "start" && !isSetup ? (
                 <View className="flex-row flex-wrap gap-2 mt-2">
                   <TouchableOpacity
                     onPress={() => onSubmitText("ช่วยคิดทริปท่องเที่ยวให้หน่อย จัดแพลนและเลือกจุดเริ่มต้นให้เลย")}
@@ -548,7 +718,9 @@ export default function TripQuestionFlow({
             </TouchableOpacity>
           ) : null}
 
-          {/* พิมพ์คำตอบเอง */}
+          {/* พิมพ์คำตอบเอง — โหมด setup ซ่อนไว้สำหรับวันที่/กลับที่ (เพราะให้เอไaiแปลง)
+              ใช้ตัวเลือกของแอปแทน (ปฏิทิน/ล้อเวลา/ชิป) */}
+          {!(isSetup && (meta.kind === "date" || meta.kind === "mode")) ? (
           <View className="flex-row items-center mt-3">
             <View className="flex-1 flex-row items-center bg-gray-100 rounded-2xl px-3">
               <MagnifyingGlassIcon size={15} color="#9CA3AF" />
@@ -594,8 +766,29 @@ export default function TripQuestionFlow({
               )}
             </TouchableOpacity>
           </View>
+          ) : null}
 
-          {/* ปุ่มทางลัดสำหรับผู้ใช้ที่ต้องการให้ AI สร้างแพลนออกมาเลย */}
+          {/* โหมด setup: ข้ามคำถามนี้ได้ (ไม่บังคับต้องตอบทุกข้อ) */}
+          {isSetup ? (
+            <View className="flex-row items-center justify-between mt-3 pt-2.5 border-t border-gray-100">
+              <Text className="text-[11.5px] text-gray-400">
+                ไม่ต้องการกรอกข้อนี้ก็ได้
+              </Text>
+              <TouchableOpacity
+                onPress={() => {
+                  if (!question) return;
+                  setSkipped((prev) =>
+                    prev.includes(question) ? prev : [...prev, question]
+                  );
+                }}
+                activeOpacity={0.8}
+                className="px-3.5 py-1.5 rounded-full bg-gray-100 border border-gray-200 flex-row items-center"
+              >
+                <Text className="text-[11.5px] font-bold text-gray-600">ข้าม</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+          /* ปุ่มทางลัดสำหรับผู้ใช้ที่ต้องการให้ AI สร้างแพลนออกมาเลย */
           <View className="flex-row items-center justify-between mt-3 pt-2.5 border-t border-gray-100">
             <Text className="text-[11.5px] text-gray-400">หรือให้ระบบคำนวณแผนที่ทันที</Text>
             <TouchableOpacity
@@ -610,17 +803,22 @@ export default function TripQuestionFlow({
               </Text>
             </TouchableOpacity>
           </View>
+          )}
         </View>
       ) : null}
 
-      {/* ── ข้อมูลครบ → เลือกรถ (ยังไม่คำนวณ) แล้วสรุป ─────── */}
-      {!question ? (
+      {/* ── เลือกรถ (ยังไม่คำนวณ) ─────────────────────────────
+          · โหมด ask   = โผล่เมื่อ "ข้อมูลครบ" (ของเดิม)
+          · โหมด setup = โผล่เมื่อผู้ใช้กด "แก้ไข" ที่แถวรถที่ใช้ */}
+      {isSetup ? editingVehicle : !question ? (
         <View className="mt-3">
-          <View className="bg-emerald-50 border border-emerald-200 rounded-2xl px-3.5 py-2.5">
-            <Text className="text-[12.5px] font-bold text-emerald-800">
-              ข้อมูลครบแล้วครับ — เลือกรถที่จะใช้ (ถ้าระบุไว้ ค่าน้ำมัน/ค่าไฟจะคำนวณตามรถคันนี้)
-            </Text>
-          </View>
+          {!isSetup ? (
+            <View className="bg-emerald-50 border border-emerald-200 rounded-2xl px-3.5 py-2.5">
+              <Text className="text-[12.5px] font-bold text-emerald-800">
+                ข้อมูลครบแล้วครับ — เลือกรถที่จะใช้ (ถ้าระบุไว้ ค่าน้ำมัน/ค่าไฟจะคำนวณตามรถคันนี้)
+              </Text>
+            </View>
+          ) : null}
 
           <View className="mt-3">
             <View className="flex-row flex-wrap gap-2">
@@ -726,6 +924,7 @@ export default function TripQuestionFlow({
             </Text>
           </View>
 
+          {!isSetup ? (
           <TouchableOpacity
             onPress={onCreatePlan}
             disabled={creating}
@@ -747,18 +946,37 @@ export default function TripQuestionFlow({
               </Text>
             )}
           </TouchableOpacity>
+          ) : null}
         </View>
+      ) : null}
+
+      {/* ── โหมด setup: ปุ่มยืนยัน (แสดงตลอด ไม่บังคับต้องกรอกครบ) ── */}
+      {isSetup ? (
+        <TouchableOpacity
+          onPress={onCreatePlan}
+          disabled={creating}
+          activeOpacity={0.85}
+          className={`mt-3.5 rounded-2xl py-3.5 items-center justify-center flex-row ${
+            creating ? "bg-gray-300" : "bg-violet-600"
+          }`}
+        >
+          {creating ? (
+            <>
+              <ActivityIndicator size="small" color="#FFFFFF" />
+              <Text className="text-white text-[13.5px] font-bold ml-2">
+                กำลังวางแผน...
+              </Text>
+            </>
+          ) : (
+            <>
+              <CheckIcon size={16} color="#FFFFFF" strokeWidth={3} />
+              <Text className="text-white text-[14px] font-bold ml-1.5">
+                ยืนยันและสร้างแพลน
+              </Text>
+            </>
+          )}
+        </TouchableOpacity>
       ) : null}
     </View>
   );
-}
-
-/** ป้ายสั้น ๆ ของรถที่เลือกไว้ (สำหรับแถวสรุป) */
-function vehicleCategoryLabel(vehicle: string): string {
-  const v = vehicle.trim().toLowerCase();
-  if (v === "ev") return "รถไฟฟ้า";
-  if (v === "van") return "รถตู้";
-  if (v === "motorbike" || v === "motorcycle") return "มอเตอร์ไซค์";
-  if (v === "public") return "ขนส่งสาธารณะ";
-  return "รถยนต์ส่วนตัว";
 }
