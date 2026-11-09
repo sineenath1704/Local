@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useCallback } from "react";
+import React, { useRef, useState, useEffect, useCallback, useMemo } from "react";
 import {
   View,
   Text,
@@ -14,6 +14,8 @@ import {
   Alert,
   Image,
   Linking,
+  Animated,
+  Easing,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
 } from "react-native";
@@ -71,6 +73,7 @@ import {
   TRIP_MAX_DAYS,
   computeTripMissing,
   formatPlanSummary,
+  formatPlanPlacesContext,
   formatStopsSelectionText,
   formatTripSetupText,
   isTripPlanReady,
@@ -102,6 +105,10 @@ import {
 } from "../../components/TripDestinationPickerModal";
 import { ChatStylePickerModal } from "../../components/ChatStylePickerModal";
 import { ChatPlaceCard } from "../../components/ChatPlaceCard";
+import ChatSelectedPlacesBox, {
+  ChatPlaceMapModal,
+  type ChatSelectedPlace,
+} from "../../components/ChatSelectedPlacesBox";
 import { parseGoogleMapsUrl } from "../../services/savedPlacesService";
 import { resolvePlaceCoords } from "../../services/placesService";
 import { loadSavedVideos } from "../../services/interactionService";
@@ -128,6 +135,28 @@ interface AiChatScreenProps {
 
 /** การ์ดสถานที่ 1 ใบ (ใช้กับตัวแปรของการรีเฟช) */
 type DiscoveryCard = NonNullable<AiChatMessage["placeCards"]>[number];
+
+/**
+ * ระยะทางเป็นเส้นตรงระหว่าง 2 จุด (กม.) — haversine
+ * -------------------------------------------------------------
+ * ใช้เช็คว่า "จุดเริ่มต้นอยู่ไกลจากสถานที่ที่ผู้ใช้ติ๊กแค่ไหน"
+ * → เตือนผู้ใช้ก่อนกดยืนยัน (ขับข้ามจังหวัด = เวลาเดินทางกินเวลาทั้งวัน)
+ */
+function straightLineKm(
+  a: { lat: number; lng: number },
+  b: { lat: number; lng: number }
+): number {
+  const R = 6371;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.sin(dLng / 2) ** 2 * Math.cos(lat1) * Math.cos(lat2);
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
 
 const SUGGESTIONS = [
   "ช่วยวางแผนทริป 3 วันจากคลิปที่เซฟไว้",
@@ -161,6 +190,14 @@ const DISCOVERY_PATTERNS = [
   /สถานที่[^?]{0,24}น่า/,
   /เที่ยวที่ไหน/,
   /ที่น่าไป/,
+  // ── "อยากเที่ยว" / "น่าเบื่อ" → ความหมายคือ "อยากให้แนะนำสถานที่"
+  //    (ไม่ต้องให้ผู้ใช้พิมพ์คำว่า "แนะนำที่เที่ยว" ให้ตรงเป๊ะ)
+  /อยาก(ไป|ออก)?เที่ยว/,
+  /อยากหาที่(เที่ยว|ไป|ดี)/,
+  /ไปเที่ยวที่ไหน(ดี|ไหม|บ้าง)/,
+  /น่าเบื่อ/,
+  /อยากพักผ่อน/,
+  /อยากไปเที่ยว/,
   /\bwhere to go\b/i,
   /\bthings to do\b/i,
   /\bwhat to do\b/i,
@@ -185,6 +222,8 @@ const PLAN_QUESTION_PATTERNS = [
   /จัดทริป/,
   /ทริป/,
   /กี่วัน/,
+  // "อยากไปเที่ยว 3 วัน" = ขอแผนทริป (ไม่ใช่ขอแนะนำสถานที่)
+  /[0-9]\s*วัน/,
   /ตาราง(เวลา)?/,
   /ไทม์ไลน์/i,
   /itinerary/i,
@@ -212,15 +251,93 @@ const STYLE_KEYWORD_PATTERNS = [
   /ถนนคนเดิน/,
 ];
 
-function shouldOfferDiscovery(text: string): boolean {
+/**
+ * เจตนา "อยากไปเที่ยว / อยากรู้ว่ามีที่ไหนน่า" → ให้เปิดป๊อปอัปเลือกสไตล์
+ * และบอกโมเดลด้วยว่าผู้ใช้ต้องการแนะนำสถานที่ (ฝั่งแอป ไม่แตะ prompt ฝั่ง backend)
+ */
+type ChatIntent = "places" | null;
+
+/** บรรทัดเจตนาที่แนบให้โมเดล (ส่งเฉพาะข้อความที่ "ต้องการแนะนำสถานที่") */
+const INTENT_NOTE_PLACES =
+  "[เจตนาของผู้ใช้: ต้องการให้แนะนำสถานที่ท่องเที่ยว]";
+
+/**
+ * ตรวจเจตนาของคำถาม
+ * -------------------------------------------------------------
+ * · "places" = อยากได้คำแนะนำสถานที่ (เช่น "อยากเที่ยว" "น่าเบื่ออยากไปเที่ยว" "ทะเล")
+ * · ถามข้อเท็จจริง (ราคา · เวลาเปิด · เบอร์ · ที่อยู่) → ไม่ใช่เจตนานี้
+ * · ขอวางแผนทริป (แพลน · จัดทริป · กี่วัน) → ไปทางการ์ดวางแผน
+ */
+function detectChatIntent(text: string): ChatIntent {
   const t = (text ?? "").trim();
-  if (!t) return false;
-  if (PLAN_QUESTION_PATTERNS.some((re) => re.test(t))) return false;
-  if (FACT_QUESTION_PATTERNS.some((re) => re.test(t))) return false;
-  if (DISCOVERY_PATTERNS.some((re) => re.test(t))) return true;
-  // คำตอบสั้น ๆ ที่เป็นสไตล์ → เปิดป๊อปอัปเลือกสไตล์ต่อ
-  if (t.length <= 12 && STYLE_KEYWORD_PATTERNS.some((re) => re.test(t))) return true;
-  return false;
+  if (!t) return null;
+  if (PLAN_QUESTION_PATTERNS.some((re) => re.test(t))) return null;
+  if (FACT_QUESTION_PATTERNS.some((re) => re.test(t))) return null;
+  if (DISCOVERY_PATTERNS.some((re) => re.test(t))) return "places";
+  // คำตอบสั้น ๆ ที่เป็น "สไตล์" → ถือว่าอยากได้คำแนะนำสถานที่แนวนั้น
+  if (t.length <= 12 && STYLE_KEYWORD_PATTERNS.some((re) => re.test(t))) return "places";
+  return null;
+}
+
+/**
+ * เนื้อหาที่ส่งให้โมเดลเห็นในประวัติแชท
+ * -------------------------------------------------------------
+ * · ผู้ใช้เห็นแค่ `m.content` (ฟองข้อความ)
+ * · `m.aiNote` = บริบทที่โมเดลต้องรู้แต่ผู้ใช้ไม่เห็น (เจตนา · สถานที่ที่เลือก + พิกัด)
+ */
+function historyContentOf(m: AiChatMessage): string {
+  const base = m.folder
+    ? `📁 แนบโฟลเดอร์ "${m.folder.name}" (${m.folder.clipCount} คลิป)\n${m.content}`
+    : m.content;
+  return m.aiNote ? `${base}\n${m.aiNote}` : base;
+}
+
+/**
+ * จุด 3 จุดกะพริบ (ใช้ในฟอง "กำลังคิด" ของเอไai)
+ */
+function TypingDots() {
+  const anim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(anim, {
+          toValue: 1,
+          duration: 550,
+          useNativeDriver: true,
+          easing: Easing.inOut(Easing.quad),
+        }),
+        Animated.timing(anim, {
+          toValue: 0,
+          duration: 550,
+          useNativeDriver: true,
+          easing: Easing.inOut(Easing.quad),
+        }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [anim]);
+
+  return (
+    <View className="flex-row items-center">
+      {[0, 1, 2].map((i) => (
+        <Animated.View
+          key={i}
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: 3,
+            marginRight: i < 2 ? 4 : 0,
+            backgroundColor: "#7C3AED",
+            opacity: anim.interpolate({
+              inputRange: [0, 1],
+              outputRange: [0.3, 1],
+            }),
+          }}
+        />
+      ))}
+    </View>
+  );
 }
 
 /**
@@ -312,6 +429,8 @@ export default function AiChatScreen({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [originModalOpen, setOriginModalOpen] = useState(false);
   const [currentOrigin, setCurrentOrigin] = useState<{ label: string; address: string; url?: string; coords?: { lat: number; lng: number } } | null>(null);
+  /** สถานที่ที่กำลังดูแผนที่จากชิปในการ์ดตั้งค่า (null = ปิดป๊อปอัป) */
+  const [setupMapPlace, setSetupMapPlace] = useState<ChatSelectedPlace | null>(null);
   const [currentPlanId, setCurrentPlanId] = useState<string | undefined>(linkedPlanId);
   // บริบทโฟลเดอร์จริง (รายชื่อสถานที่ + ที่มา) — โหลดครั้งเดียวต่อโฟลเดอร์
   const [folderCtxState, setFolderCtxState] = useState<{
@@ -605,19 +724,25 @@ export default function AiChatScreen({
     // ── ข้อความฝั่งผู้ใช้ (ระบบสร้างให้เอง) ─────────────────────────
     // → โผล่ทันที ไม่ยิงให้เอไaiตอบกลับ แต่ข้อความจะติดไปกับประวัติแชท
     //   รอบถัดไปที่ผู้ใช้พิมพ์เอง เอไaiจะเห็นบริบทนี้
+    // · planPlaces = รายการที่ผู้ใช้ติ๊ก (แหล่งเดียวกับกล่องที่เห็น + ที่ส่งให้เอไai)
+    // · aiNote = ชื่อ + พิกัดที่ผู้ใช้ติ๊ก (โมเดลต้องรู้ด้วย ไม่งั้นแผนไม่รู้จุดไหน)
     appendMessage(threadId, {
       role: "user",
       content: `สร้างแพลนทริปจาก ${picked.map((p) => p.name).join(", ")}`,
+      planPlaces: stops,
+      aiNote: formatPlanPlacesContext(stops, base),
     });
 
     // ── การ์ดตั้งค่า (ข้อความใหม่ของเอไai) ───────────────────────
-    const setupId = appendMessage(threadId, {
+    appendMessage(threadId, {
       role: "assistant",
       content:
         "กรอกข้อมูลที่ต้องการเพิ่มเติมได้เลย (ข้ามข้อไหนไม่ได้ก็ได้) แล้วกดยืนยันเพื่อสร้างแพลน",
       planSetup: true,
+      // รายการที่ผู้ใช้ติ๊ก → เก็บไว้กับข้อความนี้เลย (แหล่งเดียว)
+      // → การ์ดโชว์ชิปจากที่นี่ · ปุ่มยืนยันเอาไปสร้างคำขอจากที่นี่ (ต่างกันไม่ได้)
+      planPlaces: stops,
     });
-    setExtraStops((prev) => ({ ...prev, [setupId]: stops }));
   };
 
   /**
@@ -832,6 +957,12 @@ export default function AiChatScreen({
       ...destStops,
       ...(opts?.extraStops ?? []),
     ];
+    // log ก่อนยิง API — ดูได้ทันทีว่าส่งจุดที่ผู้ใช้ติ๊กไปจริงหรือเปล่า
+    console.log(
+      "[AiChatScreen] buildPlanRequest · extraStops:",
+      combinedExtraStops.length,
+      combinedExtraStops.map((s) => s.label)
+    );
     return {
       ...base,
       selectedStops: opts?.selectedStops,
@@ -875,6 +1006,13 @@ export default function AiChatScreen({
         // → กดยืนยันแล้วจะอัปเดตทับแถวเดิม ไม่สร้างแผนซ้ำ
         planId: result.planId ?? thread?.messages.find((m) => m.id === messageId)?.planMeta?.planId ?? null,
       };
+      console.log(
+        "[AiChatScreen] แผนที่ได้กลับ:",
+        result.plan.days?.map((d) => ({
+          day: d.day,
+          stops: d.stops?.length ?? 0,
+        }))
+      );
       updateMessage(threadId, messageId, { plan: result.plan, planMeta: meta });
       return result.plan;
     } catch (err) {
@@ -1063,12 +1201,24 @@ export default function AiChatScreen({
    */
   const handleCreatePlanFromSetup = async (setupId: string) => {
     const slots = draftSlotsRef.current;
-    const stops = extraStops[setupId] ?? [];
+    // อ่านจากแหล่งเดียวกับที่การ์ดโชว์ชิป → สิ่งที่เห็นคือสิ่งที่จะส่ง
+    const setupMsg = thread?.messages.find((m) => m.id === setupId);
+    const stops = setupMsg?.planPlaces ?? [];
+    if (stops.length === 0) {
+      console.warn(
+        "[AiChatScreen] handleCreatePlanFromSetup: ไม่มีสถานที่ที่ผู้ใช้ติ๊กในการ์ดตั้งค่า"
+      );
+    }
 
     // ── ข้อความฝั่งผู้ใช้: ข้อมูลที่กรอกมา ─────────────────────────
+    // · content = ข้อความที่ผู้ใช้เห็น (จุดเริ่มต้น · วัน · เวลา · รถ · คน · งบ)
+    // · planPlaces = สถานที่ที่ผู้ใช้ติ๊ก (กล่องใต้ฟองนี้ + สิ่งที่ส่งไปสร้างแผน = ตัวเดียวกัน)
+    // · aiNote = ชื่อ + พิกัดสถานที่ → โมเดลต้องเห็นด้วย
     appendMessage(threadId, {
       role: "user",
       content: formatTripSetupText(slots),
+      planPlaces: stops,
+      aiNote: formatPlanPlacesContext(stops, slots),
     });
 
     // ── ข้อความใหม่ของเอไai = ที่เกาะของการ์ดแพลน ───────────────
@@ -1598,6 +1748,9 @@ export default function AiChatScreen({
     const body = text.trim();
     if (!body || !thread || sendingRef.current) return;
 
+    // เจตนาของคำถาม → "อยากเที่ยว" = อยากได้คำแนะนำสถานที่ (ไม่ต้องพิมพ์ "แนะนำที่เที่ยว" ให้ตรงเป๊ะ)
+    const intent = detectChatIntent(body);
+
     // คำถามแบบ "อยากรู้ว่ามีที่ไหนน่าเที่ยว" → เปิดป๊อปอัปเลือกสไตล์ก่อนตอบ
     // · โหมด "ถามเกี่ยวกับธุรกิจ" · ถามต่อจากสถานที่ที่เลือก · แก้แผน → ไม่เปิด
     const canOfferDiscovery =
@@ -1606,7 +1759,7 @@ export default function AiChatScreen({
       !opts?.placeId &&
       !opts?.planContext &&
       !opts?.useClipPlace;
-    if (canOfferDiscovery && shouldOfferDiscovery(body)) {
+    if (canOfferDiscovery && intent === "places") {
       void startDiscovery(body);
       return;
     }
@@ -1637,11 +1790,16 @@ export default function AiChatScreen({
     // ผู้ใช้เลือกสถานที่จากรายการ → บอกโมเดลด้วยว่าเลือกอันไหน (คำถามเดิมยังอยู่ข้างบน)
     const selectionNote = opts?.placeLabel ? `\n📍 เลือกสถานที่: ${opts.placeLabel}` : "";
 
+    // เจตนา "อยากไปเที่ยว" → แนบบรรทัดให้โมเดลรู้ว่าต้องการแนะนำสถานที่
+    // (ฝั่งแอปล้วน ไม่แตะ prompt ฝั่ง backend · ผู้ใช้ไม่เห็นบรรทัดนี้)
+    const intentNote = intent === "places" ? INTENT_NOTE_PLACES : undefined;
+
     appendMessage(threadId, {
       role: "user",
       content: body + selectionNote,
       video: opts?.video ?? undefined,
       folder: folderAttachment,
+      aiNote: intentNote,
     });
     setDraft("");
     sendingRef.current = true;
@@ -1671,15 +1829,16 @@ export default function AiChatScreen({
         processedForAi = `${aiFolderLine + body + selectionNote}\n[หมายเหตุ: ลิงก์จุดเริ่มต้นการเดินทางของผู้ใช้ ให้เริ่มวางแผนจากจุดนี้ได้ทันที ไม่ต้องกดเปิดลิงก์ภายนอก]`;
       }
     }
+    // เจตนา "อยากเที่ยว" → บอกโมเดลให้รู้ว่าต้องการแนะนำสถานที่ (บรรทัดเดียว ท้ายข้อความ)
+    if (intentNote) processedForAi = `${processedForAi}\n${intentNote}`;
 
     // ประวัติที่ส่งให้โมเดล → ข้อความที่แนบโฟลเดอร์ ต้องเติมบรรทัดโฟลเดอร์กลับเข้าไป
     // (ในแชทที่เห็นเป็นการ์ดโฟลเดอร์ แต่โมเดลต้องรู้ว่าคลิปมาจากโฟลเดอร์ไหน)
+    // · aiNote = บริบทที่ผู้ใช้ไม่เห็นแต่โมเดลต้องรู้ (เจตนา · สถานที่ที่เลือก)
     const history = [
       ...thread.messages.map((m) => ({
         role: m.role,
-        content: m.folder
-          ? `📁 แนบโฟลเดอร์ "${m.folder.name}" (${m.folder.clipCount} คลิป)\n${m.content}`
-          : m.content,
+        content: historyContentOf(m),
       })),
       {
         role: "user" as const,
@@ -2180,6 +2339,38 @@ export default function AiChatScreen({
   };
 
   /**
+   * สถานะที่ผู้ใช้เห็นว่าเอไaiกำลังทำอะไรอยู่
+   * -------------------------------------------------------------
+   * · ตอนกดยืนยันแล้ว → backend คำนวณแพลน (AI + OSRM) ใช้เวลานาน
+   *   ถ้าไม่มีสถานะ ผู้ใช้จะคิดว่าแอปค้างหรือเอไaiเออเร่อ
+   * · มาจาก state เดิมทั้งหมด (ไม่เพิ่ม request ใหม่)
+   */
+  const aiStatusText = planning
+    ? "กำลังคำนวณแพลนทริป… (อาจใช้เวลาสักครู่)"
+    : replanning
+    ? "กำลังคำนวณแพลนใหม่…"
+    : discoveryLoading
+    ? "กำลังหาสถานที่ที่เหมาะกับคุณ…"
+    : sending
+    ? "กำลังคิด…"
+    : null;
+
+  /**
+   * จุดเริ่มต้นที่ใช้ในป๊อปอัปแผนที่ (ที่ที่ผู้ใช้อยู่)
+   * · จากการ์ดตั้งค่าก่อน (จุดเริ่มต้นที่ผู้ใช้เลือก) · ไม่มี → จุดเริ่มต้นที่บันทึกไว้
+   */
+  const originForMap = useMemo(() => {
+    const fromSlots = draftSlots.startPoint;
+    if (fromSlots?.label) {
+      return { label: fromSlots.label, coords: fromSlots.coords ?? null };
+    }
+    if (currentOrigin) {
+      return { label: currentOrigin.label, coords: currentOrigin.coords ?? null };
+    }
+    return null;
+  }, [draftSlots.startPoint, currentOrigin]);
+
+  /**
    * เนื้อหาข้อความของเอไai + แท็กที่แทรกไว้ "หน้าชื่อสถานที่"
    * -------------------------------------------------------------
    * กฎของผู้ใช้: แท็กต้องอยู่หน้าชื่อสถานที่ ในบรรทัดเดียวกับคำตอบ
@@ -2209,41 +2400,61 @@ export default function AiChatScreen({
     const planView = msg?.planView;
     const isSummary = planView === "summary";
     const isStaged = planView === "staged";
+    // จุดที่ผู้ใช้ติ๊กที่ส่งไปกับแผนนี้ → ใช้เช็คว่าจุดหายหรือเปล่า
+    const sentPlaces = extraStops[messageId] ?? [];
+    const planHasStops = (plan.days ?? []).some((d) => (d.stops?.length ?? 0) > 0);
+    const placesMissing = sentPlaces.length > 0 && !planHasStops;
     return (
-      <TripPlanCard
-        plan={plan}
-        view={isSummary ? "summary" : "plan"}
-        showSummary={isSummary}
-        onBackToEdit={isSummary ? () => handleBackToEditPlan(messageId) : undefined}
-        primaryAction={isStaged ? "confirm" : "preview"}
-        primaryLabel={isStaged ? "ยืนยันแพลนทริป" : undefined}
-        stopClips={buildStopClips(plan)}
-        onOpenClip={(videoId) => void openClipFromStop(videoId)}
-        notSelected={msg?.planMeta?.notSelected}
-        aiWarnings={msg?.planMeta?.aiWarnings}
-        folderWarning={msg?.planMeta?.folderWarning ?? null}
-        busy={replanning === messageId || planning}
-        onConfirm={() =>
-          isSummary
-            ? void handleConfirmPlan(messageId, plan)
-            : isStaged
-            ? handleConfirmPlanStops(messageId, plan)
-            : void handleConfirmPlan(messageId, plan)
-        }
-        onEditWithAi={() => handleEditWithAi(messageId, plan)}
-        onAddStop={(dIndex) => openNearby(messageId, plan, dIndex ?? 0)}
-        onRemoveStop={(stopId) => handleRemoveStop(messageId, plan, stopId)}
-        onMoveStop={(stopId, dir) => handleMoveStop(messageId, plan, stopId, dir)}
-        onSelectLodging={(lodging) => handleSelectLodging(messageId, plan, lodging)}
-        selectedLodgingName={selectedLodging[messageId] ?? null}
-        onFuelPriceOverride={(price) => handleFuelPriceOverride(messageId, plan, price)}
-        fuelPriceOverride={fuelOverride[messageId] ?? null}
-        vehicleSpecified={vehicleSpecified[messageId] ?? true}
-        onVehicleChange={(vehicle, vehicleModel) =>
-          void handleVehicleChange(messageId, plan, vehicle, vehicleModel)
-        }
-        onTravelersChange={(n) => void handleTravelersChange(messageId, plan, n)}
-      />
+      <View>
+        {/* จุดที่ผู้ใช้ติ๊กไม่ได้ถูกใส่ในแผน → บอกตรง ๆ (ไม่ให้เดาว่าทำไม) */}
+        {placesMissing ? (
+          <View className="mt-2 mb-1 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2.5">
+            <Text className="text-amber-800 text-[12.5px] font-bold">
+              สถานที่ที่คุณเลือก ({sentPlaces.length}) ไม่ได้ถูกใส่ในแพลนนี้
+            </Text>
+            <Text className="text-amber-700 text-[12px] mt-1">
+              {sentPlaces.map((s) => s.label).join(" · ")}
+            </Text>
+            <Text className="text-amber-600 text-[11.5px] mt-1">
+              ลองเปลี่ยนจุดเริ่มต้น/วันที่แล้วคำนวณใหม่ หรือเริ่มใหม่จากการ์ดสถานที่
+            </Text>
+          </View>
+        ) : null}
+        <TripPlanCard
+          plan={plan}
+          view={isSummary ? "summary" : "plan"}
+          showSummary={isSummary}
+          onBackToEdit={isSummary ? () => handleBackToEditPlan(messageId) : undefined}
+          primaryAction={isStaged ? "confirm" : "preview"}
+          primaryLabel={isStaged ? "ยืนยันแพลนทริป" : undefined}
+          stopClips={buildStopClips(plan)}
+          onOpenClip={(videoId) => void openClipFromStop(videoId)}
+          notSelected={msg?.planMeta?.notSelected}
+          aiWarnings={msg?.planMeta?.aiWarnings}
+          folderWarning={msg?.planMeta?.folderWarning ?? null}
+          busy={replanning === messageId || planning}
+          onConfirm={() =>
+            isSummary
+              ? void handleConfirmPlan(messageId, plan)
+              : isStaged
+              ? handleConfirmPlanStops(messageId, plan)
+              : void handleConfirmPlan(messageId, plan)
+          }
+          onEditWithAi={() => handleEditWithAi(messageId, plan)}
+          onAddStop={(dIndex) => openNearby(messageId, plan, dIndex ?? 0)}
+          onRemoveStop={(stopId) => handleRemoveStop(messageId, plan, stopId)}
+          onMoveStop={(stopId, dir) => handleMoveStop(messageId, plan, stopId, dir)}
+          onSelectLodging={(lodging) => handleSelectLodging(messageId, plan, lodging)}
+          selectedLodgingName={selectedLodging[messageId] ?? null}
+          onFuelPriceOverride={(price) => handleFuelPriceOverride(messageId, plan, price)}
+          fuelPriceOverride={fuelOverride[messageId] ?? null}
+          vehicleSpecified={vehicleSpecified[messageId] ?? true}
+          onVehicleChange={(vehicle, vehicleModel) =>
+            void handleVehicleChange(messageId, plan, vehicle, vehicleModel)
+          }
+          onTravelersChange={(n) => void handleTravelersChange(messageId, plan, n)}
+        />
+      </View>
     );
   };
 
@@ -2272,11 +2483,33 @@ export default function AiChatScreen({
    * → ระบบส่งข้อมูลที่กรอกเป็นข้อความฝั่งผู้ใช้ แล้วค่อยคำนวณแพลน
    */
   const renderSetupCard = (messageId: string) => {
-    const stops = extraStops[messageId] ?? [];
+    const msg = thread?.messages.find((m) => m.id === messageId);
+    // แหล่งเดียวของรายการที่ผู้ใช้ติ๊ก (เก็บไว้กับข้อความการ์ดตั้งค่า)
+    // → ชิปที่เห็น = สิ่งที่จะถูกส่งไปสร้างแพลน (ไม่มีทางหลุด)
+    const stops = msg?.planPlaces ?? [];
+    // จุดเริ่มต้นอยู่ไกลจากสถานที่ที่เลือกมากไหม (ขับข้ามจังหวัด → แผนจะเพี้ยน)
+    const startCoords = draftSlots.startPoint?.coords ?? null;
+    const farthestKm = startCoords
+      ? stops.reduce(
+          (max, s) => Math.max(max, straightLineKm(startCoords, s.coords)),
+          0
+        )
+      : 0;
+    const startDistanceHint =
+      startCoords && farthestKm >= 150
+        ? `จุดเริ่มต้นอยู่ห่างจากสถานที่ที่เลือกประมาณ ${Math.round(
+            farthestKm
+          )} กม. — ถ้าจะขับข้ามจังหวัด ควรเริ่มเช้าหรือเปลี่ยนจุดเริ่มต้นก่อน`
+        : null;
     return (
       <TripQuestionFlow
         mode="setup"
         places={stops.map((s) => s.label)}
+        onSelectPlace={(i) => {
+          const picked = stops[i];
+          if (picked) setSetupMapPlace(picked);
+        }}
+        startDistanceHint={startDistanceHint}
         slots={draftSlots}
         onChange={applyDraftSlots}
         onSubmitText={(text) => void send(text)}
@@ -2619,6 +2852,16 @@ export default function AiChatScreen({
                   </View>
                   ) : null}
 
+                  {/* กล่อง "สถานที่ที่เลือก" ใต้ฟองผู้ใช้ (รอบแรก/รอบสอง)
+                      → กดปุ่ม Google Map ในกล่อง = เปิดป๊อปอัปแผนที่จากจุดเริ่มต้นไปที่สถานที่นั้น
+                      · ข้อมูลมาจาก item.planPlaces ตัวเดียวกับที่ส่งให้เอไai */}
+                  {mine && !failed && item.planPlaces && item.planPlaces.length > 0 ? (
+                    <ChatSelectedPlacesBox
+                      places={item.planPlaces}
+                      startPoint={originForMap}
+                    />
+                  ) : null}
+
                   {/* ลิงก์แหล่งที่มา (แท็กประเภทสถานที่อยู่ในบรรทัดคำตอบแล้ว) */}
                   {!mine && !failed ? (
                     <ChatSourceChips sources={item.sources} />
@@ -2810,10 +3053,15 @@ export default function AiChatScreen({
             );
           }}
           ListFooterComponent={
-            sending ? (
-              <View className="flex-row items-center ml-9 mb-3">
-                <ActivityIndicator size="small" color="#7C3AED" />
-                <Text className="text-gray-400 text-[12px] ml-2">กำลังคิด...</Text>
+            aiStatusText ? (
+              /* ฟอง "กำลังคิด" ฝั่งเอไai → ผู้ใช้เห็นว่าอีไอกำลังทำอะไรอยู่ */
+              <View className="flex-row items-start ml-9 mb-3">
+                <View className="flex-row items-center bg-gray-100 rounded-2xl rounded-tl-md px-3.5 py-2.5 self-start">
+                  <TypingDots />
+                  <Text className="text-gray-600 text-[12.5px] ml-2 font-medium">
+                    {aiStatusText}
+                  </Text>
+                </View>
               </View>
             ) : undefined
           }
@@ -3144,6 +3392,14 @@ export default function AiChatScreen({
         onConfirm={(tags) => void handleDiscoveryConfirm(tags)}
         onAiPick={() => void handleDiscoveryAiPick()}
         onCancel={handleDiscoveryCancel}
+      />
+
+      {/* ป๊อปอัปแผนที่จากชิปสถานที่ที่ติ๊กในการ์ดตั้งค่า
+          → เส้นทางจากจุดเริ่มต้นของผู้ใช้ → สถานที่ที่แตะชิป */}
+      <ChatPlaceMapModal
+        place={setupMapPlace}
+        startPoint={originForMap}
+        onClose={() => setSetupMapPlace(null)}
       />
     </View>
   );

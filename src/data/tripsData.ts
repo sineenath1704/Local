@@ -279,6 +279,31 @@ export interface AiChatMessage {
    */
   planSetup?: boolean;
   /**
+   * สถานที่ที่ผู้ใช้ติ๊กจากการ์ดสถานที่ → เก็บไว้กับข้อความการ์ดตั้งค่า
+   * -------------------------------------------------------------
+   * · เป็น **แหล่งเดียว** ของรายการที่ติ๊ก (การ์ดตั้งค่าโชว์ชิปจากที่นี่
+   *   และปุ่มยืนยันเอาไปสร้างคำขอจากที่นี่ → สองที่อ่านค่าเดียวกัน = ต่างกันไม่ได้)
+   * · เก็บ "บนตัวข้อความ" ไม่ใช่ใน state ที่คีย์ด้วย id ข้อความ → ไม่หลุดระหว่างทาง
+   */
+  planPlaces?: {
+    label: string;
+    address?: string | null;
+    coords: { lat: number; lng: number };
+    openingHours?: string | null;
+    website?: string | null;
+    /** ลิงก์ Google Maps ของสถานที่ (เปิดดูตำแหน่งได้จากกล่องที่เลือก) */
+    googleMapsUrl?: string | null;
+    /** คะแนนรีวิว (ถ้ามี) */
+    rating?: number | null;
+  }[];
+  /**
+   * ข้อความที่ส่งให้ **โมเดล** เห็นเพิ่มเติม แต่ผู้ใช้ไม่เห็นในฟอง
+   * -------------------------------------------------------------
+   * · ใช้ฝั่งแอปบอกโมเดลเรื่อง "เจตนา" / "บริบทที่ผู้ใช้เลือก" โดยไม่ต้องแตะ prompt ฝั่ง backend
+   * · ต่อท้ายเนื้อหาข้อความตอนประกอบประวัติแชท (ดู AiChatScreen)
+   */
+  aiNote?: string;
+  /**
    * การ์ดแพลนอยู่โหมดไหน
    * · "plan"    = แผนที่เส้นทาง + จุดแวะ (เส้นทางเดิม: กดยืนยันแล้วบันทึกเข้าทริปเลย)
    * · "staged"  = แผนที่เส้นทาง + จุดแวะ (flow ใหม่: ผู้ใช้จัดลำดับจุดก่อน → สรุปทีหลัง)
@@ -504,7 +529,8 @@ export function formatThaiDate(iso?: string | null, withWeekday = false): string
 /** สรุปช่วงวันที่แบบสั้น: "10–12 พ.ย. 2569 · 3 วัน 2 คืน" */
 export function formatThaiDateRange(
   start?: string | null,
-  end?: string | null
+  end?: string | null,
+  opts?: { withDuration?: boolean }
 ): string {
   if (!start) return "";
   const days = tripRangeDays(start, end);
@@ -516,6 +542,8 @@ export function formatThaiDateRange(
     sp && ep && sp.m === ep.m
       ? `${sp.d}–${ep.d} ${THAI_MONTHS[ep.m - 1]} ${ep.y + 543}`
       : `${formatThaiDate(start)} – ${formatThaiDate(end)}`;
+  // withDuration: false = ไม่ต่อท้าย "· N วัน M คืน" (กรณีที่มีข้อความอื่นบอกจำนวนวันอยู่แล้ว)
+  if (opts?.withDuration === false) return span;
   return `${span} · ${days} วัน${nights > 0 ? ` ${nights} คืน` : " · ไป-กลับ"}`;
 }
 
@@ -1059,7 +1087,7 @@ export function vehicleCategoryLabel(vehicle?: string | null): string {
 }
 
 /**
- * ข้อความฝั่งผู้ใช้: "ทริป 1 วัน · ดอยอินทนนท์ → จุดเดิม · 8 พ.ย. · 08:00 · รถไฟฟ้า · 2 คน · งบ 3,000 บาท/คน"
+ * ข้อความฝั่งผู้ใช้: "ทริป 1 วัน · จุดเริ่มต้น: ดอยอินทนนท์ · 8 พ.ย. · 08:00 · รถยนต์ส่วนตัว (Toyota) · 2 คน · งบ 3,000 บาท/คน"
  * → ข้ามส่วนที่ผู้ใช้ไม่ได้กรอก (ไม่บังคับให้ต้องครบทุกช่อง)
  */
 export function formatTripSetupText(slots: TripSlots): string {
@@ -1070,28 +1098,66 @@ export function formatTripSetupText(slots: TripSlots): string {
     bits.push(`ทริป ${days ?? 1} วัน`);
   }
 
+  // จุดเริ่มต้น / จุดสิ้นสุด (แยกข้อความ ไม่ปนกับวันที่)
   const startLabel = slots.startPoint?.label?.trim();
-  const endLabel =
-    slots.returnMode === "custom"
-      ? slots.endPoint?.label?.trim()
-      : slots.returnMode === "same_as_start"
-      ? startLabel
-      : null;
-  if (startLabel) {
-    bits.push(endLabel && endLabel !== startLabel ? `${startLabel} → ${endLabel}` : startLabel);
+  if (startLabel) bits.push(`จุดเริ่มต้น: ${startLabel}`);
+  if (slots.returnMode === "custom") {
+    const endLabel = slots.endPoint?.label?.trim();
+    if (endLabel) bits.push(`จุดสิ้นสุด: ${endLabel}`);
   }
 
+  // ช่วงวันที่ (ไม่ต่อท้ายจำนวนวันซ้ำกับบรรทัดแรก)
   if (slots.startDate) {
-    bits.push(formatThaiDateRange(slots.startDate, slots.endDate));
+    bits.push(
+      formatThaiDateRange(slots.startDate, slots.endDate, { withDuration: false })
+    );
   }
   if (slots.startTime) bits.push(`ออกเดินทาง ${slots.startTime}`);
-  if (slots.vehicle) bits.push(vehicleCategoryLabel(slots.vehicle));
+  if (slots.vehicle) {
+    const model = slots.vehicleModel?.trim();
+    bits.push(
+      model
+        ? `${vehicleCategoryLabel(slots.vehicle)} (${model})`
+        : vehicleCategoryLabel(slots.vehicle)
+    );
+  }
   if (slots.travelers != null) bits.push(`${slots.travelers} คน`);
   if (slots.budgetPerPerson != null) {
     bits.push(`งบ ${slots.budgetPerPerson.toLocaleString("th-TH")} บาท/คน`);
   }
 
   return bits.length ? bits.join(" · ") : "สร้างแพลนทริป";
+}
+
+/**
+ * บริบท "สถานที่ที่ผู้ใช้เลือก" สำหรับส่งให้โมเดล
+ * -------------------------------------------------------------
+ * · โมเดลเห็นแค่เนื้อหาข้อความในประวัติแชท → ถ้าไม่แนบชื่อ/พิกัดสถานที่ที่ผู้ใช้ติ๊ก
+ *   โมเดลจะไม่รู้จักว่าแผนนี้มาจากสถานที่ไหนบ้าง
+ * · ใช้ร่วมกับกล่อง "สถานที่ที่เลือก" ที่ผู้ใช้เห็น (แหล่งเดียวกัน = ต่างกันไม่ได้)
+ */
+export function formatPlanPlacesContext(
+  places: AiChatMessage["planPlaces"],
+  slots?: TripSlots
+): string {
+  const list = places ?? [];
+  if (!list.length) return "";
+  const lines: string[] = [
+    `สถานที่ที่ผู้ใช้เลือก (${list.length} จุด — ให้ใส่ในแผนให้ครบ):`,
+  ];
+  list.forEach((p, i) => {
+    const coords = `${p.coords.lat.toFixed(4)}, ${p.coords.lng.toFixed(4)}`;
+    const address = p.address ? ` — ${p.address}` : "";
+    lines.push(`${i + 1}. ${p.label} (${coords})${address}`);
+  });
+  const start = slots?.startPoint;
+  if (start?.label) {
+    const coords = start.coords
+      ? ` (${start.coords.lat.toFixed(4)}, ${start.coords.lng.toFixed(4)})`
+      : "";
+    lines.push(`จุดเริ่มต้น: ${start.label}${coords}`);
+  }
+  return lines.join("\n");
 }
 
 /**

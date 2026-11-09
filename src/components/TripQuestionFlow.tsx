@@ -6,7 +6,12 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   ScrollView,
+  Modal,
+  Pressable,
+  KeyboardAvoidingView,
+  Platform,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   CalendarDaysIcon,
   CheckIcon,
@@ -16,6 +21,7 @@ import {
   MagnifyingGlassIcon,
   SparklesIcon,
   BanknotesIcon,
+  XMarkIcon,
 } from "react-native-heroicons/outline";
 import {
   TripSlots,
@@ -48,6 +54,16 @@ export interface TripQuestionFlowProps {
   mode?: "ask" | "setup";
   /** ชื่อสถานที่ที่ผู้ใช้ติ๊กมา (โหมด setup) → แสดงเป็นชิปด้านบนการ์ด */
   places?: string[];
+  /**
+   * แตะชิปสถานที่ที่ติ๊กมา (โหมด setup) → เปิดป๊อปอัปแผนที่จากจุดเริ่มต้นไปที่สถานที่นั้น
+   * → รับ "ลำดับ" ของชิปที่ถูกแตะ (0 = อันแรก) ให้ฝั่งแอปเปิดแผนที่ให้ตรงจุด
+   */
+  onSelectPlace?: (index: number) => void;
+  /**
+   * ข้อความเตือน "จุดเริ่มต้นอยู่ไกลจากสถานที่ที่เลือก" (โหมด setup)
+   * → คำนวณระยะทางฝั่งแอป (haversine) แล้วส่งข้อความมาโชว์ · null = ไม่ต้องเตือน
+   */
+  startDistanceHint?: string | null;
   /** ข้อมูลที่เก็บสะสมมาแล้ว (จากแชท + จากที่ผู้ใช้เลือกในการ์ดนี้) */
   slots: TripSlots;
   /** ผู้ใช้เลือกตัวเลือก → อัปเดตข้อมูล (ยังไม่คำนวณค่าใช้จ่าย) */
@@ -190,6 +206,8 @@ function SummaryRow({
 export default function TripQuestionFlow({
   mode = "ask",
   places,
+  onSelectPlace,
+  startDistanceHint,
   slots,
   onChange,
   onSubmitText,
@@ -205,17 +223,25 @@ export default function TripQuestionFlow({
     latest.current = slots;
   }, [slots]);
 
+  const insets = useSafeAreaInsets();
+
   const [answerText, setAnswerText] = useState("");
   const [resolving, setResolving] = useState(false);
   const [vehicleCategory, setVehicleCategory] = useState<VehicleCategory>(
     () => vehicleCategoryOf(slots.vehicle, slots.vehicleModel) ?? "car"
   );
   const [brandText, setBrandText] = useState(slots.vehicleModel ?? "");
+  /** ช่องพิมพ์แบรนด์รถ (โฟกัสให้อัตโนมัติตอนผู้ใช้กด "แก้ไข" ที่แถวรถ) */
+  const brandInputRef = useRef<TextInput>(null);
   const [editingReturn, setEditingReturn] = useState(false);
   /** โหมด setup: คำถามที่ผู้ใช้กด "ข้าม" (ข้ามถาวรในการ์ดนี้) */
   const [skipped, setSkipped] = useState<TripQuestionKey[]>([]);
-  /** โหมด setup: กำลังแก้ไขช่องรถที่ใช้ */
-  const [editingVehicle, setEditingVehicle] = useState(false);
+  /**
+   * ตัวเลือกรถอยู่ใน **โมดัล** (ไม่ใช่ในตัวการ์ด)
+   * → เดิมบล็อกอยู่ในการ์ด = เปิดแล้วโดนแป้นพิมพ์บัง/เลื่อนออกจอ
+   *   ผู้ใช้เลยรู้สึกว่า "กดแก้ไขแล้วไม่ขึ้นอะไรเลย" (แม้โหลดแอปใหม่แล้วก็ยังเป็น)
+   */
+  const [vehicleModalOpen, setVehicleModalOpen] = useState(false);
   /** โหมด setup: งบประมาณต่อคน (พิมพ์เอง · ว่าง = ข้าม) */
   const [budgetText, setBudgetText] = useState(
     slots.budgetPerPerson != null ? String(slots.budgetPerPerson) : ""
@@ -245,6 +271,18 @@ export default function TripQuestionFlow({
 
   const questionNumber = question ? questionList.indexOf(question) + 1 : questionList.length;
   const isSetup = mode === "setup";
+
+  /**
+   * ผู้ใช้กด "แก้ไข" ที่แถว "รถที่ใช้" → เปิดโมดัลตัวเลือกรถ
+   * และโฟกัสช่องพิมพ์แบรนด์ให้อัตโนมัติ (ถ้ายังไม่มีรถที่เลือกไว้)
+   * → พิมพ์ต่อได้เลย ไม่ต้องแตะเองอีกครั้ง
+   */
+  useEffect(() => {
+    if (!vehicleModalOpen) return;
+    if (brandText.trim()) return;
+    const t = setTimeout(() => brandInputRef.current?.focus(), 280);
+    return () => clearTimeout(t);
+  }, [vehicleModalOpen, brandText]);
 
   /** ตัวเลือกรถที่แนะนำตามที่พิมพ์ */
   const vehicleOptions = useMemo(
@@ -393,7 +431,123 @@ export default function TripQuestionFlow({
       fuelType: category === "ev" ? "electric" : null,
     });
     setBrandText(modelName);
+    // เลือกรถเสร็จ → ปิดโมดัล (แถว "รถที่ใช้" ในการ์ดจะโชว์ชื่อรถให้เห็นเอง)
+    setVehicleModalOpen(false);
   };
+
+  /**
+   * บล็อกเลือกรถ (หมวดรถ · ช่องพิมพ์แบรนด์ · รุ่นรถที่ตรงกับที่พิมพ์)
+   * -------------------------------------------------------------
+   * อยู่ใน **โมดัล** ชุดเดียว ใช้ทั้ง 2 โหมด:
+   * · โหมด setup = กด "แก้ไข" ที่แถว "รถที่ใช้"
+   * · โหมด ask   = กดปุ่ม "เลือกรถ" ตอน "ข้อมูลครบแล้ว"
+   */
+  const renderVehiclePicker = () => (
+    <View>
+      <View className="flex-row flex-wrap gap-2">
+        {VEHICLE_CATEGORY_OPTIONS.map((opt) => (
+          <TouchableOpacity
+            key={opt.key}
+            onPress={() => setVehicleCategory(opt.key)}
+            activeOpacity={0.8}
+            className={`px-3 py-1.5 rounded-full border ${
+              vehicleCategory === opt.key
+                ? "bg-violet-600 border-violet-600"
+                : "bg-white border-gray-200"
+            }`}
+          >
+            <Text
+              className={`text-[12px] font-bold ${
+                vehicleCategory === opt.key ? "text-white" : "text-gray-700"
+              }`}
+            >
+              {opt.label}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      <View className="flex-row items-center bg-gray-100 rounded-2xl px-3 mt-2.5">
+        <MagnifyingGlassIcon size={15} color="#9CA3AF" />
+        <TextInput
+          ref={brandInputRef}
+          value={brandText}
+          onChangeText={setBrandText}
+          placeholder="พิมพ์แบรนด์หรือรุ่นรถ เช่น Toyota"
+          placeholderTextColor="#9CA3AF"
+          className="flex-1 py-2.5 px-2 text-[13px] text-gray-900"
+        />
+        {brandText ? (
+          <TouchableOpacity
+            onPress={() => applyVehicle(null)}
+            activeOpacity={0.7}
+            className="p-1"
+          >
+            <Text className="text-[11.5px] font-bold text-gray-500">ล้าง</Text>
+          </TouchableOpacity>
+        ) : null}
+      </View>
+
+      {vehicleOptions.length > 0 ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          className="mt-2"
+          contentContainerStyle={{ paddingRight: 4 }}
+        >
+          {vehicleOptions.map((m) => {
+            const selected = slots.vehicleModel === m.name;
+            return (
+              <TouchableOpacity
+                key={`${m.category}-${m.name}`}
+                onPress={() => applyVehicle(m.name)}
+                activeOpacity={0.8}
+                className={`flex-row items-center mr-2 px-3 py-2 rounded-2xl border ${
+                  selected
+                    ? "bg-violet-600 border-violet-600"
+                    : "bg-white border-gray-200"
+                }`}
+              >
+                {selected ? (
+                  <CheckIcon size={13} color="#FFFFFF" strokeWidth={3} />
+                ) : null}
+                <View className={selected ? "ml-1.5" : ""}>
+                  <Text
+                    className={`text-[12.5px] font-bold ${
+                      selected ? "text-white" : "text-gray-800"
+                    }`}
+                  >
+                    {m.name}
+                  </Text>
+                  <Text
+                    className={`text-[10.5px] ${
+                      selected ? "text-violet-100" : "text-gray-400"
+                    }`}
+                  >
+                    {m.fuelLabel}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+      ) : brandText.trim() ? (
+        <TouchableOpacity
+          onPress={() => applyVehicle(brandText.trim())}
+          activeOpacity={0.8}
+          className="flex-row items-center mt-2 self-start px-3 py-2 rounded-2xl bg-white border border-violet-300"
+        >
+          <Text className="text-[12.5px] font-bold text-violet-700">
+            ใช้ “{brandText.trim()}” ตามที่พิมพ์
+          </Text>
+        </TouchableOpacity>
+      ) : null}
+
+      <Text className="text-[11px] text-gray-400 mt-2">
+        รถที่ใช้: {vehicleLabel} — ค่าใช้จ่ายจะคำนวณตอนกดยืนยันสร้างแพลนเท่านั้น
+      </Text>
+    </View>
+  );
 
   const meta = question ? QUESTION_META[question] : null;
   const startLabel = slots.startPoint?.label ?? "ยังไม่ได้เลือก";
@@ -429,14 +583,31 @@ export default function TripQuestionFlow({
           </Text>
           <View className="flex-row flex-wrap gap-1.5">
             {places.map((name, i) => (
-              <View
+              <TouchableOpacity
                 key={`place-${i}-${name}`}
-                className="bg-violet-50 border border-violet-200 rounded-full px-2.5 py-1"
+                onPress={onSelectPlace ? () => onSelectPlace(i) : undefined}
+                activeOpacity={onSelectPlace ? 0.75 : 1}
+                disabled={!onSelectPlace}
+                className="bg-violet-50 border border-violet-200 rounded-full px-2.5 py-1 flex-row items-center"
               >
                 <Text className="text-[11.5px] font-bold text-violet-800">{name}</Text>
-              </View>
+                {onSelectPlace ? (
+                  <MapPinIcon size={11} color="#7C3AED" style={{ marginLeft: 4 }} />
+                ) : null}
+              </TouchableOpacity>
             ))}
           </View>
+          {/* จุดเริ่มต้นอยู่ไกลจากสถานที่ที่เลือก → เตือนก่อนกดยืนยัน */}
+          {startDistanceHint ? (
+            <View className="mt-2 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2.5">
+              <Text className="text-amber-800 text-[11.5px] font-bold">
+                จุดเริ่มต้นอยู่ไกลจากสถานที่ที่เลือก
+              </Text>
+              <Text className="text-amber-700 text-[11.5px] mt-0.5">
+                {startDistanceHint}
+              </Text>
+            </View>
+          ) : null}
         </View>
       ) : null}
 
@@ -520,7 +691,7 @@ export default function TripQuestionFlow({
               icon={<MapPinIcon size={15} color="#7C3AED" />}
               label="รถที่ใช้"
               value={vehicleLabel}
-              onEdit={() => setEditingVehicle((v) => !v)}
+              onEdit={() => setVehicleModalOpen(true)}
             />
 
             {/* จำนวนผู้เดินทาง — ปุ่ม –/+ (ไม่บังคับต้องกรอก) */}
@@ -808,123 +979,30 @@ export default function TripQuestionFlow({
       ) : null}
 
       {/* ── เลือกรถ (ยังไม่คำนวณ) ─────────────────────────────
-          · โหมด ask   = โผล่เมื่อ "ข้อมูลครบ" (ของเดิม)
-          · โหมด setup = โผล่เมื่อผู้ใช้กด "แก้ไข" ที่แถวรถที่ใช้ */}
-      {isSetup ? editingVehicle : !question ? (
+          · โหมด setup = กด "แก้ไข" ที่แถว "รถที่ใช้" → เปิดโมดัล
+          · โหมด ask   = กดปุ่ม "เลือกรถ" ตอน "ข้อมูลครบ" → เปิดโมดัลเดียวกัน */}
+      {!isSetup && !question ? (
         <View className="mt-3">
-          {!isSetup ? (
-            <View className="bg-emerald-50 border border-emerald-200 rounded-2xl px-3.5 py-2.5">
-              <Text className="text-[12.5px] font-bold text-emerald-800">
-                ข้อมูลครบแล้วครับ — เลือกรถที่จะใช้ (ถ้าระบุไว้ ค่าน้ำมัน/ค่าไฟจะคำนวณตามรถคันนี้)
-              </Text>
-            </View>
-          ) : null}
-
-          <View className="mt-3">
-            <View className="flex-row flex-wrap gap-2">
-              {VEHICLE_CATEGORY_OPTIONS.map((opt) => (
-                <TouchableOpacity
-                  key={opt.key}
-                  onPress={() => setVehicleCategory(opt.key)}
-                  activeOpacity={0.8}
-                  className={`px-3 py-1.5 rounded-full border ${
-                    vehicleCategory === opt.key
-                      ? "bg-violet-600 border-violet-600"
-                      : "bg-white border-gray-200"
-                  }`}
-                >
-                  <Text
-                    className={`text-[12px] font-bold ${
-                      vehicleCategory === opt.key ? "text-white" : "text-gray-700"
-                    }`}
-                  >
-                    {opt.label}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            <View className="flex-row items-center bg-gray-100 rounded-2xl px-3 mt-2.5">
-              <MagnifyingGlassIcon size={15} color="#9CA3AF" />
-              <TextInput
-                value={brandText}
-                onChangeText={setBrandText}
-                placeholder="พิมพ์แบรนด์หรือรุ่นรถ เช่น Toyota"
-                placeholderTextColor="#9CA3AF"
-                className="flex-1 py-2.5 px-2 text-[13px] text-gray-900"
-              />
-              {brandText ? (
-                <TouchableOpacity
-                  onPress={() => applyVehicle(null)}
-                  activeOpacity={0.7}
-                  className="p-1"
-                >
-                  <Text className="text-[11.5px] font-bold text-gray-500">ล้าง</Text>
-                </TouchableOpacity>
-              ) : null}
-            </View>
-
-            {vehicleOptions.length > 0 ? (
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                className="mt-2"
-                contentContainerStyle={{ paddingRight: 4 }}
-              >
-                {vehicleOptions.map((m) => {
-                  const selected = slots.vehicleModel === m.name;
-                  return (
-                    <TouchableOpacity
-                      key={`${m.category}-${m.name}`}
-                      onPress={() => applyVehicle(m.name)}
-                      activeOpacity={0.8}
-                      className={`flex-row items-center mr-2 px-3 py-2 rounded-2xl border ${
-                        selected
-                          ? "bg-violet-600 border-violet-600"
-                          : "bg-white border-gray-200"
-                      }`}
-                    >
-                      {selected ? (
-                        <CheckIcon size={13} color="#FFFFFF" strokeWidth={3} />
-                      ) : null}
-                      <View className={selected ? "ml-1.5" : ""}>
-                        <Text
-                          className={`text-[12.5px] font-bold ${
-                            selected ? "text-white" : "text-gray-800"
-                          }`}
-                        >
-                          {m.name}
-                        </Text>
-                        <Text
-                          className={`text-[10.5px] ${
-                            selected ? "text-violet-100" : "text-gray-400"
-                          }`}
-                        >
-                          {m.fuelLabel}
-                        </Text>
-                      </View>
-                    </TouchableOpacity>
-                  );
-                })}
-              </ScrollView>
-            ) : brandText.trim() ? (
-              <TouchableOpacity
-                onPress={() => applyVehicle(brandText.trim())}
-                activeOpacity={0.8}
-                className="flex-row items-center mt-2 self-start px-3 py-2 rounded-2xl bg-white border border-violet-300"
-              >
-                <Text className="text-[12.5px] font-bold text-violet-700">
-                  ใช้ “{brandText.trim()}” ตามที่พิมพ์
-                </Text>
-              </TouchableOpacity>
-            ) : null}
-
-            <Text className="text-[11px] text-gray-400 mt-2">
-              รถที่ใช้: {vehicleLabel} — ค่าใช้จ่ายจะคำนวณตอนกดปุ่มด้านล่างเท่านั้น
+          <View className="bg-emerald-50 border border-emerald-200 rounded-2xl px-3.5 py-2.5">
+            <Text className="text-[12.5px] font-bold text-emerald-800">
+              ข้อมูลครบแล้วครับ — เลือกรถที่จะใช้ (ถ้าระบุไว้ ค่าน้ำมัน/ค่าไฟจะคำนวณตามรถคันนี้)
             </Text>
           </View>
 
-          {!isSetup ? (
+          <TouchableOpacity
+            onPress={() => setVehicleModalOpen(true)}
+            activeOpacity={0.85}
+            className="mt-3 rounded-2xl border border-violet-200 bg-violet-50 px-3.5 py-3 flex-row items-center"
+          >
+            <MapPinIcon size={16} color="#7C3AED" />
+            <Text className="text-[13px] font-bold text-violet-800 ml-1.5 flex-1">
+              {slots.vehicleModel?.trim()
+                ? `รถที่ใช้: ${slots.vehicleModel.trim()}`
+                : "เลือกรถที่จะใช้"}
+            </Text>
+            <Text className="text-[11.5px] font-bold text-violet-500">แก้ไข</Text>
+          </TouchableOpacity>
+
           <TouchableOpacity
             onPress={onCreatePlan}
             disabled={creating}
@@ -946,7 +1024,6 @@ export default function TripQuestionFlow({
               </Text>
             )}
           </TouchableOpacity>
-          ) : null}
         </View>
       ) : null}
 
@@ -977,6 +1054,57 @@ export default function TripQuestionFlow({
           )}
         </TouchableOpacity>
       ) : null}
+
+      {/* ── โมดัลเลือกรถ ─────────────────────────────────────────
+          อยู่ที่นี่ (ไม่ใช่ในการ์ด) = เปิดแล้วอยู่กลางจอเสมอ
+          ไม่โดนแป้นพิมพ์บัง · ไม่ต้องเลื่อนหา · ไม่มีทาง "กดแล้วไม่ขึ้น" */}
+      <Modal
+        visible={vehicleModalOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setVehicleModalOpen(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={{ flex: 1 }}
+        >
+          {/* พื้นหลังมืด → กดที่ใดก็ได้เพื่อปิด */}
+          <Pressable
+            className="flex-1 bg-black/40"
+            onPress={() => setVehicleModalOpen(false)}
+          />
+          <View
+            className="bg-white rounded-t-3xl px-4 pt-2.5"
+            style={{ paddingBottom: Math.max(insets.bottom, 16) }}
+          >
+            <View className="items-center mb-1.5">
+              <View className="h-1 w-10 rounded-full bg-gray-300" />
+            </View>
+            <View className="flex-row items-center mb-2">
+              <Text className="text-[15px] font-black text-gray-900 flex-1">
+                เลือกรถที่ใช้
+              </Text>
+              <TouchableOpacity
+                onPress={() => setVehicleModalOpen(false)}
+                activeOpacity={0.8}
+                className="p-1.5 rounded-full bg-gray-100"
+              >
+                <XMarkIcon size={16} color="#6B7280" />
+              </TouchableOpacity>
+            </View>
+
+            {renderVehiclePicker()}
+
+            <TouchableOpacity
+              onPress={() => setVehicleModalOpen(false)}
+              activeOpacity={0.85}
+              className="mt-3 rounded-2xl py-3 items-center justify-center bg-violet-600"
+            >
+              <Text className="text-white text-[13.5px] font-bold">เสร็จแล้ว</Text>
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
