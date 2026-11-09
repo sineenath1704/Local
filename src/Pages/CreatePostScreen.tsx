@@ -1480,7 +1480,7 @@ export default function CreatePostScreen({ onPosted, onCancel, initialLocation }
 
   return (
     <View className="flex-1 bg-white">
-      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+      <StatusBar barStyle="dark-content" />
 
       {/* Header with cancel + title */}
       <View

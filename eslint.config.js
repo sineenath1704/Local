@@ -25,6 +25,8 @@ module.exports = defineConfig([
         "expo-file-system/legacy",
         "expo-image-picker",
         "expo-auth-session",
+        // โครงเดียวกับข้างบน: build/index.js ใช้ `export *` ทั้งหมด
+        "expo-audio",
       ],
     },
   },

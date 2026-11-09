@@ -1,11 +1,11 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useCallback } from "react";
 import {
   View,
   StatusBar,
   useWindowDimensions,
   Platform,
   FlatList,
-  ViewToken,
+  ListViewToken,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -24,6 +24,12 @@ interface HomeScreenProps {
   mapSelection?: MapSelectionInfo | null;
   selectedPlace?: PlaceItem | null;
 }
+
+/**
+ * config ตรวจว่าคลิปไหน "มองเห็น" พอ (FlatList)
+ * ต้องเป็น object เดิมทุก render → เก็บไว้นอก component
+ */
+const VIEWABILITY_CONFIG = { itemVisiblePercentThreshold: 60 };
 
 /**
  * HomeScreen — vertical video feed template ("สำหรับคุณ").
@@ -58,15 +64,14 @@ export default function HomeScreen({
 
   const [activePostId, setActivePostId] = useState<string>("");
 
-  // Keep the active post valid as the feed loads/changes.
-  useEffect(() => {
-    if (
-      feedPosts.length > 0 &&
-      !feedPosts.some((p) => p.id === activePostId)
-    ) {
-      setActivePostId(feedPosts[0].id);
-    }
-  }, [feedPosts, activePostId]);
+  /**
+   * คลิปที่กำลังเล่น — ถ้าคลิปที่ active หายไปจากฟีด (โพสต์ถูกลบ/ซ่อน)
+   * ให้ใช้คลิปแรกแทน (คำนวณตอน render — React Compiler ไม่ให้ setState ใน effect)
+   */
+  const currentActiveId =
+    feedPosts.length > 0 && !feedPosts.some((p) => p.id === activePostId)
+      ? feedPosts[0].id
+      : activePostId;
 
   // Overlay/navigation state driven by card actions
   const [saveVideoId, setSaveVideoId] = useState<string | null>(null);
@@ -78,18 +83,15 @@ export default function HomeScreen({
   // Dynamic bottom offset
   const bottomOffset = 20;
 
-  // Viewability config to detect which video is currently visible
-  const viewabilityConfig = useRef({
-    itemVisiblePercentThreshold: 60,
-  }).current;
-
-  const onViewableItemsChanged = useRef(
-    ({ viewableItems }: { viewableItems: ViewToken[] }) => {
+  // Viewability callback — ต้องมี identity นิ่ง (FlatList ลงทะเบียน observer ครั้งเดียว)
+  const onViewableItemsChanged = useCallback(
+    ({ viewableItems }: { viewableItems: ListViewToken[] }) => {
       if (viewableItems.length > 0 && viewableItems[0].item) {
         setActivePostId(viewableItems[0].item.id);
       }
-    }
-  ).current;
+    },
+    []
+  );
 
   const viewingProfile = viewingProfileId
     ? getProfileById(viewingProfileId)
@@ -109,11 +111,7 @@ export default function HomeScreen({
   if (feedLoading && feedPosts.length === 0) {
     return (
       <View className="flex-1 bg-black items-center justify-center">
-        <StatusBar
-          barStyle="light-content"
-          translucent
-          backgroundColor="transparent"
-        />
+        <StatusBar barStyle="light-content" />
         <ActivityIndicator size="large" color="#FFFFFF" />
         <Text className="text-white/70 text-sm mt-3">
           กำลังโหลดวิดีโอ...
@@ -126,11 +124,7 @@ export default function HomeScreen({
   if (feedPosts.length === 0) {
     return (
       <View className="flex-1 bg-black items-center justify-center px-10">
-        <StatusBar
-          barStyle="light-content"
-          translucent
-          backgroundColor="transparent"
-        />
+        <StatusBar barStyle="light-content" />
         <Text className="text-white text-lg font-bold text-center">
           ยังไม่มีวิดีโอในขณะนี้
         </Text>
@@ -157,11 +151,7 @@ export default function HomeScreen({
         );
       }}
     >
-      <StatusBar
-        barStyle="light-content"
-        translucent
-        backgroundColor="transparent"
-      />
+      <StatusBar barStyle="light-content" />
 
       {/* Video feed fills the available space above the bottom menu. */}
       <View className="flex-1 bg-black w-full">
@@ -174,7 +164,7 @@ export default function HomeScreen({
               <View style={{ height: feedHeight, width: "100%" }}>
                 <VideoFeedItem
                   post={item}
-                  isActive={item.id === activePostId}
+                  isActive={item.id === currentActiveId}
                   screenHeight={feedHeight}
                   isSmallDevice={isSmallDevice}
                   bottomOffset={bottomOffset}
@@ -198,7 +188,7 @@ export default function HomeScreen({
             maxToRenderPerBatch={2}
             initialNumToRender={1}
             removeClippedSubviews={Platform.OS === "android"}
-            viewabilityConfig={viewabilityConfig}
+            viewabilityConfig={VIEWABILITY_CONFIG}
             onViewableItemsChanged={onViewableItemsChanged}
             getItemLayout={(_, index) => ({
               length: feedHeight,

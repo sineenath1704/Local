@@ -26,6 +26,9 @@ import {
   buildPlaceResolvePrompt,
   PLACE_RANK_PROMPT,
   buildPlaceRankPrompt,
+  TRANSLATE_SYSTEM_PROMPT,
+  buildTranslatePrompt,
+  TranslateInput,
 } from "./prompt";
 // สายสรุป V2 (Video Content Analyzer V2) — โหมดทดลอง เปิดด้วย VCA_V2_ENABLED
 // (import ตรง ๆ ได้ เพราะฝั่ง `videoPromptV2Compat` ไม่ import `aiClient` แบบ runtime)
@@ -1391,4 +1394,120 @@ export async function generateNarration(
     console.warn("[generateNarration] error:", err);
     return noteFallback(errorDetail(err));
   }
+}
+
+
+// ============================================================
+//  รอบแปลภาษาท้องถิ่น (เอไAI ช่วยแปลภาษา)
+// ============================================================
+
+/** ผลลัพธ์ของรอบแปลภาษา (ส่งต่อให้แอปเอาไปแสดงได้เลย) */
+export interface TranslateResult {
+  /** ภาษาที่โมเดลตรวจพบ (null = ไม่รู้ หรือผู้ใช้เลือกภาษาเอง) */
+  detectedSource: string | null;
+  /** ภาษาต้นทางตามที่ผู้ใช้เลือก */
+  sourceLabel: string;
+  /** ภาษาเป้าหมายตามที่ผู้ใช้เลือก */
+  targetLabel: string;
+  /** ข้อความต้นฉบับ (คัดจากของผู้ใช้เสมอ ไม่เชื่อที่โมเดลคัดมา) */
+  original: string;
+  /** คำแปล — null = โมเดลตอบมาไม่มีคำแปลที่ใช้ได้ */
+  translation: string | null;
+  /** คำอ่านคล้ายเสียง */
+  pronunciation: string | null;
+  /** หมายเหตุบริบท / ความสุภาพ */
+  note: string | null;
+  /** ความมั่นใจว่าอ่านภาษาต้นทางถูก (0–1) */
+  confidence: number;
+  /** true = ข้อความเป็นภาษาเป้าหมายอยู่แล้ว */
+  sameLanguage: boolean;
+}
+
+/** งบ token ของรอบแปล — คำตอบสั้น ๆ แต่บางโมเดลชอบเขียนยาว */
+const TRANSLATE_MAX_TOKENS = 2048;
+
+/**
+ * ชั้นความปลอดภัยของรอบแปล
+ * -------------------------------------------------------------
+ * โมเดลคืน JSON มาแล้วยังเชื่อไม่ได้ทุกอย่าง:
+ *   - "original" เขียนทับด้วยข้อความที่ผู้ใช้ส่งมาเสมอ (โมเดลห้ามแก้ต้นฉบับ)
+ *   - ฟิลด์ที่ไม่ใช่ข้อความ → null (ไม่โยน error หลุดออกไปหาผู้เรียก)
+ *   - คำแปลที่หายไป → null → แอปบอกว่า "แปลไม่สำเร็จ" (ไม่โชว์คำแปลมั่ว)
+ *   - sameLanguage = true แต่โมเดลไม่ส่งคำแปลมา → ใช้ต้นฉบับเป็นคำแปล
+ */
+export function normalizeTranslateResult(
+  raw: any,
+  input: TranslateInput
+): TranslateResult {
+  const asText = (v: unknown): string | null => {
+    if (typeof v !== "string") return null;
+    const trimmed = v.trim();
+    return trimmed ? trimmed : null;
+  };
+  const cut = (v: string | null, max: number): string | null =>
+    v == null ? null : v.length > max ? v.slice(0, max) : v;
+
+  const sameLanguage = raw?.sameLanguage === true || raw?.sameLanguage === "true";
+  let confidence = Number(raw?.confidence);
+  if (!Number.isFinite(confidence)) confidence = sameLanguage ? 0.9 : 0.5;
+  confidence = Math.max(0, Math.min(1, confidence));
+
+  let translation = cut(asText(raw?.translation), 4000);
+  if (!translation && sameLanguage) translation = input.text;
+
+  return {
+    detectedSource: cut(asText(raw?.detectedSource), 80),
+    sourceLabel: input.sourceLabel,
+    targetLabel: input.targetLabel,
+    original: input.text,
+    translation,
+    pronunciation: cut(asText(raw?.pronunciation), 500),
+    note: cut(asText(raw?.note), 500),
+    confidence,
+    sameLanguage,
+  };
+}
+
+/**
+ * แปลข้อความหนึ่งชุด
+ * -------------------------------------------------------------
+ * คืนผลลัพธ์ที่ normalize แล้วเสมอ — ถ้าโมเดลตอบไม่รู้จัก JSON
+ * จะโยน error ให้ผู้เรียก (route) แปลงเป็น 502 พร้อมเหตุผล
+ */
+export async function translateText(
+  input: TranslateInput
+): Promise<TranslateResult> {
+  if (!isAiConfigured()) {
+    throw new Error(
+      "ยังไม่ได้ตั้งค่า AI (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN) — แปลภาษาไม่ได้"
+    );
+  }
+
+  const res = await callAiText({
+    url: `${config.ai.baseUrl}/v1/messages`,
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": config.ai.authToken,
+      "anthropic-version": "2023-06-01",
+    },
+    body: {
+      model: config.ai.model,
+      max_tokens: TRANSLATE_MAX_TOKENS,
+      temperature: 0.0,
+      system: TRANSLATE_SYSTEM_PROMPT,
+      messages: [{ role: "user", content: buildTranslatePrompt(input) }],
+    },
+    timeoutMs: config.ai.timeoutMs,
+  });
+
+  if (!res.ok) {
+    throw new AiUpstreamError(res.status, res.body);
+  }
+
+  const parsed = extractJson(res.text);
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("โมเดลตอบคำแปลมาไม่ใช่ JSON ที่อ่านได้");
+  }
+
+  return normalizeTranslateResult(parsed, input);
 }

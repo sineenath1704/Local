@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useCallback, useState } from "react";
 import {
   View,
   Text,
@@ -7,7 +7,7 @@ import {
   Platform,
   TouchableOpacity,
   useWindowDimensions,
-  ViewToken,
+  ListViewToken,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ArrowLeftIcon } from "react-native-heroicons/outline";
@@ -34,6 +34,12 @@ interface ChatClipViewerProps {
 const EXIT_SENTINEL = "__exit__";
 
 /**
+ * config ตรวจว่าคลิปไหน "มองเห็น" พอ (FlatList)
+ * ต้องเป็น object เดิมทุก render → เก็บไว้นอก component
+ */
+const VIEWABILITY_CONFIG = { itemVisiblePercentThreshold: 60 };
+
+/**
  * Full-screen vertical pager that plays ONLY the clips shared in one chat.
  * Reuses VideoFeedItem so like / comment / follow work out of the box; save /
  * share / open-profile are hosted here (same pattern as HomeScreen).
@@ -55,9 +61,9 @@ export default function ChatClipViewer({ clips, initialIndex, title, onClose }: 
   // data = clips + a trailing sentinel so swiping past the last one closes.
   const data = [...clips, { id: EXIT_SENTINEL } as VideoPost];
 
-  const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 60 }).current;
-  const onViewableItemsChanged = useRef(
-    ({ viewableItems }: { viewableItems: ViewToken[] }) => {
+  // Viewability callback — ต้องมี identity นิ่ง (FlatList ลงทะเบียน observer ครั้งเดียว)
+  const onViewableItemsChanged = useCallback(
+    ({ viewableItems }: { viewableItems: ListViewToken[] }) => {
       const first = viewableItems[0]?.item as { id: string } | undefined;
       if (!first) return;
       if (first.id === EXIT_SENTINEL) {
@@ -65,8 +71,9 @@ export default function ChatClipViewer({ clips, initialIndex, title, onClose }: 
       } else {
         setActiveId(first.id);
       }
-    }
-  ).current;
+    },
+    [onClose]
+  );
 
   const viewingProfile = viewingProfileId ? getProfileById(viewingProfileId) : undefined;
   if (viewingProfile) {
@@ -75,7 +82,7 @@ export default function ChatClipViewer({ clips, initialIndex, title, onClose }: 
 
   return (
     <View className="flex-1 bg-black">
-      <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
+      <StatusBar barStyle="light-content" />
 
       <FlatList
         data={data}
@@ -118,7 +125,7 @@ export default function ChatClipViewer({ clips, initialIndex, title, onClose }: 
         maxToRenderPerBatch={2}
         initialNumToRender={1}
         removeClippedSubviews={Platform.OS === "android"}
-        viewabilityConfig={viewabilityConfig}
+        viewabilityConfig={VIEWABILITY_CONFIG}
         onViewableItemsChanged={onViewableItemsChanged}
       />
 

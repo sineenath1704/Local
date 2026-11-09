@@ -125,7 +125,7 @@ export default function FolderDetailScreen({
 
   return (
     <View className="flex-1 bg-white">
-      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+      <StatusBar barStyle="dark-content" />
 
       {/* Header */}
       <View
@@ -200,7 +200,8 @@ export default function FolderDetailScreen({
           </View>
         )}
         ListEmptyComponent={
-          loading ? null : (
+          // RN 0.88: `ListEmptyComponent` ไม่รับ null (ต้องเป็น undefined)
+          loading ? undefined : (
             <View className="py-16 items-center px-10">
               <PlayIcon size={40} color="#D1D5DB" />
               <Text className="text-gray-400 text-sm text-center mt-3">

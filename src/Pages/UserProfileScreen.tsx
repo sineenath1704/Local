@@ -67,7 +67,7 @@ export default function UserProfileScreen({
 
   return (
     <View className="flex-1 bg-white w-full h-full">
-      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+      <StatusBar barStyle="dark-content" />
 
       <ScrollView
         showsVerticalScrollIndicator={false}

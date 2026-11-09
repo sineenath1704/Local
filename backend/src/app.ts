@@ -4,6 +4,8 @@ import { config, isAiConfigured } from "./config";
 import aiSummaryRouter from "./routes/aiSummary";
 import aiCaptionRouter from "./routes/aiCaption";
 import aiChatRouter from "./routes/aiChat";
+import aiTranslateRouter from "./routes/aiTranslate";
+import aiTranscribeRouter from "./routes/aiTranscribe";
 import tripsRouter from "./routes/trips";
 import foldersRouter from "./routes/folders";
 import placesRouter from "./routes/places";
@@ -31,6 +33,12 @@ export function createApp() {
     // The app reads this to correlate a failed call with a backend log line.
     exposedHeaders: ["x-request-id"],
   }));
+
+  // ถอดเสียง: ไฟล์เสียงเป็น base64 ใน body → ใหญ่กว่า 1 MB
+  // route นี้มี parser ของตัวเอง (3 MB) จึงต้อง mount ก่อนตัว parser กลาง
+  // (body-parser ข้ามซ้ำถ้า body ถูกอ่านไปแล้ว)
+  app.use("/ai-transcribe", aiTranscribeRouter);
+
   app.use(express.json({ limit: "1mb" }));
 
   app.get("/health", (req, res) => {
@@ -70,6 +78,7 @@ export function createApp() {
   app.use("/ai-summary", aiSummaryRouter);
   app.use("/ai-caption", aiCaptionRouter);
   app.use("/ai-chat", aiChatRouter);
+  app.use("/ai-translate", aiTranslateRouter);
   app.use("/trips", tripsRouter);
   app.use("/folders", foldersRouter);
   app.use("/places", placesRouter);

@@ -296,7 +296,8 @@ function historyContentOf(m: AiChatMessage): string {
  * จุด 3 จุดกะพริบ (ใช้ในฟอง "กำลังคิด" ของเอไai)
  */
 function TypingDots() {
-  const anim = useRef(new Animated.Value(0)).current;
+  // ใช้ useState (lazy init) แทน useRef → React Compiler อ่านค่า ref ตอน render ไม่ได้
+  const [anim] = useState(() => new Animated.Value(0));
   useEffect(() => {
     const loop = Animated.loop(
       Animated.sequence([
@@ -2446,7 +2447,7 @@ export default function AiChatScreen({
           onMoveStop={(stopId, dir) => handleMoveStop(messageId, plan, stopId, dir)}
           onSelectLodging={(lodging) => handleSelectLodging(messageId, plan, lodging)}
           selectedLodgingName={selectedLodging[messageId] ?? null}
-          onFuelPriceOverride={(price) => handleFuelPriceOverride(messageId, plan, price)}
+          onFuelPriceOverride={(price) => handleFuelOverride(messageId, plan, price)}
           fuelPriceOverride={fuelOverride[messageId] ?? null}
           vehicleSpecified={vehicleSpecified[messageId] ?? true}
           onVehicleChange={(vehicle, vehicleModel) =>

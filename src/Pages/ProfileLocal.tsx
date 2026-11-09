@@ -481,18 +481,20 @@ export default function ProfileLocal({
   useEffect(() => {
     if (!showEditBusiness) return;
     const query = bizPlaceName.trim();
-    if (!query || query.length < 2) {
-      setBizGpsCandidates([]);
-      setBizGpsLoading(false);
-      return;
-    }
+    const tooShort = !query || query.length < 2;
     // หากเลือกหมุดชื่อนี้ไปแล้ว ไม่ต้องค้นหาซ้ำ
-    if (bizConfirmedPlace && bizConfirmedPlace.name === query) {
+    if (!tooShort && bizConfirmedPlace && bizConfirmedPlace.name === query) {
       return;
     }
 
-    setBizGpsLoading(true);
+    // React Compiler: ห้าม setState ตรง ๆ ใน effect → ย้ายไปทำในตัวจับเวลา
     const timer = setTimeout(async () => {
+      if (tooShort) {
+        setBizGpsCandidates([]);
+        setBizGpsLoading(false);
+        return;
+      }
+      setBizGpsLoading(true);
       try {
         const res = await verifyPlaceOnGoogle({
           placeName: query,
@@ -506,7 +508,7 @@ export default function ProfileLocal({
       } finally {
         setBizGpsLoading(false);
       }
-    }, 500);
+    }, tooShort ? 0 : 500);
 
     return () => clearTimeout(timer);
   }, [bizPlaceName, showEditBusiness, user?.otop_village, user?.otop_amphur, user?.otop_province, bizConfirmedPlace]);
@@ -778,7 +780,7 @@ export default function ProfileLocal({
 
   return (
     <View className="flex-1 bg-white w-full h-full">
-      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+      <StatusBar barStyle="dark-content" />
 
       <View className="flex-1 w-full bg-white">
         <ScrollView

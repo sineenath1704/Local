@@ -40,6 +40,12 @@
           "photosPermission": "แอป Local ขอเข้าถึงคลังรูปภาพเพื่อให้คุณเปลี่ยนรูปโปรไฟล์ได้"
         }
       ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "แอป Local ขอเข้าถึงไมโครโฟนเพื่อถอดเสียงคำที่คุณพูดในหน้าเอไAI ช่วยแปลภาษา"
+        }
+      ],
       "expo-web-browser",
       "expo-status-bar",
       "expo-maps",

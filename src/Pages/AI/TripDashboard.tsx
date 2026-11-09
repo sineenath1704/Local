@@ -1,17 +1,17 @@
 import React, { useState } from "react";
 import { View, Text, TouchableOpacity, FlatList } from "react-native";
 import {
-  SparklesIcon,
+  PlusIcon,
   MapIcon,
   BanknotesIcon,
-  CalendarDaysIcon,
   FolderIcon,
 } from "react-native-heroicons/outline";
 import { useAiPlanner } from "../../state/AiPlannerContext";
 import { Trip, TripStatus } from "../../data/tripsData";
 
 interface TripDashboardProps {
-  onNewTrip: () => void;
+  /** เปิดหน้าสร้างแพลนเอง (ผู้ใช้เลือกจุดเริ่มต้น + สถานที่เอง) */
+  onCreatePlan: () => void;
   onOpenTrip: (tripId: string) => void;
 }
 
@@ -22,7 +22,7 @@ const TABS: { key: TripStatus; label: string; icon: string }[] = [
   { key: "completed", label: "เที่ยวสำเร็จ", icon: "✅" },
 ];
 
-export default function TripDashboard({ onNewTrip, onOpenTrip }: TripDashboardProps) {
+export default function TripDashboard({ onCreatePlan, onOpenTrip }: TripDashboardProps) {
   const { tripsByStatus } = useAiPlanner();
   const [tab, setTab] = useState<TripStatus>("draft");
   const list = tripsByStatus(tab);
@@ -71,14 +71,14 @@ export default function TripDashboard({ onNewTrip, onOpenTrip }: TripDashboardPr
 
   return (
     <View className="flex-1">
-      {/* New trip CTA */}
+      {/* ปุ่มสร้างแพลนเอง — หน้านี้เป็นที่เก็บแพลน ไม่มีปุ่มให้ AI วางแผนแทน */}
       <TouchableOpacity
-        onPress={onNewTrip}
+        onPress={onCreatePlan}
         activeOpacity={0.9}
         className="mx-4 mt-3 mb-4 bg-violet-600 rounded-2xl p-4 flex-row items-center justify-center shadow-lg shadow-violet-300"
       >
-        <SparklesIcon size={20} color="#FFFFFF" />
-        <Text className="text-white font-black text-[15px] ml-2">สร้างทริปใหม่ด้วย AI</Text>
+        <PlusIcon size={20} color="#FFFFFF" strokeWidth={2.5} />
+        <Text className="text-white font-black text-[15px] ml-2">สร้างแพลนเอง</Text>
       </TouchableOpacity>
 
       {/* Sub-tabs */}
@@ -114,11 +114,11 @@ export default function TripDashboard({ onNewTrip, onOpenTrip }: TripDashboardPr
           <View className="py-16 items-center px-8">
             <Text className="text-[36px] mb-2">{TABS.find((t) => t.key === tab)?.icon || "🗺️"}</Text>
             <Text className="text-gray-900 font-bold text-[15px] mb-1">
-              ยังไม่มีทริปในหมวด "{TABS.find((t) => t.key === tab)?.label}"
+              ยังไม่มีทริปในหมวด “{TABS.find((t) => t.key === tab)?.label}”
             </Text>
             <Text className="text-gray-400 text-[12px] text-center leading-5 max-w-[260px]">
               {tab === "draft"
-                ? "คุยกับ AI ในแท็บแชทแล้วกด 'เลือกแพลนทริปนี้' เพื่อนำมาบันทึกร่างที่นี่"
+                ? "กดปุ่ม 'สร้างแพลนเอง' ด้านบน เพื่อเลือกจุดเริ่มต้นจากที่บันทึกไว้ แล้วจัดเส้นทางเองได้"
                 : tab === "planned"
                 ? "เมื่อตรวจสอบร่างทริปเรียบร้อย กด 'ยืนยันแพลนทริป' เพื่อเตรียมเดินทาง"
                 : tab === "active"

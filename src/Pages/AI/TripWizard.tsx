@@ -165,7 +165,7 @@ export default function TripWizard({ initialFolderId, onBack, onCreated }: TripW
 
   return (
     <View className="flex-1 bg-white">
-      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+      <StatusBar barStyle="dark-content" />
 
       {/* Header */}
       <View

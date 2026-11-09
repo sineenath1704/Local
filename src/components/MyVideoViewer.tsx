@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useCallback, useState } from "react";
 import {
   View,
   Text,
@@ -23,6 +23,12 @@ import type { VideoPost } from "../data/homeFeedData";
 import VideoFeedItem from "./VideoFeedItem";
 import SaveToFolderSheet from "./SaveToFolderSheet";
 import ShareSheet from "./ShareSheet";
+
+/**
+ * config ตรวจว่าคลิปไหน "มองเห็น" พอ (FlatList)
+ * ต้องเป็น object เดิมทุก render → เก็บไว้นอก component
+ */
+const VIEWABILITY_CONFIG = { itemVisiblePercentThreshold: 60 };
 
 interface MyVideoViewerProps {
   /** คลิปที่ผู้ใช้แตะเข้ามา */
@@ -83,13 +89,14 @@ export default function MyVideoViewer({
   const [draftHashtags, setDraftHashtags] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 60 }).current;
-  const onViewableItemsChanged = useRef(
+  // Viewability callback — ต้องมี identity นิ่ง (FlatList ลงทะเบียน observer ครั้งเดียว)
+  const onViewableItemsChanged = useCallback(
     ({ viewableItems }: { viewableItems: { item?: unknown }[] }) => {
       const first = viewableItems[0]?.item as VideoPost | undefined;
       if (first?.id) setActiveId(first.id);
-    }
-  ).current;
+    },
+    []
+  );
 
   const openEdit = (videoId: string) => {
     const post = posts.find((p) => p.id === videoId);
@@ -135,7 +142,7 @@ export default function MyVideoViewer({
 
   return (
     <View className="flex-1 bg-black">
-      <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
+      <StatusBar barStyle="light-content" />
 
       {/* Back button */}
       <TouchableOpacity
@@ -176,7 +183,7 @@ export default function MyVideoViewer({
         snapToAlignment="start"
         decelerationRate="fast"
         removeClippedSubviews={Platform.OS === "android"}
-        viewabilityConfig={viewabilityConfig}
+        viewabilityConfig={VIEWABILITY_CONFIG}
         onViewableItemsChanged={onViewableItemsChanged}
       />
 

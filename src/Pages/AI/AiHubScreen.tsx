@@ -11,6 +11,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   FolderIcon,
   ChatBubbleLeftRightIcon,
+  LanguageIcon,
   MapIcon,
   PlusIcon,
   SparklesIcon,
@@ -22,7 +23,9 @@ import type { VideoPost } from "../../data/homeFeedData";
 import AiChatScreen from "./AiChatScreen";
 import TripDashboard from "./TripDashboard";
 import TripWizard from "./TripWizard";
+import ManualTripPlanner from "./ManualTripPlanner";
 import ItineraryViewer from "./ItineraryViewer";
+import TranslateScreen from "./TranslateScreen";
 
 import { InitialPostLocation } from "../CreatePostScreen";
 
@@ -42,6 +45,7 @@ type Nav =
       planContext?: unknown;
     }
   | { view: "wizard"; folderId?: string }
+  | { view: "manual" }
   | { view: "itinerary"; tripId: string };
 
 /**
@@ -77,6 +81,8 @@ export default function AiHubScreen({
   } = useAiPlanner();
 
   const [tab, setTab] = useState<HubTab>("chat");
+  // สวิชในแท็บแชท: เอไAI แชท ↔ เอไAI ช่วยแปลภาษา (สลับเนื้อหาใต้ปุ่ม)
+  const [chatMode, setChatMode] = useState<"chat" | "translate">("chat");
   const [nav, setNav] = useState<Nav>({ view: "hub" });
   // กัน effect ทำงานซ้ำ (startFolderThread เปลี่ยนตัวอ้างทุกครั้งที่ threads เปลี่ยน)
   const handledFolderRef = React.useRef<string | null>(null);
@@ -109,7 +115,10 @@ export default function AiHubScreen({
   // A seed was dropped (e.g. from the comment sheet's "คุยต่อกับ AI"):
   // open its thread, auto-send the message, then clear the seed.
   React.useEffect(() => {
-    if (pendingChatSeed) {
+    if (!pendingChatSeed) return;
+    // ทำงานใน tick ถัดไป — ไม่อัปเดต state ระหว่างที่ React กำลัง render
+    // (consume ต้องอยู่ใน timer เดียวกัน ถ้าอยู่ข้างนอก state จะเปลี่ยนก่อน timer ยิง → แชทไม่เปิด)
+    const timer = setTimeout(() => {
       setTab("chat");
       setNav({
         view: "chat",
@@ -120,7 +129,8 @@ export default function AiHubScreen({
         planContext: pendingChatSeed.planContext ?? null,
       });
       consumePendingChatSeed();
-    }
+    }, 0);
+    return () => clearTimeout(timer);
   }, [pendingChatSeed, consumePendingChatSeed]);
 
   const goHub = () => setNav({ view: "hub" });
@@ -149,6 +159,17 @@ export default function AiHubScreen({
       />
     );
   }
+  if (nav.view === "manual") {
+    return (
+      <ManualTripPlanner
+        onBack={() => {
+          setTab("trips");
+          goHub();
+        }}
+        onCreated={(tripId) => setNav({ view: "itinerary", tripId })}
+      />
+    );
+  }
   if (nav.view === "itinerary") {
     return (
       <ItineraryViewer
@@ -165,7 +186,7 @@ export default function AiHubScreen({
   // ---- Hub (list) ----
   return (
     <View className="flex-1 bg-white">
-      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+      <StatusBar barStyle="dark-content" />
 
       {/* Header */}
       <View
@@ -205,62 +226,97 @@ export default function AiHubScreen({
         })}
       </View>
 
-      {/* ---- Chat tab (แชท AI "น้องโลคอล") ---- */}
+      {/* ---- Chat tab (แชท AI "น้องโลคอล" + เอไAI ช่วยแปลภาษา) ---- */}
       {tab === "chat" && (
         <View className="flex-1">
-          <TouchableOpacity
-            onPress={() => {
-              const id = startGeneralThread();
-              setNav({ view: "chat", threadId: id });
-            }}
-            activeOpacity={0.9}
-            className="mx-4 mt-3 mb-2 bg-violet-600 rounded-2xl p-4 flex-row items-center justify-center"
-          >
-            <PlusIcon size={20} color="#FFFFFF" strokeWidth={2.5} />
-            <Text className="text-white font-black text-[15px] ml-1.5">เริ่มแชทกับน้องโลคอล</Text>
-          </TouchableOpacity>
+          {/* สวิช 2 ปุ่ม อยู่ข้างกัน — กดสลับเนื้อหาใต้ปุ่ม */}
+          <View className="flex-row mx-4 mt-3 bg-gray-100 rounded-2xl p-1">
+            {([
+              ["chat", "เอไAI แชท", ChatBubbleLeftRightIcon],
+              ["translate", "เอไAI ช่วยแปลภาษา", LanguageIcon],
+            ] as const).map(([key, label, Icon]) => {
+              const active = chatMode === key;
+              return (
+                <TouchableOpacity
+                  key={key}
+                  onPress={() => setChatMode(key)}
+                  activeOpacity={0.85}
+                  className={`flex-1 rounded-xl py-2.5 flex-row items-center justify-center ${
+                    active ? "bg-violet-600" : "bg-transparent"
+                  }`}
+                >
+                  <Icon size={15} color={active ? "#FFFFFF" : "#6B7280"} />
+                  <Text
+                    className={`text-[13px] ml-1.5 ${
+                      active ? "font-bold text-white" : "font-medium text-gray-600"
+                    }`}
+                  >
+                    {label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
 
-          <Text className="text-gray-400 text-[11px] px-5 pt-1 pb-1 leading-4">
-            คุยเรื่องเที่ยว วางแผนทริป หรือแนบโฟลเดอร์คลิปที่บันทึกไว้มาถามน้องโลคอลได้เลย
-          </Text>
-
-          <Text className="text-gray-400 text-[11px] font-bold px-5 pt-2 pb-1 uppercase">แชทที่ผ่านมา</Text>
-          <FlatList
-            data={threads}
-            keyExtractor={(t) => t.id}
-            contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 120 }}
-            renderItem={({ item }) => (
+          {chatMode === "translate" ? (
+            <TranslateScreen />
+          ) : (
+            <View className="flex-1">
               <TouchableOpacity
-                onPress={() => setNav({ view: "chat", threadId: item.id })}
-                activeOpacity={0.7}
-                className="flex-row items-center py-3 border-b border-gray-50"
+                onPress={() => {
+                  const id = startGeneralThread();
+                  setNav({ view: "chat", threadId: id });
+                }}
+                activeOpacity={0.9}
+                className="mx-4 mt-3 mb-2 bg-violet-600 rounded-2xl p-4 flex-row items-center justify-center"
               >
-                <View className={`w-10 h-10 rounded-full items-center justify-center mr-3 ${item.folderId ? "bg-amber-100" : "bg-violet-100"}`}>
-                  {item.folderId ? <FolderIcon size={18} color="#D47A3A" /> : <ChatBubbleLeftRightIcon size={18} color="#7C3AED" />}
-                </View>
-                <View className="flex-1">
-                  <Text className="text-gray-900 font-semibold text-[14px]" numberOfLines={1}>
-                    {item.title}
-                  </Text>
-                  <Text className="text-gray-400 text-[12px]" numberOfLines={1}>
-                    {item.folderId ? "จากโฟลเดอร์" : "แชททั่วไป"} • {item.messages.length} ข้อความ
-                  </Text>
-                </View>
+                <PlusIcon size={20} color="#FFFFFF" strokeWidth={2.5} />
+                <Text className="text-white font-black text-[15px] ml-1.5">เริ่มแชทกับน้องโลคอล</Text>
               </TouchableOpacity>
-            )}
-            ListEmptyComponent={
-              <View className="py-16 items-center">
-                <Text className="text-gray-400 text-sm">ยังไม่มีประวัติแชท</Text>
-              </View>
-            }
-          />
+
+              <Text className="text-gray-400 text-[11px] px-5 pt-1 pb-1 leading-4">
+                คุยเรื่องเที่ยว วางแผนทริป หรือแนบโฟลเดอร์คลิปที่บันทึกไว้มาถามน้องโลคอลได้เลย
+              </Text>
+
+              <Text className="text-gray-400 text-[11px] font-bold px-5 pt-2 pb-1 uppercase">แชทที่ผ่านมา</Text>
+              <FlatList
+                data={threads}
+                keyExtractor={(t) => t.id}
+                contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 120 }}
+                renderItem={({ item }) => (
+                  <TouchableOpacity
+                    onPress={() => setNav({ view: "chat", threadId: item.id })}
+                    activeOpacity={0.7}
+                    className="flex-row items-center py-3 border-b border-gray-50"
+                  >
+                    <View className={`w-10 h-10 rounded-full items-center justify-center mr-3 ${item.folderId ? "bg-amber-100" : "bg-violet-100"}`}>
+                      {item.folderId ? <FolderIcon size={18} color="#D47A3A" /> : <ChatBubbleLeftRightIcon size={18} color="#7C3AED" />}
+                    </View>
+                    <View className="flex-1">
+                      <Text className="text-gray-900 font-semibold text-[14px]" numberOfLines={1}>
+                        {item.title}
+                      </Text>
+                      <Text className="text-gray-400 text-[12px]" numberOfLines={1}>
+                        {item.folderId ? "จากโฟลเดอร์" : "แชททั่วไป"} • {item.messages.length} ข้อความ
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                )}
+                ListEmptyComponent={
+                  <View className="py-16 items-center">
+                    <Text className="text-gray-400 text-sm">ยังไม่มีประวัติแชท</Text>
+                  </View>
+                }
+              />
+            </View>
+          )}
         </View>
       )}
 
       {/* ---- Trips tab ---- */}
       {tab === "trips" && (
         <TripDashboard
-          onNewTrip={() => setNav({ view: "wizard" })}
+          onCreatePlan={() => setNav({ view: "manual" })}
           onOpenTrip={(tripId) => setNav({ view: "itinerary", tripId })}
         />
       )}

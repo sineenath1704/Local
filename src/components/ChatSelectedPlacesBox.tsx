@@ -133,7 +133,6 @@ export default function ChatSelectedPlacesBox({
         <Pressable
           key={`${p.label}-${i}`}
           onPress={() => setMapPlace(p)}
-          activeOpacity={0.75}
           className="flex-row items-center px-3 py-2 border-t border-violet-100"
         >
           <View className="w-5 h-5 rounded-full bg-violet-100 items-center justify-center">

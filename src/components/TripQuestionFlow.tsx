@@ -11,6 +11,7 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from "react-native";
+import type { TextInputInstance } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   CalendarDaysIcon,
@@ -231,8 +232,12 @@ export default function TripQuestionFlow({
     () => vehicleCategoryOf(slots.vehicle, slots.vehicleModel) ?? "car"
   );
   const [brandText, setBrandText] = useState(slots.vehicleModel ?? "");
-  /** ช่องพิมพ์แบรนด์รถ (โฟกัสให้อัตโนมัติตอนผู้ใช้กด "แก้ไข" ที่แถวรถ) */
-  const brandInputRef = useRef<TextInput>(null);
+  /**
+   * ช่องพิมพ์แบรนด์รถ (โฟกัสให้อัตโนมัติตอนผู้ใช้กด "แก้ไข" ที่แถวรถ)
+   * ใช้ TextInputInstance (ไม่ใช่ TextInput) — ใน RN 0.88 `TextInput` เป็น
+   * "ค่า" ไม่ใช่ "ชนิด" แล้ว (type ที่ถูกต้องคือ TextInputInstance)
+   */
+  const brandInputRef = useRef<TextInputInstance>(null);
   const [editingReturn, setEditingReturn] = useState(false);
   /** โหมด setup: คำถามที่ผู้ใช้กด "ข้าม" (ข้ามถาวรในการ์ดนี้) */
   const [skipped, setSkipped] = useState<TripQuestionKey[]>([]);
@@ -250,7 +255,10 @@ export default function TripQuestionFlow({
   // ถ้าค่างบถูกเปลี่ยนจากที่อื่น (เช่นเอไaiเติมให้) → ช่องกรอกต้องตาม
   useEffect(() => {
     const fromSlots = slots.budgetPerPerson != null ? String(slots.budgetPerPerson) : "";
-    if (fromSlots !== budgetText.replace(/[^0-9]/g, "")) setBudgetText(fromSlots);
+    if (fromSlots === budgetText.replace(/[^0-9]/g, "")) return;
+    // React Compiler: ห้าม setState ตรง ๆ ใน effect → เลื่อนไป tick ถัดไป
+    const t = setTimeout(() => setBudgetText(fromSlots), 0);
+    return () => clearTimeout(t);
   }, [slots.budgetPerPerson, budgetText]);
 
   const questionList = useMemo(() => tripQuestionList(slots), [slots]);

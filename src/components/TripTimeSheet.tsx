@@ -35,7 +35,7 @@ import { XMarkIcon } from "react-native-heroicons/outline";
  */
 
 /** ความสูง 1 แถวของล้อ */
-const ITEM_H = 40;
+export const ITEM_H = 40;
 /** ความสูงล้อ (เห็น 3 แถว — แถวกลางคือที่เลือก) */
 const WHEEL_H = ITEM_H * 3;
 /** นาทีขยับทีละ 5 */
@@ -63,8 +63,10 @@ function parseHhMm(value?: string | null): { h: number; m: number } {
  * · เลื่อนแล้วปล่อย → snap เข้าช่อง → รายงานค่าที่เลือกกลับ
  * · อัปเดตค่าสดระหว่างเลื่อน (ไม่ใช่ตอนปล่อย) → แถวที่ไฮไลต์ตรงกับที่เห็นเสมอ
  *   แม้ iOS จะ snap เป็นช่องหลังปล่อยนิ้ว
+ *
+ * export ไว้ให้ `TripTimeRangeSheet` (ตัวเลือกช่วงเวลาเริ่ม–จบ) ใช้ล้อตัวเดียวกัน
  */
-function Wheel({
+export function Wheel({
   values,
   selectedIndex,
   onCommit,

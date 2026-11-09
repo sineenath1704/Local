@@ -324,3 +324,86 @@ export async function updateMyTripPlan(
     return false;
   }
 }
+
+/**
+ * สร้างแพลนทริปที่ผู้ใช้สร้างเอง (ไม่ผ่าน AI) → INSERT ลง `trip_plans`
+ * =============================================================
+ * RLS ของ `trip_plans` มี policy "trips write own" (FOR ALL) + grant `insert`
+ * ให้ `authenticated` อยู่แล้ว → แอปเขียนแผนเองได้ ไม่ต้องผ่าน backend
+ *
+ * รูปแบบ `itinerary_data` ต้องเป็นรูปแบบเดียวกับที่ `tripPlanRowToTrip()`
+ * อ่านกลับ → เปิดแอปใหม่แล้วแพลนยังครบทุกอย่าง (แผนที่/เวลา/จุดแวะ)
+ *
+ * คืน `planId` (uuid ของแถว) — ใส่ใน `Trip.planId` เพื่อให้การแก้ไขครั้งต่อไป
+ * sync กลับลง DB ผ่าน `updateMyTripPlan` (เส้นทางเดียวกับแพลนจาก AI)
+ */
+export interface NewTripPlanInput {
+  /** ชื่อแพลน */
+  planName: string;
+  /** จุดเริ่มต้น (ข้อความ) */
+  startLocation: string;
+  /** จุดสิ้นสุด (ข้อความ) */
+  returnLocation?: string | null;
+  /** โฟลเดอร์ที่มา (ถ้าสร้างจากโฟลเดอร์) */
+  sourceFolderId?: string | null;
+  startDate?: string | null;
+  endDate?: string | null;
+  budgetLimit?: number | null;
+  travelStyle?: string | null;
+  /** ข้อมูลแพลนทั้งก้อน (days + __meta + ...) */
+  itineraryData: Record<string, unknown>;
+}
+
+/** uid ของผู้ใช้ที่ล็อกอินอยู่ (ใช้เป็น creator_id) */
+async function currentUid(): Promise<string | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const { data } = await supabase.auth.getUser();
+    return data.user?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function createMyTripPlan(
+  input: NewTripPlanInput
+): Promise<string | null> {
+  if (!isSupabaseConfigured) return null;
+  const uid = await currentUid();
+  if (!uid) {
+    console.warn("[tripPlanService] สร้างแพลนไม่สำเร็จ: ยังไม่ได้ล็อกอิน");
+    return null;
+  }
+
+  try {
+    const row = {
+      creator_id: uid,
+      source_folder_id: input.sourceFolderId ?? null,
+      plan_name: (input.planName || "แพลนทริปของฉัน").slice(0, 100),
+      start_location: input.startLocation || "จุดเริ่มต้น",
+      return_location: input.returnLocation ?? null,
+      start_date: input.startDate ?? null,
+      end_date: input.endDate ?? null,
+      budget_limit: input.budgetLimit ?? null,
+      travel_style: input.travelStyle ?? null,
+      itinerary_data: input.itineraryData,
+      status: "draft",
+      is_shared: false,
+    };
+
+    const { data, error } = await supabase
+      .from("trip_plans")
+      .insert(row)
+      .select("id")
+      .single();
+
+    if (error) {
+      console.warn("[tripPlanService] สร้างแพลนไม่สำเร็จ:", error.message);
+      return null;
+    }
+    return (data as any)?.id ?? null;
+  } catch (e: any) {
+    console.warn("[tripPlanService] สร้างแพลนไม่สำเร็จ:", e?.message ?? e);
+    return null;
+  }
+}

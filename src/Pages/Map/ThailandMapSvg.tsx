@@ -43,14 +43,15 @@ const MIN_SCALE = 1;
 const MAX_SCALE = 8;
 
 // distance between two active touches
-function touchDistance(touches: any[]): number {
+// (touches ของ RN 0.88 เป็น readonly → ต้องรับเป็น readonly ด้วย)
+function touchDistance(touches: readonly any[]): number {
   const [a, b] = touches;
   const dx = a.pageX - b.pageX;
   const dy = a.pageY - b.pageY;
   return Math.sqrt(dx * dx + dy * dy);
 }
 
-function touchMidpoint(touches: any[]): { x: number; y: number } {
+function touchMidpoint(touches: readonly any[]): { x: number; y: number } {
   const [a, b] = touches;
   return { x: (a.pageX + b.pageX) / 2, y: (a.pageY + b.pageY) / 2 };
 }
@@ -97,7 +98,12 @@ export default function ThailandMapSvg({
     setTransform({ scale: 1, tx: 0, ty: 0 });
   }, []);
 
-  const panResponder = useRef(
+  // PanResponder เป็น API แบบ imperative (สร้างครั้งเดียวแล้วใช้ต่อ)
+  // เก็บผลลัพธ์ไว้ใน state (lazy init) แทน useRef → ตอน render ไม่ต้องอ่านค่า .current
+  // callback ข้างในอ่าน gesture.current ตอน gesture (นอก render) — React Compiler
+  // (กฎ react-hooks/refs) มองว่า "อาจถูกเรียกตอน render" จึงต้องปิดกฎไว้ช่วงนี้
+  /* eslint-disable react-hooks/refs */
+  const [panResponder] = useState(() =>
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: (_e, g) => {
@@ -122,7 +128,8 @@ export default function ThailandMapSvg({
         } else {
           gesture.current.isPinching = false;
           // double-tap detection to reset zoom
-          const now = Date.now();
+          // ใช้ timestamp ของ event แทน Date.now() (React Compiler: ห้ามเรียกฟังก์ชัน impure ตอน render)
+          const now = e.nativeEvent.timestamp;
           if (now - gesture.current.lastTap < 280) {
             resetTransform();
           }
@@ -172,7 +179,8 @@ export default function ThailandMapSvg({
         gesture.current.startDist = 0;
       },
     })
-  ).current;
+  );
+  /* eslint-enable react-hooks/refs */
 
   const { pathGenerator, projection, renderFeatures, isAmphoe, activeDistrictFeat } = useMemo(() => {
     let featuresToRender: any[] = THAILAND_GEOJSON.features as any[];

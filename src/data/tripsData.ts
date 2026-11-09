@@ -1230,7 +1230,14 @@ export interface ItineraryStop {
   booking?: { phone?: string | null; website?: string | null; note?: string | null } | null;
   /** คำเตือนเฉพาะจุด */
   issues?: string[];
+  /** จุดแวะระหว่างทาง (ปั๊ม/ร้านอาหาร/จุดพัก) — ใส่เองในหน้าแพลน */
+  isWaypoint?: boolean;
+  /** ชนิดของจุดแวะระหว่างทาง */
+  waypointKind?: WaypointKind;
 }
+
+/** ชนิดจุดแวะระหว่างทางที่ผู้ใช้เพิ่มเองในหน้าแพลน */
+export type WaypointKind = "fuel" | "food" | "convenience" | "rest";
 
 export interface ItineraryDay {
   day: number;
