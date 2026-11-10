@@ -11,8 +11,13 @@ import type { TranslateResult } from "../data/translateData";
  * ทั้งสองเส้นทางไม่ต้องล็อกอิน (เหมือน /ai-caption) — ใช้ตอนเที่ยวได้เลย
  */
 
-/** แปลข้อความไม่นานเท่าไร — โมเดลต้องคิดนานหน่อย */
-const TRANSLATE_TIMEOUT_MS = 30000;
+/**
+ * แปลข้อความไม่นานเท่าไร
+ * -------------------------------------------------------------
+ * ฝั่ง backend ทำได้ 2 รอบ (ตรวจภาษา + ค้นเว็บ → แปลต่อเป้าหมาย)
+ * รอบแรกมี google_search → ให้เวลาเยอะไว้
+ */
+const TRANSLATE_TIMEOUT_MS = 120000;
 
 /** ถอดเสียงนานกว่า (ส่งไฟล์เสียงขึ้นไปด้วย) */
 const TRANSCRIBE_TIMEOUT_MS = 60000;
@@ -30,33 +35,6 @@ export interface TranslateRequest {
   targetId: string;
   targetLabel: string;
 }
-
-/** id ของ "ไทยภาษากลาง" — ใช้เป็นทางกลางของการแปล */
-const CENTRAL_THAI_ID = "th-central";
-
-/**
- * id ของภาษาไทยถิ่น 3 ภาค (อีสาน · ล้านนา · ปักษ์ใต้)
- * ถ้าผู้ใช้เลือกเอง → เชื่อว่าเป็นภาษาถิ่น → ต้องแปลให้ได้ ไม่ใช่ตอบว่า “ภาษาเดียวกัน”
- * (ดูรายการใน translateData.ts — DIALECT_LANGUAGES)
- */
-const THAI_DIALECT_IDS = ["th-isarn", "th-lanna", "th-paknam"];
-
-/**
- * ป้ายที่ส่งไปให้โมเดลตอน "แปลเป็นไทยภาษากลาง"
- * -------------------------------------------------------------
- * ป้ายภาษาคือช่องที่ backend เอาไปวางใน prompt จริง ๆ (ดู buildTranslatePrompt)
- * การบอกให้ชัดว่า "ไทยภาษากลาง ≠ ภาษาถิ่น" กันไม่ให้โมเดลตอบว่า
- * "เป็นภาษาเดียวกันอยู่แล้ว" แล้วปล่อยคำภาษาถิ่นไว้โดยไม่แปล
- */
-const CENTRAL_TH_TARGET_LABEL =
-  "ภาษาไทยภาษากลาง (ภาษามาตรฐาน ไม่ใช่ภาษาถิ่น) — ถ้าข้อความต้นทางเป็นคำพูดท้องถิ่น ให้แปลเป็นภาษาไทยภาษากลางเสมอ ห้ามตอบว่าเป็นภาษาเดียวกัน";
-
-/** ป้ายฝั่งต้นทางตอนให้โมเดลตรวจเอง — บอกให้รู้ว่าคำภาษาถิ่นนับเป็นภาษาต่างหนึ่ง */
-const AUTO_SOURCE_LABEL =
-  "อัตโนมัติ — ตรวจหาภาษาต้นทางเอง (ถ้าเป็นคำพูดท้องถิ่นของไทย ให้ถือว่าเป็นภาษาถิ่นนั้น)";
-
-/** ป้ายฝั่งต้นทางตอนแปลต่อจากไทยกลางไปภาษาปลายทาง */
-const CENTRAL_TH_SOURCE_LABEL = "ภาษาไทย (ภาษากลาง)";
 
 /**
  * แปลข้อความ
@@ -77,112 +55,17 @@ export async function translateText(
 }
 
 /**
- * แปลแบบ "เข้าใจกลางก่อน แล้วค่อยแปลต่อ"
+ * แปลข้อความ (ทางเข้าหลักของหน้าจอ)
  * -------------------------------------------------------------
- * ที่ผู้ใช้ต้องการ: คำภาษาถิ่นต้องถูก “แปล” เสมอ ไม่ใช่ถูกตอบว่า
- * "เป็นภาษาไทยอยู่แล้ว" (เช่น “อะหยัง” → “อย่างไรบ้าง”)
- *
- * · ขั้นที่ 1: แปลทุกอย่างให้เป็น “ไทยภาษากลาง” ก่อนเสมอ
- *   (ภาษาถิ่น → ไทยกลาง · ภาษาต่างประเทศ → ไทยกลาง)
- *   ถ้าโมเดลตอบว่า “เป็นภาษาเดียวกันอยู่แล้ว” (เกิดกับคำถิ่น เช่น “อะหยัง”)
- *   → ขอแปลอีกครั้งแบบเจาะจงว่าให้แปลเป็นไทยกลางเสมอ
- * · ขั้นที่ 2: ถ้าปลายทางไม่ใช่ไทยกลาง → เอา “ไทยกลาง” ที่ได้ไปแปลต่อ
- *   (ไทยกลาง → ภาษาท้องถิ่นอื่น · ไทยกลาง → ภาษาต่างประเทศ)
- *   ถ้าขั้นที่ 1 ไม่ได้แปลเลย → แปลตรงจากภาษาต้นทางเดิมไปปลายทางแทน
- * · ปลายทาง = ไทยกลาง → จบที่ขั้นที่ 1
+ * ตอนนี้ฝั่ง backend ทำ "2 ขั้น" ให้เอง ภายในคำขอเดียว:
+ *   ขั้น 1  ตรวจภาษา + หาความหมายกลาง (ภาษาไทยภาษากลาง) — ค้นเว็บช่วยเมื่อไม่รู้
+ *   ขั้น 2  ถ้าปลายทางไม่ใช่ภาษากลาง → แปล "ความหมายกลาง" ไปเป็นภาษาเป้าหมาย
+ * แอปจึงยิงแค่คำขอเดียว และได้ทั้ง "ภาษาที่ตรวจพบ" + "คำแปล" + "ความหมายกลาง"
  */
 export async function translateTextFlow(
   input: TranslateRequest
 ): Promise<TranslateResult> {
-  const sourceId = input.sourceId;
-  const sourceLabel =
-    sourceId === "auto" ? AUTO_SOURCE_LABEL : input.sourceLabel;
-
-  // ── ขั้นที่ 1: → ไทยภาษากลาง ───────────────────────────────────────
-  let central = await translateText({
-    text: input.text,
-    sourceId,
-    sourceLabel,
-    targetId: CENTRAL_THAI_ID,
-    targetLabel: CENTRAL_TH_TARGET_LABEL,
-  });
-
-  // โมเดลตอบว่า “เป็นภาษาเดียวกันอยู่แล้ว” ทั้งที่เป็นคำภาษาถิ่น
-  // → ขอให้ลองอีกครั้งแบบเจาะจง
-  //   · ผู้ใช้เลือก “ภาษาไทยถิ่น” มาเอง → เชื่อผู้ใช้ ต้องแปลให้ได้
-  //   · ต้นทาง “อัตโนมัติ” + ข้อความสั้น → มักเป็นคำถิ่น (เช่น “อะหยัง”)
-  const isDialectSource = THAI_DIALECT_IDS.includes(sourceId);
-  const maybeDialect =
-    isDialectSource ||
-    (sourceId === "auto" && input.text.trim().length <= 40);
-  if (central.sameLanguage && maybeDialect) {
-    central = await translateText({
-      text: input.text,
-      sourceId,
-      sourceLabel: `${sourceLabel} — ข้อความนี้อาจเป็นคำภาษาถิ่น ให้แปลเป็นภาษาไทยภาษากลางเสมอ`,
-      targetId: CENTRAL_THAI_ID,
-      targetLabel: CENTRAL_TH_TARGET_LABEL,
-    });
-  }
-
-  // โมเดลยังบอกว่า “ภาษาเดียวกัน” → ไม่มีความหมายกลางให้ใช้ต่อ
-  const centralMeaning = central.sameLanguage
-    ? null
-    : central.translation ?? input.text;
-
-  // ปลายทาง = ไทยกลาง → ใช้ผลขั้นที่ 1 ได้เลย
-  if (input.targetId === CENTRAL_THAI_ID) {
-    return {
-      ...central,
-      sourceLabel: input.sourceLabel,
-      targetLabel: input.targetLabel,
-      centralMeaning: null,
-    };
-  }
-
-  // ── ขั้นที่ 2: → ภาษาปลายทาง ───────────────────────────────────────
-  // · ขั้นที่ 1 แปลได้ → เอา “ไทยกลาง” ไปแปลต่อ
-  // · ขั้นที่ 1 ไม่ได้แปล → แปลตรงจากภาษาต้นทางเดิมไปปลายทางแทน
-  const hop2 = centralMeaning
-    ? {
-        text: centralMeaning,
-        sourceId: CENTRAL_THAI_ID,
-        sourceLabel: CENTRAL_TH_SOURCE_LABEL,
-      }
-    : { text: input.text, sourceId, sourceLabel };
-
-  try {
-    const final = await translateText({
-      text: hop2.text,
-      sourceId: hop2.sourceId,
-      sourceLabel: hop2.sourceLabel,
-      targetId: input.targetId,
-      targetLabel: input.targetLabel,
-    });
-
-    const notes = [central.note, final.note].filter(
-      (n): n is string => !!n && n.trim() !== ""
-    );
-    const uniqueNotes = notes.filter((n, i) => notes.indexOf(n) === i);
-
-    return {
-      ...final,
-      original: input.text,
-      sourceLabel: input.sourceLabel,
-      detectedSource: central.detectedSource ?? final.detectedSource,
-      pronunciation: final.pronunciation ?? central.pronunciation,
-      note: uniqueNotes.length ? uniqueNotes.join(" · ") : null,
-      centralMeaning,
-    };
-  } catch {
-    // แปลต่อไม่สำเร็จ — ยังดีกว่าไม่มีอะไรเลย → เอาความหมายภาษาไทยมาให้ดู
-    return {
-      ...central,
-      original: input.text,
-      centralMeaning,
-      note: `แปลต่อเป็น${input.targetLabel} ไม่สำเร็จ — ด้านบนคือความหมายภาษาไทย`,
-    };
-  }
+  return translateText(input);
 }
 
 /**
@@ -250,11 +133,14 @@ function normalizeResult(
 
   return {
     detectedSource: text(data.detectedSource),
+    detectedSourceId: text(data.detectedSourceId),
     sourceLabel: text(data.sourceLabel) ?? input.sourceLabel,
     targetLabel: text(data.targetLabel) ?? input.targetLabel,
     // ต้นฉบับต้องเป็นของผู้ใช้เสมอ (ไม่ใช่ของที่โมเดลยกมา)
     original: original ?? input.text,
     translation,
+    // ความหมายกลาง (มีตอนที่ backend แปลผ่านไทยภาษากลางมา)
+    centralMeaning: text(data.centralMeaning),
     pronunciation: text(data.pronunciation),
     note: text(data.note),
     confidence,

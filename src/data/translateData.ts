@@ -77,6 +77,11 @@ export function myLanguageChoice(lang: AppLanguage): LangChoice {
  */
 export interface TranslateResult {
   detectedSource: string | null;
+  /**
+   * รหัสภาษาที่ backend ตรวจพบ (เช่น "north" · "isan" · "en")
+   * → ใช้เทียบกับภาษาเป้าหมายได้ (null = โมเดลไม่แน่ใจ)
+   */
+  detectedSourceId?: string | null;
   sourceLabel: string;
   targetLabel: string;
   original: string;
@@ -86,7 +91,7 @@ export interface TranslateResult {
   confidence: number;
   sameLanguage: boolean;
   /**
-   * ความหมาย “ภาษาไทยภาษากลาง” ที่ได้จากขั้นแรก (แอปแปลเอง 2 ขั้น)
+   * ความหมาย “ภาษาไทยภาษากลาง” ที่ได้จากขั้นแรก (backend แปล 2 ขั้นให้)
    * → มีค่าเฉพาะตอนที่ปลายทางเป็นภาษาอื่น (แสดงให้เห็นว่าแปลผ่านกลางมาแล้ว)
    */
   centralMeaning?: string | null;

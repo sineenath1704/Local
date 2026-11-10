@@ -9,6 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/server.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "probe:translate": "ts-node --transpile-only scripts/translate_probe.ts",
     "probe:gem": "ts-node --transpile-only scripts/gem_probe.ts",
     "probe:summary": "ts-node --transpile-only scripts/summary_probe.ts",
     "probe:place": "ts-node --transpile-only scripts/place_resolve_probe.ts",

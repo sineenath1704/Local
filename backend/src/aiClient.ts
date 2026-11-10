@@ -26,9 +26,23 @@ import {
   buildPlaceResolvePrompt,
   PLACE_RANK_PROMPT,
   buildPlaceRankPrompt,
-  TRANSLATE_SYSTEM_PROMPT,
-  buildTranslatePrompt,
+  TRANSLATE_DETECT_SYSTEM_PROMPT,
+  TRANSLATE_TARGET_SYSTEM_PROMPT,
+  buildDetectPrompt,
+  buildTranslateTargetPrompt,
+  parseTranslateJson,
+  parseTranslateTargetJson,
+  validateTranslateResult,
+  lookupLexicon,
+  makeGeminiCaller,
+  toLangId,
+  isDialectLang,
+  CENTRAL_THAI_ID,
+  DETECTED_LANG_IDS,
+  LANG_NAMES,
   TranslateInput,
+  LookupHit,
+  DetectedLangId,
 } from "./prompt";
 // สายสรุป V2 (Video Content Analyzer V2) — โหมดทดลอง เปิดด้วย VCA_V2_ENABLED
 // (import ตรง ๆ ได้ เพราะฝั่ง `videoPromptV2Compat` ไม่ import `aiClient` แบบ runtime)
@@ -1403,8 +1417,10 @@ export async function generateNarration(
 
 /** ผลลัพธ์ของรอบแปลภาษา (ส่งต่อให้แอปเอาไปแสดงได้เลย) */
 export interface TranslateResult {
-  /** ภาษาที่โมเดลตรวจพบ (null = ไม่รู้ หรือผู้ใช้เลือกภาษาเอง) */
+  /** ภาษาที่ตรวจพบ (null = ไม่รู้ หรือผู้ใช้เลือกภาษาเอง) */
   detectedSource: string | null;
+  /** รหัสภาษาที่ตรวจพบ — เทียบกับภาษาเป้าหมายได้ (null = โมเดลไม่รู้) */
+  detectedSourceId: string | null;
   /** ภาษาต้นทางตามที่ผู้ใช้เลือก */
   sourceLabel: string;
   /** ภาษาเป้าหมายตามที่ผู้ใช้เลือก */
@@ -1413,6 +1429,8 @@ export interface TranslateResult {
   original: string;
   /** คำแปล — null = โมเดลตอบมาไม่มีคำแปลที่ใช้ได้ */
   translation: string | null;
+  /** ความหมายกลาง (ภาษาไทยภาษากลาง) — มีเฉพาะตอนที่ปลายทางไม่ใช่ไทยภาษากลาง */
+  centralMeaning: string | null;
   /** คำอ่านคล้ายเสียง */
   pronunciation: string | null;
   /** หมายเหตุบริบท / ความสุภาพ */
@@ -1421,10 +1439,19 @@ export interface TranslateResult {
   confidence: number;
   /** true = ข้อความเป็นภาษาเป้าหมายอยู่แล้ว */
   sameLanguage: boolean;
+  /** ความหมายทางเลือก (ถ้าความหมายกำกวม) */
+  alternatives: string[];
 }
 
 /** งบ token ของรอบแปล — คำตอบสั้น ๆ แต่บางโมเดลชอบเขียนยาว */
 const TRANSLATE_MAX_TOKENS = 2048;
+
+/** ขั้นที่ 1 (ตรวจภาษา + ค้นเว็บ) — ให้เวลาเยอะ เพราะมี google_search */
+const TRANSLATE_DETECT_TIMEOUT_MS = 45000;
+/** ขั้นที่ 1 รอบสอง (ลองใหม่เมื่อผลรอบแรกผิด) */
+const TRANSLATE_RETRY_TIMEOUT_MS = 30000;
+/** ขั้นที่ 3 (แปลความหมายกลาง → ภาษาเป้าหมาย) */
+const TRANSLATE_TARGET_TIMEOUT_MS = 30000;
 
 /**
  * ชั้นความปลอดภัยของรอบแปล
@@ -1455,34 +1482,205 @@ export function normalizeTranslateResult(
   let translation = cut(asText(raw?.translation), 4000);
   if (!translation && sameLanguage) translation = input.text;
 
+  // รหัสภาษาที่ตรวจพบ — ถ้าโมเดลตอบมาไม่รู้จัก ให้ถือว่า "ไม่แน่ใจ" (ปลอดภัย = แปลต่อเสมอ)
+  const idRaw = String(raw?.detectedSourceId ?? "").trim().toLowerCase();
+  const detectedSourceId = (DETECTED_LANG_IDS as readonly string[]).includes(idRaw)
+    ? idRaw
+    : null;
+
+  const alternatives = Array.isArray(raw?.alternatives)
+    ? raw.alternatives
+        .filter((x: unknown): x is string => typeof x === "string" && x.trim() !== "")
+        .slice(0, 5)
+    : [];
+
   return {
     detectedSource: cut(asText(raw?.detectedSource), 80),
+    detectedSourceId,
     sourceLabel: input.sourceLabel,
     targetLabel: input.targetLabel,
     original: input.text,
     translation,
+    centralMeaning: cut(asText(raw?.centralMeaning), 4000),
     pronunciation: cut(asText(raw?.pronunciation), 500),
     note: cut(asText(raw?.note), 500),
     confidence,
     sameLanguage,
+    alternatives,
   };
 }
 
+// ------------------------------------------------------------
+//  ผลขั้นที่ 1 — ตรวจภาษา + ความหมายกลาง (ก่อนที่จะรู้ว่าต้องแปลต่อหรือไม่)
+// ------------------------------------------------------------
+interface DetectOutcome {
+  detectedSource: string | null;
+  detectedSourceId: DetectedLangId | null;
+  /** ความหมายในภาษาไทยภาษากลาง */
+  centralMeaning: string;
+  /** คำอ่านไทยของเสียงต้นฉบับ */
+  pronunciation: string;
+  note: string;
+  confidence: number;
+  alternatives: string[];
+}
+
+/** เอาชื่อภาษาที่โมเดลตอบมา → รหัสภาษา (ใช้ตอนโมเดลลืมส่ง detectedSourceId มา) */
+function langIdFromName(name: string): DetectedLangId | null {
+  const n = (name ?? "").trim();
+  if (!n) return null;
+  for (const id of DETECTED_LANG_IDS) {
+    if (LANG_NAMES[id] === n) return id;
+  }
+  const low = n.toLowerCase();
+  if (n.includes("ล้านนา") || n.includes("เหนือ")) return "north";
+  if (n.includes("อีสาน")) return "isan";
+  if (n.includes("ปักษ์") || n.includes("ใต้")) return "south";
+  if (n.includes("กลาง") || n === "ไทย") return "th-central";
+  if (n.includes("อังกฤษ") || low.includes("english")) return "en";
+  if (n.includes("จีน") || low.includes("chinese")) return "zh";
+  if (n.includes("เขมร") || low.includes("khmer")) return "km";
+  if (n.includes("มลายู") || low.includes("malay")) return "ms";
+  if (n.includes("ลาว") || low.includes("lao")) return "lo";
+  if (n.includes("รัสเซีย") || low.includes("russian")) return "ru";
+  if (n.includes("ญี่ปุ่น") || low.includes("japanese")) return "ja";
+  if (n.includes("เกาหลี") || low.includes("korean")) return "ko";
+  if (n.includes("อินโดนีเซีย") || low.includes("indonesian")) return "id";
+  if (n.includes("เวียดนาม") || low.includes("vietnam")) return "vn";
+  if (n.includes("ฝรั่งเศส") || low.includes("french")) return "fr";
+  return null;
+}
+
+/** ดึงผลขั้นที่ 1 ออกมาเป็นรูปแบบเดียว (รับได้ทั้ง JSON ใหม่และของเก่า) */
+function toDetectOutcome(raw: any): DetectOutcome {
+  const text = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  const detectedSource = text(raw?.detectedSource) || null;
+  const idRaw = String(raw?.detectedSourceId ?? "").trim().toLowerCase();
+  const detectedSourceId = (DETECTED_LANG_IDS as readonly string[]).includes(idRaw)
+    ? (idRaw as DetectedLangId)
+    : langIdFromName(detectedSource ?? "");
+  const conf = Number(raw?.confidence);
+  return {
+    detectedSource,
+    detectedSourceId,
+    // โมเดลเกตเวย์บางตัวตอบมาในรูปแบบเก่า (มี "translation" แทน "centralMeaning")
+    centralMeaning: text(raw?.centralMeaning) || text(raw?.translation),
+    pronunciation: text(raw?.pronunciation),
+    note: text(raw?.note),
+    confidence: Number.isFinite(conf) ? Math.max(0, Math.min(1, conf)) : 0.5,
+    alternatives: Array.isArray(raw?.alternatives)
+      ? raw.alternatives.filter((x: unknown): x is string => typeof x === "string")
+      : [],
+  };
+}
+
+function clampConfidence(v: number, fallback = 0.5): number {
+  if (!Number.isFinite(v)) return fallback;
+  return Math.max(0, Math.min(1, v));
+}
+
+/** ตัดช่องว่าง/เส้นคั่นบรรทัดออก — ใช้เทียบว่า "เหมือนต้นฉบับ" แบบไม่สนตัวพิมพ์ */
+function normText(s: string): string {
+  return (s ?? "").normalize("NFC").replace(/\s+/g, "").trim();
+}
+
+/** รวมหมายเหตุจากหลายขั้น โดยไม่ซ้ำ */
+function joinNotes(...notes: (string | null | undefined)[]): string {
+  const list = notes
+    .map((n) => (typeof n === "string" ? n.trim() : ""))
+    .filter((n) => n !== "");
+  return list.filter((n, i) => list.indexOf(n) === i).join(" · ");
+}
+
 /**
- * แปลข้อความหนึ่งชุด
+ * ขั้นที่ 1–2 — ตรวจภาษา + หาความหมายกลาง (Gemini + ค้นเว็บ)
  * -------------------------------------------------------------
- * คืนผลลัพธ์ที่ normalize แล้วเสมอ — ถ้าโมเดลตอบไม่รู้จัก JSON
- * จะโยน error ให้ผู้เรียก (route) แปลงเป็น 502 พร้อมเหตุผล
+ * · รอบแรก: ส่งไปให้ Gemini ตรวจภาษา + แปลเป็นไทยภาษากลาง
+ * · validate: ถ้าผิด (คืนคำเดิม / ไม่แปล / เดาว่าเป็นภาษากลางโดยไม่ค้น) → ลองใหม่ 1 รอบ
+ *   พร้อมบอกเหตุผลที่ผิด (ไม่งั้นโมเดลจะตอบเหมือนเดิมทุกครั้ง)
+ * · ถ้ายังผิด → ใช้ผลที่มีอยู่ แต่ลดความมั่นใจ + บอกผู้ใช้ในหมายเหตุ
+ * · ถ้า Gemini ล้มเหลว/ไม่ได้ตั้งค่า → ใช้โมเดลเดิมผ่านเกตเวย์ (ไม่ค้นเว็บ)
  */
-export async function translateText(
-  input: TranslateInput
-): Promise<TranslateResult> {
-  if (!isAiConfigured()) {
-    throw new Error(
-      "ยังไม่ได้ตั้งค่า AI (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN) — แปลภาษาไม่ได้"
-    );
+async function detectLanguage(
+  input: TranslateInput,
+  hits: LookupHit[]
+): Promise<DetectOutcome> {
+  let geminiError: unknown = null;
+
+  if (config.gemini.apiKey) {
+    try {
+      const call = makeGeminiCaller(
+        config.gemini.apiKey,
+        config.gemini.model,
+        TRANSLATE_DETECT_TIMEOUT_MS
+      );
+
+      const raw = await call({
+        system: TRANSLATE_DETECT_SYSTEM_PROMPT,
+        user: buildDetectPrompt(input, hits),
+        useSearch: config.gemini.searchEnabled,
+        timeoutMs: TRANSLATE_DETECT_TIMEOUT_MS,
+      });
+      const parsed = parseTranslateJson(raw);
+      const problem = validateTranslateResult(input, parsed, hits);
+      if (parsed && !problem) return toDetectOutcome(parsed);
+
+      // ── รอบที่สอง: บอกเหตุผลที่ผิดให้โมเดลแก้ ──────────────────
+      let raw2 = "";
+      try {
+        raw2 = await call({
+          system: TRANSLATE_DETECT_SYSTEM_PROMPT,
+          user: buildDetectPrompt(
+            input,
+            hits,
+            problem ?? "ผลรอบก่อนไม่ผ่านการตรวจ"
+          ),
+          useSearch: config.gemini.searchEnabled,
+          timeoutMs: TRANSLATE_RETRY_TIMEOUT_MS,
+        });
+      } catch (err) {
+        console.warn("[translate] detect retry failed:", errorDetail(err));
+      }
+
+      const parsed2 = raw2 ? parseTranslateJson(raw2) : null;
+      const problem2 = validateTranslateResult(input, parsed2, hits);
+      if (parsed2 && !problem2) return toDetectOutcome(parsed2);
+
+      // ── ยังผิดอยู่ → ใช้ผลที่มี แต่ลดความมั่นใจ + บอกผู้ใช้ ──
+      const best = parsed2 ?? parsed;
+      if (best) {
+        const out = toDetectOutcome(best);
+        out.confidence = Math.min(out.confidence, 0.4);
+        out.note = out.note
+          ? `${out.note} (ระบบยังไม่แน่ใจในผลแปลนี้)`
+          : "ระบบยังไม่แน่ใจในผลแปลนี้ — ลองพิมพ์ใหม่หรือเลือกภาษาต้นทางให้ตรงอีกครั้ง";
+        return out;
+      }
+    } catch (err) {
+      geminiError = err;
+      console.warn("[translate] gemini detect failed:", errorDetail(err));
+    }
   }
 
+  // ── สำรอง: โมเดลเดิมผ่านเกตเวย์ (ไม่ค้นเว็บ) ─────────────────────
+  const gatewayReady = Boolean(config.ai.baseUrl && config.ai.authToken);
+  if (!gatewayReady) {
+    if (geminiError) throw geminiError;
+    if (!isAiConfigured()) {
+      throw new Error(
+        "ยังไม่ได้ตั้งค่า AI (GEMINI_API_KEY หรือ ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN) — แปลภาษาไม่ได้"
+      );
+    }
+    throw new Error("แปลภาษาไม่สำเร็จ — โมเดลที่ใช้ค้นความหมายไม่ตอบ");
+  }
+  return detectViaAiGateway(input, hits);
+}
+
+/** สำรอง: ตรวจภาษา + ความหมายกลางด้วยโมเดลเดิม (ผ่านเกตเวย์) */
+async function detectViaAiGateway(
+  input: TranslateInput,
+  hits: LookupHit[]
+): Promise<DetectOutcome> {
   const res = await callAiText({
     url: `${config.ai.baseUrl}/v1/messages`,
     headers: {
@@ -1494,8 +1692,8 @@ export async function translateText(
       model: config.ai.model,
       max_tokens: TRANSLATE_MAX_TOKENS,
       temperature: 0.0,
-      system: TRANSLATE_SYSTEM_PROMPT,
-      messages: [{ role: "user", content: buildTranslatePrompt(input) }],
+      system: TRANSLATE_DETECT_SYSTEM_PROMPT,
+      messages: [{ role: "user", content: buildDetectPrompt(input, hits) }],
     },
     timeoutMs: config.ai.timeoutMs,
   });
@@ -1509,5 +1707,193 @@ export async function translateText(
     throw new Error("โมเดลตอบคำแปลมาไม่ใช่ JSON ที่อ่านได้");
   }
 
-  return normalizeTranslateResult(parsed, input);
+  const out = toDetectOutcome(parsed);
+  if (!out.centralMeaning) {
+    throw new Error("โมเดลตอบมาไม่มีความหมายที่ใช้ได้");
+  }
+  return out;
+}
+
+/**
+ * ขั้นที่ 3 — แปล "ความหมายกลาง" ไปเป็นภาษาเป้าหมาย
+ * (เป้าหมายเป็นภาษาถิ่น → เปิดค้นเว็บด้วย · ภาษาต่างประเทศ → ไม่ต้องค้น)
+ */
+async function translateToTarget(
+  centralMeaning: string,
+  targetLabel: string,
+  targetLang: DetectedLangId | null
+): Promise<{
+  translation: string;
+  note: string;
+  confidence: number;
+  alternatives: string[];
+}> {
+  const useSearch = config.gemini.searchEnabled && isDialectLang(targetLang);
+  const user = buildTranslateTargetPrompt(centralMeaning, targetLabel);
+
+  if (config.gemini.apiKey) {
+    try {
+      const call = makeGeminiCaller(
+        config.gemini.apiKey,
+        config.gemini.model,
+        TRANSLATE_TARGET_TIMEOUT_MS
+      );
+      const raw = await call({
+        system: TRANSLATE_TARGET_SYSTEM_PROMPT,
+        user,
+        useSearch,
+        timeoutMs: TRANSLATE_TARGET_TIMEOUT_MS,
+      });
+      const parsed = parseTranslateTargetJson(raw);
+      if (parsed && parsed.translation.trim()) {
+        return {
+          translation: parsed.translation.trim(),
+          note: parsed.note.trim(),
+          confidence: clampConfidence(parsed.confidence),
+          alternatives: parsed.alternatives.filter(
+            (x: unknown): x is string => typeof x === "string"
+          ),
+        };
+      }
+    } catch (err) {
+      console.warn("[translate] gemini target failed:", errorDetail(err));
+    }
+  }
+
+  // ── สำรอง: โมเดลเดิมผ่านเกตเวย์ ────────────────────────────────
+  if (!config.ai.baseUrl || !config.ai.authToken) {
+    throw new Error("แปลต่อไม่สำเร็จ — ไม่มีโมเดลสำรอง");
+  }
+  const res = await callAiText({
+    url: `${config.ai.baseUrl}/v1/messages`,
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": config.ai.authToken,
+      "anthropic-version": "2023-06-01",
+    },
+    body: {
+      model: config.ai.model,
+      max_tokens: TRANSLATE_MAX_TOKENS,
+      temperature: 0.0,
+      system: TRANSLATE_TARGET_SYSTEM_PROMPT,
+      messages: [{ role: "user", content: user }],
+    },
+    timeoutMs: config.ai.timeoutMs,
+  });
+  if (!res.ok) throw new AiUpstreamError(res.status, res.body);
+
+  const parsed = extractJson(res.text);
+  const o = (parsed ?? {}) as Record<string, unknown>;
+  const translation = typeof o.translation === "string" ? o.translation.trim() : "";
+  if (!translation) {
+    throw new Error("โมเดลตอบคำแปลมาไม่ใช่ JSON ที่อ่านได้");
+  }
+  return {
+    translation,
+    note: typeof o.note === "string" ? o.note.trim() : "",
+    confidence: clampConfidence(Number(o.confidence)),
+    alternatives: Array.isArray(o.alternatives)
+      ? o.alternatives.filter((x: unknown): x is string => typeof x === "string")
+      : [],
+  };
+}
+
+/**
+ * แปลข้อความหนึ่งชุด
+ * -------------------------------------------------------------
+ * กระบวนการ (ฝั่งแอปยิงมา 1 คำขอ · ภายในอาจมี 2 คำขอ Gemini):
+ *   ขั้น 0  พจนานุกรมคำถิ่นในเครื่อง → hits
+ *   ขั้น 1  Gemini + google_search → ตรวจภาษา + ความหมายกลาง
+ *   ขั้น 2  validate → ถ้าผิด ลองใหม่ 1 รอบ (พร้อมบอกเหตุผลที่ผิด)
+ *   ขั้น 3  ถ้าเป้าหมาย ≠ ภาษาที่ตรวจพบ และ ≠ ไทยภาษากลาง → Gemini อีก 1 คำขอ
+ *   ขั้น 4  รวมผล + normalize
+ *
+ * คืนผลลัพธ์ที่ normalize แล้วเสมอ — ถ้าโมเดลตอบไม่รู้จัก JSON
+ * จะโยน error ให้ผู้เรียก (route) แปลงเป็น 502 พร้อมเหตุผล
+ */
+export async function translateText(
+  input: TranslateInput
+): Promise<TranslateResult> {
+  // ขั้นที่ 0 — พจนานุกรมคำถิ่นในเครื่อง (แหล่งความจริงที่แม่นที่สุด)
+  const hits = lookupLexicon(input);
+
+  // ขั้นที่ 1–2 — ตรวจภาษา + ความหมายกลาง
+  const detected = await detectLanguage(input, hits);
+  const centralMeaning = detected.centralMeaning || input.text;
+
+  const targetLang = toLangId(input.targetId);
+  const targetIsCentral =
+    targetLang === CENTRAL_THAI_ID ||
+    (!targetLang && /ภาษากลาง|ไทย.*กลาง/.test(input.targetLabel || ""));
+  const userPickedDialect = isDialectLang(toLangId(input.sourceId));
+
+  const sameText = normText(centralMeaning) === normText(input.text);
+  const detectedIsTarget =
+    !!detected.detectedSourceId &&
+    !!targetLang &&
+    detected.detectedSourceId === targetLang;
+
+  // "ภาษาเดียวกันอยู่แล้ว" = ภาษาที่ตรวจพบตรงกับเป้าหมาย
+  // แต่ถ้าพจนานุกรมเจอคำถิ่น หรือผู้ใช้เลือกภาษาถิ่นเป็นต้นทาง → ต้องแปลจริง
+  const sameLanguage =
+    hits.length === 0 &&
+    !userPickedDialect &&
+    (detectedIsTarget ||
+      (targetIsCentral &&
+        sameText &&
+        !detected.detectedSourceId &&
+        detected.confidence >= 0.6));
+
+  let translation: string | null;
+  let note = detected.note;
+  let confidence = detected.confidence;
+  let alternatives = detected.alternatives;
+
+  if (sameLanguage) {
+    // ข้อความเป็นภาษาเป้าหมายอยู่แล้ว → ไม่ต้องแปล
+    translation = input.text;
+  } else if (targetIsCentral) {
+    // ปลายทาง = ไทยภาษากลาง → จบที่ขั้นที่ 1 (1 คำขอ Gemini)
+    translation = centralMeaning;
+  } else {
+    // ขั้นที่ 3 — แปล "ความหมายกลาง" ไปเป็นภาษาเป้าหมาย
+    try {
+      const hop = await translateToTarget(
+        centralMeaning,
+        input.targetLabel,
+        targetLang
+      );
+      translation = hop.translation;
+      note = joinNotes(detected.note, hop.note);
+      confidence = Math.min(detected.confidence, hop.confidence);
+      alternatives = hop.alternatives.length
+        ? hop.alternatives
+        : detected.alternatives;
+    } catch (err) {
+      // แปลต่อไม่สำเร็จ → ยังดีกว่าไม่มีอะไรเลย → เอาความหมายกลางให้ดู
+      console.warn("[translate] target hop failed:", errorDetail(err));
+      translation = centralMeaning;
+      note = joinNotes(
+        detected.note,
+        `แปลต่อเป็น${input.targetLabel}ไม่สำเร็จ — ด้านบนคือความหมายภาษาไทย`
+      );
+    }
+  }
+
+  // ขั้นที่ 4 — รวม + normalize
+  return normalizeTranslateResult(
+    {
+      detectedSource: detected.detectedSource,
+      detectedSourceId: detected.detectedSourceId,
+      translation,
+      // แสดง "ความหมายกลาง" เฉพาะตอนที่ปลายทางไม่ใช่ไทยภาษากลาง
+      centralMeaning: targetIsCentral ? null : centralMeaning,
+      pronunciation: detected.pronunciation,
+      note,
+      confidence,
+      sameLanguage,
+      alternatives,
+    },
+    input
+  );
 }
