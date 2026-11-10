@@ -28,7 +28,7 @@ import {
   type LangChoice,
   type TranslateResult,
 } from "../../data/translateData";
-import { translateText, transcribeAudio } from "../../services/translateService";
+import { translateTextFlow, transcribeAudio } from "../../services/translateService";
 import {
   requestMicPermission,
   startRecording,
@@ -135,7 +135,7 @@ export default function TranslateScreen() {
       markBusy("translate");
       setError(null);
       try {
-        const res = await translateText({
+        const res = await translateTextFlow({
           text: payload,
           sourceId: src.id,
           sourceLabel: src.label,
@@ -418,6 +418,12 @@ export default function TranslateScreen() {
             </View>
 
             <ResultRow label="ต้นฉบับ" value={result.original} />
+
+            {/* ความหมายกลาง — โชว์เฉพาะตอนที่แปลผ่าน “ไทยกลาง” มา (ปลายทางเป็นภาษาอื่น) */}
+            {result.centralMeaning &&
+            result.centralMeaning !== result.translation ? (
+              <ResultRow label="ความหมายกลาง" value={result.centralMeaning} />
+            ) : null}
 
             {result.translation ? (
               <ResultRow label="ความหมาย" value={result.translation} strong />

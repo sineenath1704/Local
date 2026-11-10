@@ -109,6 +109,12 @@ interface OriginChoice {
   coords?: { lat: number; lng: number } | null;
 }
 
+/**
+ * แท็ก/ชื่อที่ “ทั่วไป” เกินไปสำหรับการค้นหาพิกัด
+ * (เช่น “บ้าน” → จะไปตรงกับบ้านหลังอื่นในเมืองแทน)
+ */
+const GENERIC_LABELS = ["บ้าน", "หอพัก", "ที่ทำงาน", "จุดนัดพบ", "จุดเริ่มต้น"];
+
 function addMinutes(time: string, mins: number): string {
   const m = /^(\d{1,2}):(\d{2})$/.exec((time ?? "").trim());
   const base = m ? Number(m[1]) * 60 + Number(m[2]) : 8 * 60;
@@ -172,7 +178,9 @@ export default function ManualTripPlanner({
   // ── ขั้นที่ 2: สถานที่ ───────────────────────────────────────────────
   const [placeTab, setPlaceTab] = useState<"folder" | "manual">("folder");
   const [folders, setFolders] = useState<Folder[]>([]);
-  const [foldersLoading, setFoldersLoading] = useState(false);
+  // เริ่มเป็น “กำลังโหลด” ตั้งแต่แรก (ไม่ต้อง setState ใน effect — React Compiler
+  // บ่นว่า setState ตรง ๆ ใน effect แล้ว render ซ้ำ)
+  const [foldersLoading, setFoldersLoading] = useState(true);
   const [folderId, setFolderId] = useState<string | null>(null);
   const [folderPlaces, setFolderPlaces] = useState<FolderPlaceInfo[]>([]);
   const [folderLoading, setFolderLoading] = useState(false);
@@ -201,11 +209,15 @@ export default function ManualTripPlanner({
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      setFoldersLoading(true);
-      const list = await getMyFolders();
-      if (!cancelled) {
-        setFolders(list);
-        setFoldersLoading(false);
+      try {
+        const list = await getMyFolders();
+        if (!cancelled) {
+          setFolders(list);
+        }
+      } catch {
+        // โหลดโฟลเดอร์ไม่ได้ → ไม่พังหน้าจอ ใช้แท็บ “ใส่เอง” แทน
+      } finally {
+        if (!cancelled) setFoldersLoading(false);
       }
     })();
     return () => {
@@ -217,9 +229,15 @@ export default function ManualTripPlanner({
   const loadFolder = useCallback(async (id: string) => {
     setFolderId(id);
     setFolderLoading(true);
-    const ctx = await getFolderContext(id);
-    setFolderPlaces(ctx?.places ?? []);
-    setFolderLoading(false);
+    try {
+      const ctx = await getFolderContext(id);
+      setFolderPlaces(ctx?.places ?? []);
+    } catch {
+      // โหลดสถานที่ในโฟลเดอร์ไม่สำเร็จ → ปล่อยว่างไว้ ไม่ให้หน้าจอพัง
+      setFolderPlaces([]);
+    } finally {
+      setFolderLoading(false);
+    }
   }, []);
 
   const toggleFolderPlace = (p: FolderPlaceInfo) => {
@@ -252,9 +270,14 @@ export default function ManualTripPlanner({
     const q = manualQuery.trim();
     if (!q) return;
     setSearching(true);
-    const hits = await findLocalPlaces({ name: q });
-    setLocalHits(hits);
-    setSearching(false);
+    try {
+      const hits = await findLocalPlaces({ name: q });
+      setLocalHits(hits);
+    } catch {
+      setLocalHits([]);
+    } finally {
+      setSearching(false);
+    }
   };
 
   const addLocalHit = (hit: LocalPlace) => {
@@ -288,12 +311,17 @@ export default function ManualTripPlanner({
     setAddingManual(true);
     let coords: LatLng | null = null;
     let label = name;
-    if (link || name) {
-      const resolved = await resolvePlaceCoords({ url: link || null, text: link ? null : name });
-      if (resolved) {
-        coords = { lat: resolved.lat, lng: resolved.lng };
-        if (!label && resolved.label) label = resolved.label;
+    try {
+      if (link || name) {
+        const resolved = await resolvePlaceCoords({ url: link || null, text: link ? null : name });
+        if (resolved) {
+          coords = { lat: resolved.lat, lng: resolved.lng };
+          if (!label && resolved.label) label = resolved.label;
+        }
       }
+    } catch {
+      // หาพิกัดไม่สำเร็จ → เพิ่มสถานที่ไปก่อน ไม่มีพิกัด (ยังใช้ได้ แค่ไม่ขึ้นบนแผนที่)
+      coords = null;
     }
     setPlaces((prev) => [
       ...prev,
@@ -340,25 +368,48 @@ export default function ManualTripPlanner({
   };
 
   // ── จุดเริ่มต้นที่เลือก: ถ้าไม่มีพิกัด → ลองหาพิกัดให้อัตโนมัติ ──────
+  // หมายเหตุ: โชว์จุดเริ่มต้นทันที (ไม่รอหาพิกัด) แล้วค่อยเติมพิกัดทีหลัง
+  // เพราะการรอ backend ทำให้หน้าจอดูเหมือนค้าง และปุ่ม “ถัดไป” กดไม่ได้เลย
   const pickOrigin = async (choice: OriginChoice) => {
     if (choice.coords && choice.coords.lat !== 0) {
       setOrigin({ ...choice, coords: choice.coords });
       return;
     }
+
+    // เอาข้อความไว้หาพิกัดก่อน (ใช้ที่อยู่จริง — ไม่ใช้แท็กทั่วไป เช่น “บ้าน”
+    // ไม่งั้นจะค้นไปเจอสถานที่อื่นที่ชื่อเหมือนกันแล้กลายเป็นจุดเริ่มต้นผิด)
+    const address = choice.address?.trim() ?? "";
+    const label = choice.label?.trim() ?? "";
+    const searchText =
+      address && !GENERIC_LABELS.includes(address)
+        ? address
+        : label && !GENERIC_LABELS.includes(label)
+        ? label
+        : null;
+
+    setOrigin({ ...choice, coords: null });
     setOriginResolving(true);
-    const resolved = await resolvePlaceCoords({
-      url: choice.url ?? null,
-      text: choice.label || choice.address || null,
-    });
-    setOriginResolving(false);
-    if (resolved) {
-      setOrigin({ ...choice, coords: { lat: resolved.lat, lng: resolved.lng } });
-    } else {
-      setOrigin({ ...choice, coords: null });
+    try {
+      const resolved = await resolvePlaceCoords({
+        url: choice.url ?? null,
+        text: searchText,
+      });
+      if (resolved) {
+        setOrigin({ ...choice, coords: { lat: resolved.lat, lng: resolved.lng } });
+      } else {
+        Alert.alert(
+          "จุดเริ่มต้นยังไม่มีพิกัด",
+          "ไปต่อได้ แต่เส้นทางจะเป็นค่าประมาณ\n" +
+            "ถ้าอยากได้เส้นทางจริง ใส่ลิงก์ Google Maps ของจุดเริ่มต้นไว้ด้านล่าง"
+        );
+      }
+    } catch {
       Alert.alert(
-        "จุดเริ่มต้นยังไม่มีพิกัด",
-        "ต้องมีพิกัดถึงจะจัดเส้นทางได้ — ลองวางลิงก์ Google Maps ของจุดเริ่มต้นด้านล่าง"
+        "หาพิกัดไม่สำเร็จ",
+        "ไปต่อได้ แต่เส้นทางจะเป็นค่าประมาณ (ต่อเน็ตใหม่แล้วลองหาพิกัดอีกครั้ง)"
       );
+    } finally {
+      setOriginResolving(false);
     }
   };
 
@@ -367,37 +418,54 @@ export default function ManualTripPlanner({
     const link = originLink.trim();
     if (!link) return;
     setOriginResolving(true);
-    const resolved = await resolvePlaceCoords({ url: link });
-    setOriginResolving(false);
-    if (!resolved) {
-      Alert.alert("หาพิกัดไม่ได้", "ลิงก์นี้หาพิกัดไม่ได้ — ลองอีกครั้งหรือเลือกใหม่");
-      return;
+    try {
+      const resolved = await resolvePlaceCoords({ url: link });
+      if (!resolved) {
+        Alert.alert("หาพิกัดไม่ได้", "ลิงก์นี้หาพิกัดไม่ได้ — ลองอีกครั้งหรือเลือกใหม่");
+        return;
+      }
+      setOrigin({
+        label: resolved.label || origin?.label || "จุดเริ่มต้น",
+        address: origin?.address ?? "",
+        url: link,
+        coords: { lat: resolved.lat, lng: resolved.lng },
+      });
+    } catch {
+      Alert.alert("หาพิกัดไม่สำเร็จ", "ต่อเน็ตใหม่แล้วลองอีกครั้ง");
+    } finally {
+      setOriginResolving(false);
     }
-    setOrigin({
-      label: resolved.label || origin?.label || "จุดเริ่มต้น",
-      address: origin?.address ?? "",
-      url: link,
-      coords: { lat: resolved.lat, lng: resolved.lng },
-    });
   };
 
   // ── คำนวณเส้นทาง (ตอนเข้าสู่ขั้นที่ 4) ─────────────────────────────────
   const calcRoute = useCallback(async (): Promise<RouteResult | null> => {
-    if (!origin?.coords) return null;
+    if (!origin) return null;
     setRouteLoading(true);
-    const points = [
-      { label: origin.label, coords: { lat: origin.coords.lat, lng: origin.coords.lng } },
-      ...places.map((p) => ({
-        label: p.name,
-        coords: p.coords ?? null,
-      })),
-      // จบที่จุดเริ่มต้น (กลับเท้า)
-      { label: origin.label, coords: { lat: origin.coords.lat, lng: origin.coords.lng } },
-    ];
-    const result = await computeRoute(points);
-    setRoute(result);
-    setRouteLoading(false);
-    return result;
+    try {
+      const points = [
+        {
+          label: origin.label,
+          coords: origin.coords && origin.coords.lat !== 0 ? origin.coords : null,
+        },
+        ...places.map((p) => ({
+          label: p.name,
+          coords: p.coords ?? null,
+        })),
+        // จบที่จุดเริ่มต้น (กลับเท้า)
+        {
+          label: origin.label,
+          coords: origin.coords && origin.coords.lat !== 0 ? origin.coords : null,
+        },
+      ];
+      // จุดที่ไม่มีพิกัดถูกข้ามไปเอง (ดู computeRoute) → ไม่มีพิกัดก็ยังได้ค่าประมาณ
+      const result = await computeRoute(points);
+      setRoute(result);
+      return result;
+    } catch {
+      return null;
+    } finally {
+      setRouteLoading(false);
+    }
   }, [origin, places]);
 
   useEffect(() => {
@@ -411,8 +479,8 @@ export default function ManualTripPlanner({
 
   // ── สร้างแพลน ────────────────────────────────────────────────────────
   const createPlan = async () => {
-    if (!origin?.coords) {
-      Alert.alert("ยังไม่ได้เลือกจุดเริ่มต้น", "กลับไปเลือกจุดเริ่มต้นที่มีพิกัดก่อน");
+    if (!origin) {
+      Alert.alert("ยังไม่ได้เลือกจุดเริ่มต้น", "กลับไปเลือกจุดเริ่มต้นก่อน");
       setStep(1);
       return;
     }
@@ -422,183 +490,198 @@ export default function ManualTripPlanner({
       return;
     }
 
+    // จุดเริ่มต้นที่ไม่มีพิกัดก็ยังสร้างแพลนได้ (เส้นทางเป็นค่าประมาณ)
+    const originPointCoords =
+      origin.coords && origin.coords.lat !== 0
+        ? { lat: origin.coords.lat, lng: origin.coords.lng }
+        : null;
+
     setCreating(true);
-    const result = route ?? (await calcRoute());
-    const legs: TripPlanLeg[] = result?.legs ?? [];
-    const totalKm = result?.totalKm ?? 0;
-    const totalDriveMinutes = result?.totalDriveMinutes ?? 0;
-    const routeSource = result?.routeSource ?? "estimate";
-    const routeCredit = result?.routeCredit;
+    try {
+      const result = route ?? (await calcRoute());
+      const legs: TripPlanLeg[] = result?.legs ?? [];
+      const totalKm = result?.totalKm ?? 0;
+      const totalDriveMinutes = result?.totalDriveMinutes ?? 0;
+      const routeSource = result?.routeSource ?? "estimate";
+      const routeCredit = result?.routeCredit;
 
-    const originPoint: TripPlanPoint = {
-      label: origin.label,
-      address: origin.address || null,
-      coords: { lat: origin.coords.lat, lng: origin.coords.lng },
-    };
+      const originPoint: TripPlanPoint = {
+        label: origin.label,
+        address: origin.address || null,
+        coords: originPointCoords,
+      };
 
-    // ── ไทม์ไลน์ของวัน (รูปแบบเดียวกับแพลน AI) ────────────────────
-    const stops: ItineraryStop[] = [];
-    let clock = startTime;
-    places.forEach((p, i) => {
-      const legIn = legs.find((l) => l.toIndex === i + 1);
-      const legOut = legs.find((l) => l.fromIndex === i + 1);
-      const driveIn = legIn?.minutes ?? 0;
-      const arrive = addMinutes(clock, driveIn + 10);
-      const stayHours = 1;
-      const leave = addMinutes(arrive, stayHours * 60);
-      stops.push({
-        name: p.name,
-        activity: "",
-        stayHours,
-        driveToNextMins: legOut?.minutes ?? 0,
-        startTime: arrive,
-        endTime: leave,
-        arriveTime: arrive,
-        leaveTime: leave,
-        type: "attraction",
-        coordinates: p.coords ?? undefined,
-        distanceFromPrevKm: legIn?.km ?? null,
-        note: p.address ?? undefined,
-      });
-      clock = leave;
-    });
-
-    // จุดสุดท้าย = กลับจุดเริ่มต้น (เหมือนแพลน AI)
-    const lastLeg = legs.find((l) => l.toIndex === places.length + 1);
-    stops.push({
-      name: `กลับ ${origin.label}`,
-      activity: "",
-      stayHours: 0,
-      driveToNextMins: 0,
-      startTime: clock,
-      endTime: clock,
-      arriveTime: clock,
-      leaveTime: clock,
-      type: "return",
-      coordinates: { lat: origin.coords.lat, lng: origin.coords.lng },
-      distanceFromPrevKm: lastLeg?.km ?? null,
-      note: "จุดสิ้นสุดของวัน",
-    });
-
-    const day: ItineraryDay = {
-      day: 1,
-      stops,
-      startPoint: originPoint,
-      endPoint: originPoint,
-      endPointType: "return",
-      legs,
-      totalKm,
-      totalDriveMinutes,
-      warnings: [],
-    };
-
-    const fuelCost = Math.round(totalKm * 8);
-    const budgetPerPerson = Number(budget) || 0;
-    const tripBudget: TripBudget = {
-      lodging: 0,
-      fuel: fuelCost,
-      food: 0,
-      total: fuelCost,
-      perPerson: budgetPerPerson,
-      withinBudget: true,
-    };
-
-    const title =
-      planName.trim() ||
-      (places.length ? `ทริป ${places[0].name}` : "แพลนทริปของฉัน");
-
-    const summary =
-      `แพลนที่คุณจัดเอง · ${places.length} จุด · ${kmText(totalKm)} · ` +
-      `เวลาเดินทาง ${minutesText(totalDriveMinutes)}`;
-
-    const folderMeta: FolderPlaceMeta[] = folderId
-      ? folderPlaces.map((p) => ({
+      // ── ไทม์ไลน์ของวัน (รูปแบบเดียวกับแพลน AI) ────────────────────
+      const stops: ItineraryStop[] = [];
+      let clock = startTime;
+      places.forEach((p, i) => {
+        const legIn = legs.find((l) => l.toIndex === i + 1);
+        const legOut = legs.find((l) => l.fromIndex === i + 1);
+        const driveIn = legIn?.minutes ?? 0;
+        const arrive = addMinutes(clock, driveIn + 10);
+        const stayHours = 1;
+        const leave = addMinutes(arrive, stayHours * 60);
+        stops.push({
           name: p.name,
-          source: p.source === "registry" ? "registry" : "clip",
-          clips: p.clipCount,
-          community: p.communityName,
-          address: p.address,
-        }))
-      : [];
+          activity: "",
+          stayHours,
+          driveToNextMins: legOut?.minutes ?? 0,
+          startTime: arrive,
+          endTime: leave,
+          arriveTime: arrive,
+          leaveTime: leave,
+          type: "attraction",
+          coordinates: p.coords ?? undefined,
+          distanceFromPrevKm: legIn?.km ?? null,
+          note: p.address ?? undefined,
+        });
+        clock = leave;
+      });
 
-    const itineraryData = {
-      days: [day],
-      summary,
-      startPoint: originPoint,
-      endPoint: originPoint,
-      returnMode: "same_as_start",
-      startTime,
-      budget: tripBudget,
-      budgetPerPerson,
-      travelers: 1,
-      daysCount: 1,
-      routeSource,
-      routeCredit,
-      __meta: {
-        appStatus: "draft",
-        destinations: places.map((p) => p.name),
-        folderPlaces: folderMeta,
-        returnMode: "same_as_start",
-        createdByUser: true,
-      },
-    };
+      // จุดสุดท้าย = กลับจุดเริ่มต้น (เหมือนแพลน AI)
+      const lastLeg = legs.find((l) => l.toIndex === places.length + 1);
+      stops.push({
+        name: `กลับ ${origin.label}`,
+        activity: "",
+        stayHours: 0,
+        driveToNextMins: 0,
+        startTime: clock,
+        endTime: clock,
+        arriveTime: clock,
+        leaveTime: clock,
+        type: "return",
+        coordinates: originPointCoords ?? undefined,
+        distanceFromPrevKm: lastLeg?.km ?? null,
+        note: "จุดสิ้นสุดของวัน",
+      });
 
-    // บันทึกลง `trip_plans` (RLS อนุญาตให้ผู้ใช้เขียนแผนของตัวเอง)
-    const planId = await createMyTripPlan({
-      planName: title,
-      startLocation: origin.label,
-      returnLocation: origin.label,
-      sourceFolderId: folderId,
-      budgetLimit: budgetPerPerson || null,
-      travelStyle: TRAVEL_STYLES.find((s) => s.key === style)?.label ?? null,
-      itineraryData,
-    });
+      const day: ItineraryDay = {
+        day: 1,
+        stops,
+        startPoint: originPoint,
+        endPoint: originPoint,
+        endPointType: "return",
+        legs,
+        totalKm,
+        totalDriveMinutes,
+        warnings: [],
+      };
 
-    const trip: Trip = {
-      id: planId ?? `trip-manual-${Date.now()}`,
-      planId: planId ?? undefined,
-      title,
-      summary,
-      status: "draft",
-      startPoint: origin.label,
-      startPointCoords: { lat: origin.coords.lat, lng: origin.coords.lng },
-      startTime,
-      travelers: 1,
-      destinations: places.map((p) => p.name),
-      days: 1,
-      nights: 0,
-      budgetPerPerson,
-      style,
-      itinerary: [day],
-      budget: tripBudget,
-      sourceFolderId: folderId ?? undefined,
-      folderPlaces: folderMeta.length
-        ? folderMeta.map((p) => ({
+      const fuelCost = Math.round(totalKm * 8);
+      const budgetPerPerson = Number(budget) || 0;
+      const tripBudget: TripBudget = {
+        lodging: 0,
+        fuel: fuelCost,
+        food: 0,
+        total: fuelCost,
+        perPerson: budgetPerPerson,
+        withinBudget: true,
+      };
+
+      const title =
+        planName.trim() ||
+        (places.length ? `ทริป ${places[0].name}` : "แพลนทริปของฉัน");
+
+      const summary =
+        `แพลนที่คุณจัดเอง · ${places.length} จุด · ${kmText(totalKm)} · ` +
+        `เวลาเดินทาง ${minutesText(totalDriveMinutes)}`;
+
+      const folderMeta: FolderPlaceMeta[] = folderId
+        ? folderPlaces.map((p) => ({
             name: p.name,
-            source: p.source,
-            clipCount: p.clips,
-            communityName: p.community,
+            source: p.source === "registry" ? "registry" : "clip",
+            clips: p.clipCount,
+            community: p.communityName,
             address: p.address,
           }))
-        : undefined,
-      createdAt: Date.now(),
-      returnMode: "same_as_start",
-      endPoint: origin.label,
-      endPointCoords: { lat: origin.coords.lat, lng: origin.coords.lng },
-      routeSource,
-      routeCredit,
-    };
+        : [];
 
-    addTrip(trip);
-    setCreating(false);
+      const itineraryData = {
+        days: [day],
+        summary,
+        startPoint: originPoint,
+        endPoint: originPoint,
+        returnMode: "same_as_start",
+        startTime,
+        budget: tripBudget,
+        budgetPerPerson,
+        travelers: 1,
+        daysCount: 1,
+        routeSource,
+        routeCredit,
+        __meta: {
+          appStatus: "draft",
+          destinations: places.map((p) => p.name),
+          folderPlaces: folderMeta,
+          returnMode: "same_as_start",
+          createdByUser: true,
+        },
+      };
 
-    if (!planId) {
+      // บันทึกลง `trip_plans` (RLS อนุญาตให้ผู้ใช้เขียนแผนของตัวเอง)
+      const planId = await createMyTripPlan({
+        planName: title,
+        startLocation: origin.label,
+        returnLocation: origin.label,
+        sourceFolderId: folderId,
+        budgetLimit: budgetPerPerson || null,
+        travelStyle: TRAVEL_STYLES.find((s) => s.key === style)?.label ?? null,
+        itineraryData,
+      });
+
+      const trip: Trip = {
+        id: planId ?? `trip-manual-${Date.now()}`,
+        planId: planId ?? undefined,
+        title,
+        summary,
+        status: "draft",
+        startPoint: origin.label,
+        startPointCoords: originPointCoords ?? undefined,
+        startTime,
+        travelers: 1,
+        destinations: places.map((p) => p.name),
+        days: 1,
+        nights: 0,
+        budgetPerPerson,
+        style,
+        itinerary: [day],
+        budget: tripBudget,
+        sourceFolderId: folderId ?? undefined,
+        folderPlaces: folderMeta.length
+          ? folderMeta.map((p) => ({
+              name: p.name,
+              source: p.source,
+              clipCount: p.clips,
+              communityName: p.community,
+              address: p.address,
+            }))
+          : undefined,
+        createdAt: Date.now(),
+        returnMode: "same_as_start",
+        endPoint: origin.label,
+        endPointCoords: originPointCoords ?? undefined,
+        routeSource,
+        routeCredit,
+      };
+
+      addTrip(trip);
+
+      if (!planId) {
+        Alert.alert(
+          "บันทึกลงเซิร์ฟเวอร์ไม่สำเร็จ",
+          "แพลนยังอยู่ในเครื่องนี้ แต่จะหายเมื่อปิดแอป — ลองเช็กว่าล็อกอินอยู่แล้วหรือยัง"
+        );
+      }
+      onCreated(trip.id);
+    } catch (e: any) {
+      // เคยเป็นการ “เด้งออก” จากหน้านี้ เพราะ error ไปหลุดเป็น promise ที่ไม่มีใครรับ
       Alert.alert(
-        "บันทึกลงเซิร์ฟเวอร์ไม่สำเร็จ",
-        "แพลนยังอยู่ในเครื่องนี้ แต่จะหายเมื่อปิดแอป — ลองเช็กว่าล็อกอินอยู่แล้วหรือยัง"
+        "สร้างแพลนไม่สำเร็จ",
+        e?.message ?? "เกิดข้อผิดพลาดระหว่างสร้างแพลน — ลองอีกครั้ง"
       );
+    } finally {
+      setCreating(false);
     }
-    onCreated(trip.id);
   };
 
   // ── UI เล็ก ๆ ────────────────────────────────────────────────────────
@@ -609,14 +692,16 @@ export default function ManualTripPlanner({
 
   // คำนวณตรง ๆ (ไม่ห่อ useMemo) — object ขนาดเล็ก และให้ React Compiler จัดการเอง
   const stepDone = {
-    1: !!originCoords,
+    1: !!origin,
     2: places.length > 0,
     3: true,
     4: false,
   };
 
+  // ขั้นที่ 1 ผ่านได้ตราบใดที่ “เลือกจุดเริ่มต้นแล้ว” — ไม่บังคับว่าต้องมีพิกัด
+  // (ถ้าบังคับ ปุ่ม “ถัดไป” จะกดไม่ได้เลย → ผู้ใช้ติดค้างที่ขั้นที่ 1)
   const canNext =
-    step === 1 ? !!originCoords : step === 2 ? places.length > 0 : true;
+    step === 1 ? !!origin : step === 2 ? places.length > 0 : true;
 
   const renderStepper = () => (
     <View className="flex-row px-4 pb-2">
@@ -721,7 +806,14 @@ export default function ManualTripPlanner({
                   <Text className="text-[14px] font-bold text-gray-900 ml-1.5 flex-1">
                     {origin.label}
                   </Text>
-                  {originCoords ? (
+                  {originResolving ? (
+                    <View className="bg-gray-100 rounded-full px-2 py-0.5 flex-row items-center">
+                      <ActivityIndicator size="small" color="#6B7280" />
+                      <Text className="text-gray-600 text-[10.5px] font-bold ml-1">
+                        กำลังหาพิกัด
+                      </Text>
+                    </View>
+                  ) : originCoords ? (
                     <View className="bg-emerald-50 rounded-full px-2 py-0.5">
                       <Text className="text-emerald-700 text-[10.5px] font-bold">มีพิกัด</Text>
                     </View>
@@ -736,6 +828,12 @@ export default function ManualTripPlanner({
                     {origin.address}
                   </Text>
                 ) : null}
+                {origin && !originCoords && !originResolving ? (
+                  <Text className="text-[11.5px] text-amber-700 mt-1.5 leading-4">
+                    ไปต่อได้เลย แต่เส้นทางจะเป็นค่าประมาณ — ใส่ลิงก์ Google Maps
+                    ด้านล่างถ้าอยากให้เส้นทางแม่นขึ้น
+                  </Text>
+                ) : null}
               </View>
             ) : null}
 
@@ -744,7 +842,7 @@ export default function ManualTripPlanner({
                 <View className="flex-row items-center mb-2">
                   <ExclamationTriangleIcon size={16} color="#B45309" />
                   <Text className="text-amber-800 text-[12.5px] font-bold ml-1.5">
-                    จุดเริ่มต้นต้องมีพิกัด
+                    อยากให้เส้นทางแม่น — ใส่ลิงก์ Google Maps ของจุดเริ่มต้น
                   </Text>
                 </View>
                 <TextInput
@@ -1302,6 +1400,15 @@ export default function ManualTripPlanner({
             </TouchableOpacity>
           )}
         </View>
+
+        {/* บอกเหตุผลที่ปุ่ม “ถัดไป” ยังกดไม่ได้ — ไม่งั้นผู้ใช้จะคิดว่าแอปค้าง */}
+        {step < 4 && !canNext ? (
+          <Text className="text-[11.5px] text-gray-500 text-center mt-2">
+            {step === 1
+              ? "เลือกจุดเริ่มต้นก่อนถึงจะไปต่อได้"
+              : "เพิ่มสถานที่อย่างน้อย 1 แห่งก่อนถึงจะไปต่อได้"}
+          </Text>
+        ) : null}
       </View>
 
       {/* ── Modals ─────────────────────────────────────────────── */}

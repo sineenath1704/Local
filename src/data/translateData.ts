@@ -85,4 +85,9 @@ export interface TranslateResult {
   note: string | null;
   confidence: number;
   sameLanguage: boolean;
+  /**
+   * ความหมาย “ภาษาไทยภาษากลาง” ที่ได้จากขั้นแรก (แอปแปลเอง 2 ขั้น)
+   * → มีค่าเฉพาะตอนที่ปลายทางเป็นภาษาอื่น (แสดงให้เห็นว่าแปลผ่านกลางมาแล้ว)
+   */
+  centralMeaning?: string | null;
 }
