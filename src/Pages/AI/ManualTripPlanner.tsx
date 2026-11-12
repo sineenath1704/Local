@@ -154,6 +154,17 @@ function orderByProximity(origin: LatLng | null, places: PlanPlace[]): PlanPlace
   return [...out, ...without];
 }
 
+/**
+ * ชั่วคราว (debug): ยืนยันว่าส่วนนี้ถูก mount จริงไหม
+ * → ดู log ในเทอร์มินัล Metro
+ */
+function MountProbe({ tag }: { tag: string }) {
+  useEffect(() => {
+    console.log("[MTP] mount:", tag);
+  }, [tag]);
+  return null;
+}
+
 function kmText(km: number): string {
   return `${km.toFixed(1)} กม.`;
 }
@@ -230,6 +241,12 @@ export default function ManualTripPlanner({
   const [routeLoading, setRouteLoading] = useState(false);
   const [creating, setCreating] = useState(false);
 
+  // ── ชั่วคราว (debug): ตรวจว่าหน้าค้างตรงไหน — เอาออกหลังเจอสาเหตุ ──────
+  // ถ้า log นี้ท่องมาเป็นพัน ๆ บรรทัด = มี render loop
+  useEffect(() => {
+    console.log("[MTP] render →", step, placeTab);
+  });
+
   // ── โหลดโฟลเดอร์ของฉัน (ครั้งเดียว) ─────────────────────────────────
   useEffect(() => {
     let cancelled = false;
@@ -252,10 +269,12 @@ export default function ManualTripPlanner({
 
   // ── เลือกโฟลเดอร์ → ดึงสถานที่ในโฟลเดอร์ ─────────────────────────────
   const loadFolder = useCallback(async (id: string) => {
+    console.log("[MTP] loadFolder start:", id);
     setFolderId(id);
     setFolderLoading(true);
     try {
       const ctx = await getFolderContext(id);
+      console.log("[MTP] loadFolder done:", ctx?.places?.length ?? 0);
       setFolderPlaces(ctx?.places ?? []);
     } catch {
       // โหลดสถานที่ในโฟลเดอร์ไม่สำเร็จ → ปล่อยว่างไว้ ไม่ให้หน้าจอพัง
@@ -295,9 +314,11 @@ export default function ManualTripPlanner({
   const searchLocal = async () => {
     const q = manualQuery.trim();
     if (!q) return;
+    console.log("[MTP] searchLocal start:", q);
     setSearching(true);
     try {
       const hits = await findLocalPlaces({ name: q });
+      console.log("[MTP] searchLocal done:", hits.length);
       setLocalHits(hits);
     } catch {
       setLocalHits([]);
@@ -336,6 +357,7 @@ export default function ManualTripPlanner({
   const addManualPlace = () => {
     const name = manualName.trim();
     const link = manualLink.trim();
+    console.log("[MTP] addManualPlace:", name, link);
     if (!name && !link) {
       Alert.alert("ยังไม่ได้ใส่สถานที่", "พิมพ์ชื่อสถานที่ หรือวางลิงก์ Google Maps");
       return;
@@ -1040,7 +1062,10 @@ export default function ManualTripPlanner({
                 return (
                   <TouchableOpacity
                     key={key}
-                    onPress={() => setPlaceTab(key)}
+                    onPress={() => {
+                      console.log("[MTP] tap tab:", key);
+                      setPlaceTab(key);
+                    }}
                     activeOpacity={0.8}
                     className={`flex-1 flex-row items-center justify-center py-2 rounded-lg ${
                       active ? "bg-white shadow-sm" : ""
@@ -1073,6 +1098,7 @@ export default function ManualTripPlanner({
 
             {placeTab === "folder" ? (
               <View>
+                <MountProbe tag="folder-tab" />
                 <Text className="text-[12.5px] font-bold text-gray-900 mb-2">
                   เลือกโฟลเดอร์ที่มีสถานที่ที่อยากไป
                 </Text>
@@ -1173,6 +1199,7 @@ export default function ManualTripPlanner({
               </View>
             ) : (
               <View>
+                <MountProbe tag="manual-tab" />
                 <Text className="text-[12.5px] font-bold text-gray-900 mb-2">
                   ค้นหาชื่อสถานที่ที่เคยบันทึกไว้ในแอป
                 </Text>
