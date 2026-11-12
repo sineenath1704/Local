@@ -24,12 +24,19 @@ import {
 import { CheckIcon } from "react-native-heroicons/solid";
 import { useInteractions } from "../state/InteractionContext";
 import { verifyPlaceOnGoogle, placePhotoUrl } from "../services/placesService";
-import { suggestTripPlaces, type SuggestedPlace, type PlanTripRequest } from "../services/tripService";
+import {
+  suggestTripPlaces,
+  fetchNearbySuggestions,
+  type SuggestedPlace,
+  type NearbyPlace,
+  type PlanTripRequest,
+} from "../services/tripService";
 
 export type TripExtraStop = NonNullable<PlanTripRequest["extraStops"]>[number];
 
 // รายชื่อจังหวัด 77 จังหวัดในประเทศไทย สำหรับ Autocomplete รวดเร็ว
-const THAI_PROVINCES = [
+// (export เพราะชีต "เพิ่มสถานที่ด้วยเอไAI" ใช้รายชื่อชุดเดียวกัน)
+export const THAI_PROVINCES = [
   "กรุงเทพมหานคร", "กระบี่", "กาญจนบุรี", "กาฬสินธุ์", "กำแพงเพชร",
   "ขอนแก่น", "จันทบุรี", "ฉะเชิงเทรา", "ชลบุรี", "ชัยนาท",
   "ชัยภูมิ", "ชุมพร", "เชียงราย", "เชียงใหม่", "ตรัง",
@@ -65,6 +72,11 @@ export interface TripDestinationPickerModalProps {
   onSelectStops: (stops: TripExtraStop[]) => void;
   initialDestination?: string;
   initialStyle?: string;
+  /**
+   * จุดอ้างอิงสำหรับ "สถานที่ใกล้เคียง" (จุดเริ่มต้น + สถานที่ที่ผู้ใช้ติ๊กไว้)
+   * → ถ้ามี จะมีปุ่ม "สถานที่ใกล้เคียง" ให้เลือก
+   */
+  nearbyAnchors?: { label: string; coords: { lat: number; lng: number } }[];
 }
 
 export function TripDestinationPickerModal({
@@ -74,11 +86,12 @@ export function TripDestinationPickerModal({
   onSelectStops,
   initialDestination = "",
   initialStyle = "",
+  nearbyAnchors = [],
 }: TripDestinationPickerModalProps) {
   const { folders } = useInteractions();
 
-  // "main" | "ai_style" | "ai_results"
-  const [step, setStep] = useState<"main" | "ai_style" | "ai_results">("main");
+  // "main" | "ai_style" | "ai_results" | "nearby"
+  const [step, setStep] = useState<"main" | "ai_style" | "ai_results" | "nearby">("main");
 
   // แท็บในหน้า main: "folder" | "search"
   const [activeTab, setActiveTab] = useState<"folder" | "search">("folder");
@@ -98,9 +111,17 @@ export function TripDestinationPickerModal({
   const [suggestedPlaces, setSuggestedPlaces] = useState<SuggestedPlace[]>([]);
   const [selectedAiPlaces, setSelectedAiPlaces] = useState<string[]>([]);
 
+  // ส่วนของ "สถานที่ใกล้เคียง"
+  const [nearbyPlaces, setNearbyPlaces] = useState<NearbyPlace[]>([]);
+  const [selectedNearby, setSelectedNearby] = useState<string[]>([]);
+  const [loadingNearby, setLoadingNearby] = useState(false);
+  const [nearbyError, setNearbyError] = useState<string | null>(null);
+
   // รีเซ็ตเมื่อเปิด Modal
+  // หมายเหตุ: setState ต้องอยู่ใน setTimeout (กฎ react-hooks/set-state-in-effect)
   useEffect(() => {
-    if (visible) {
+    if (!visible) return;
+    const timer = setTimeout(() => {
       setStep("main");
       setSearchQuery("");
       setMatchedProvinces([]);
@@ -111,26 +132,34 @@ export function TripDestinationPickerModal({
       setCustomStyle("");
       setSuggestedPlaces([]);
       setSelectedAiPlaces([]);
+      setNearbyPlaces([]);
+      setSelectedNearby([]);
+      setNearbyError(null);
       if (folders.length === 0) {
         setActiveTab("search");
       } else {
         setActiveTab("folder");
       }
-    }
+    }, 0);
+    return () => clearTimeout(timer);
   }, [visible, initialDestination, initialStyle, folders.length]);
 
   // ค้นหาจังหวัดและ Google Places ตามคำค้นหา
+  // หมายเหตุ: setState ต้องอยู่ใน setTimeout (กฎ react-hooks/set-state-in-effect)
   useEffect(() => {
     const q = searchQuery.trim();
-    if (!q) {
-      setMatchedProvinces([]);
-      setGooglePlaces([]);
-      return;
-    }
 
-    // กรองจังหวัด 77 จังหวัด
-    const provs = THAI_PROVINCES.filter((p) => p.toLowerCase().includes(q.toLowerCase())).slice(0, 5);
-    setMatchedProvinces(provs);
+    const syncTimer = setTimeout(() => {
+      if (!q) {
+        setMatchedProvinces([]);
+        setGooglePlaces([]);
+        return;
+      }
+
+      // กรองจังหวัด 77 จังหวัด
+      const provs = THAI_PROVINCES.filter((p) => p.toLowerCase().includes(q.toLowerCase())).slice(0, 5);
+      setMatchedProvinces(provs);
+    }, 0);
 
     // ค้นหาผ่าน Google Places เมื่อพิมพ์เกิน 2 ตัวอักษร
     const timer = setTimeout(async () => {
@@ -147,7 +176,10 @@ export function TripDestinationPickerModal({
       }
     }, 450);
 
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(syncTimer);
+      clearTimeout(timer);
+    };
   }, [searchQuery]);
 
   // เลือก/ยกเลิกเลือกสถานที่จากผลค้นหา
@@ -230,6 +262,55 @@ export function TripDestinationPickerModal({
     onClose();
   };
 
+  // ── สถานที่ใกล้เคียง (รอบจุดที่ผู้ใช้ติ๊ก/จุดเริ่มต้น) ────────────────────
+  const handleRequestNearby = async () => {
+    const anchor = nearbyAnchors[0];
+    if (!anchor) return;
+    setStep("nearby");
+    setLoadingNearby(true);
+    setNearbyError(null);
+    try {
+      const list = await fetchNearbySuggestions({
+        near: { label: anchor.label, coords: anchor.coords },
+        radiusKm: 30,
+        limit: 12,
+        routePoints: nearbyAnchors.map((a) => a.coords),
+      });
+      setNearbyPlaces(list);
+      setSelectedNearby(list.map((p) => p.id));
+    } catch {
+      setNearbyError("หาสถานที่ไม่สำเร็จ — ต่อเน็ตใหม่แล้วลองอีกครั้ง");
+      setNearbyPlaces([]);
+    } finally {
+      setLoadingNearby(false);
+    }
+  };
+
+  const toggleNearby = (id: string) => {
+    setSelectedNearby((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  };
+
+  const handleConfirmNearbyStops = () => {
+    const chosen = nearbyPlaces.filter((p) => selectedNearby.includes(p.id));
+    if (chosen.length === 0) return;
+    const stops: TripExtraStop[] = chosen.map((p) => ({
+      label: p.name,
+      address: p.address || null,
+      coords: {
+        lat: p.coordinates.lat,
+        lng: p.coordinates.lng,
+      },
+      price: null,
+      openingHours: p.openingHours ?? null,
+      phone: p.phone ?? null,
+      website: p.website ?? null,
+    }));
+    onSelectStops(stops);
+    onClose();
+  };
+
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <View className="flex-1 bg-black/60 justify-end">
@@ -250,6 +331,8 @@ export function TripDestinationPickerModal({
                   ? "เลือกสถานที่สำหรับวางแผนทริป"
                   : step === "ai_style"
                   ? "สไตล์ทริปที่คุณต้องการ"
+                  : step === "nearby"
+                  ? "สถานที่ใกล้เคียงกับจุดที่คุณเลือก"
                   : "สถานที่ที่ AI แนะนำให้คุณ"}
               </Text>
             </View>
@@ -290,6 +373,30 @@ export function TripDestinationPickerModal({
                 <Text className="mx-3 text-[12px] text-gray-400 font-medium">หรือเลือกจุดหมายเอง</Text>
                 <View className="flex-1 h-[1px] bg-gray-200" />
               </View>
+
+              {/* สถานที่ใกล้เคียงกับจุดที่ผู้ใช้ติ๊ก/จุดเริ่มต้น */}
+              {nearbyAnchors.length > 0 ? (
+                <View className="px-4 mb-3">
+                  <TouchableOpacity
+                    onPress={() => void handleRequestNearby()}
+                    activeOpacity={0.85}
+                    className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3.5 flex-row items-center"
+                  >
+                    <View className="w-9 h-9 rounded-xl bg-white items-center justify-center mr-3">
+                      <MapPinIcon size={18} color="#059669" />
+                    </View>
+                    <View className="flex-1">
+                      <Text className="text-[14px] font-bold text-gray-900">
+                        สถานที่ใกล้เคียงกับจุดที่เลือก
+                      </Text>
+                      <Text className="text-[11.5px] text-gray-500 mt-0.5">
+                        หารอบ {nearbyAnchors[0].label} (รัศมี 30 กม.)
+                      </Text>
+                    </View>
+                    <ChevronRightIcon size={18} color="#059669" />
+                  </TouchableOpacity>
+                </View>
+              ) : null}
 
               {/* แท็บสลับ: เลือกจากโฟลเดอร์ vs ค้นหาสถานที่/จังหวัด */}
               <View className="flex-row px-4 mb-3">
@@ -334,7 +441,7 @@ export function TripDestinationPickerModal({
                       <FolderIcon size={44} color="#D1D5DB" />
                       <Text className="text-gray-700 font-bold text-[14px] mt-3">ยังไม่มีโฟลเดอร์ที่บันทึกไว้</Text>
                       <Text className="text-gray-400 text-[12px] text-center mt-1">
-                        คุณสามารถใช้แท็บ "ค้นหาจังหวัด/สถานที่" หรือกดปุ่ม "ให้ AI จัดทริปให้เลย" ด้านบนได้
+                        คุณสามารถใช้แท็บ “ค้นหาจังหวัด/สถานที่” หรือกดปุ่ม “ให้ AI จัดทริปให้เลย” ด้านบนได้
                       </Text>
                     </View>
                   ) : (
@@ -462,7 +569,7 @@ export function TripDestinationPickerModal({
                     ) : (
                       <View className="py-8 items-center">
                         <Text className="text-gray-400 text-[12.5px] text-center">
-                          ลองพิมพ์ชื่อจังหวัด เช่น "เชีย", "อยุธยา" หรือชื่อสถานที่ท่องเที่ยว
+                          ลองพิมพ์ชื่อจังหวัด เช่น “เชีย”, “อยุธยา” หรือชื่อสถานที่ท่องเที่ยว
                         </Text>
                       </View>
                     )}
@@ -718,6 +825,138 @@ export function TripDestinationPickerModal({
                       <SparklesIcon size={18} color="#FFFFFF" />
                       <Text className="text-white font-bold text-[14px] ml-2">
                         นำ {selectedAiPlaces.length} สถานที่นี้ไปสร้างแผนทริป
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
+            </View>
+          ) : null}
+
+          {/* Body: Step "ใกล้เคียง" — สถานที่รอบจุดที่ผู้ใช้ติ๊ก/จุดเริ่มต้น */}
+          {step === "nearby" ? (
+            <View className="flex-1 px-4 pt-3">
+              {loadingNearby ? (
+                <View className="flex-1 items-center justify-center py-16">
+                  <ActivityIndicator size="large" color="#059669" />
+                  <Text className="text-gray-800 font-bold text-[15px] mt-4">
+                    กำลังหาสถานที่ใกล้เคียง...
+                  </Text>
+                  <Text className="text-gray-500 text-[12.5px] mt-1 text-center px-6">
+                    ระบบกำลังดูรอบจุดที่คุณเลือก
+                  </Text>
+                </View>
+              ) : nearbyPlaces.length === 0 ? (
+                <View className="flex-1 items-center justify-center py-16">
+                  <Text className="text-gray-700 font-bold text-[14px]">
+                    ไม่พบสถานที่ใกล้เคียง
+                  </Text>
+                  {nearbyError ? (
+                    <Text className="text-gray-500 text-[12.5px] mt-2 text-center px-6">
+                      {nearbyError}
+                    </Text>
+                  ) : null}
+                  <TouchableOpacity
+                    onPress={() => setStep("main")}
+                    className="mt-4 bg-gray-100 rounded-xl px-4 py-2"
+                  >
+                    <Text className="text-violet-700 font-bold text-[13px]">← กลับไปเลือกวิธีอื่น</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View className="flex-1">
+                  <View className="flex-row items-center justify-between mb-2">
+                    <Text className="text-[12.5px] text-gray-500">
+                      แตะที่กล่องเพื่อเลือก ({selectedNearby.length}/{nearbyPlaces.length})
+                    </Text>
+                    <TouchableOpacity
+                      onPress={() =>
+                        setSelectedNearby(
+                          selectedNearby.length === nearbyPlaces.length
+                            ? []
+                            : nearbyPlaces.map((p) => p.id)
+                        )
+                      }
+                    >
+                      <Text className="text-[12px] font-bold text-violet-700">
+                        {selectedNearby.length === nearbyPlaces.length
+                          ? "ล้างทั้งหมด"
+                          : "เลือกทั้งหมด"}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <ScrollView className="flex-1" contentContainerStyle={{ paddingBottom: 90 }}>
+                    {nearbyPlaces.map((p) => {
+                      const isSelected = selectedNearby.includes(p.id);
+                      return (
+                        <TouchableOpacity
+                          key={p.id}
+                          onPress={() => toggleNearby(p.id)}
+                          activeOpacity={0.85}
+                          className={`mb-2.5 rounded-2xl border p-3.5 flex-row items-center ${
+                            isSelected
+                              ? "bg-emerald-50 border-emerald-400"
+                              : "bg-white border-gray-200"
+                          }`}
+                        >
+                          <View className="flex-1 mr-3">
+                            <Text className="text-[14px] font-bold text-gray-900" numberOfLines={1}>
+                              {p.name}
+                            </Text>
+                            {p.address ? (
+                              <Text className="text-[11.5px] text-gray-500 mt-0.5" numberOfLines={2}>
+                                {p.address}
+                              </Text>
+                            ) : null}
+                            <View className="flex-row items-center flex-wrap mt-1.5">
+                              {p.distanceKm != null ? (
+                                <View className="bg-white rounded-full px-2 py-0.5 mr-1.5 border border-gray-200">
+                                  <Text className="text-[10.5px] text-gray-600">
+                                    {p.distanceKm.toFixed(1)} กม.
+                                  </Text>
+                                </View>
+                              ) : null}
+                              {p.province ? (
+                                <View className="bg-emerald-50 rounded-full px-2 py-0.5 mr-1.5">
+                                  <Text className="text-[10.5px] font-bold text-emerald-700">
+                                    {p.province}
+                                  </Text>
+                                </View>
+                              ) : null}
+                              {p.rating ? (
+                                <Text className="text-[10.5px] font-bold text-amber-600">
+                                  ⭐ {p.rating.toFixed(1)}
+                                </Text>
+                              ) : null}
+                            </View>
+                          </View>
+                          <View
+                            className={`w-6 h-6 rounded-full border items-center justify-center ${
+                              isSelected
+                                ? "bg-emerald-600 border-emerald-600"
+                                : "border-gray-300"
+                            }`}
+                          >
+                            {isSelected ? <CheckIcon size={13} color="#FFFFFF" /> : null}
+                          </View>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+
+                  <View className="absolute bottom-4 left-4 right-4 bg-white pt-2 border-t border-gray-100">
+                    <TouchableOpacity
+                      onPress={handleConfirmNearbyStops}
+                      disabled={selectedNearby.length === 0}
+                      activeOpacity={0.85}
+                      className={`rounded-xl py-3.5 items-center justify-center flex-row shadow-sm ${
+                        selectedNearby.length > 0 ? "bg-emerald-600" : "bg-gray-300"
+                      }`}
+                    >
+                      <CheckCircleIcon size={20} color="#FFFFFF" />
+                      <Text className="text-white font-bold text-[14px] ml-2">
+                        ใช้นำไปคำนวณแผนทริป ({selectedNearby.length} แห่ง)
                       </Text>
                     </TouchableOpacity>
                   </View>

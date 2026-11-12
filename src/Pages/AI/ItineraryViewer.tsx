@@ -36,6 +36,7 @@ import {
   ItineraryDay,
   ItineraryStop,
   StopType,
+  TripPlanLeg,
   WaypointKind,
 } from "../../data/tripsData";
 import { InitialPostLocation } from "../CreatePostScreen";
@@ -153,6 +154,79 @@ function stopConfig(type?: StopType): StopCfg {
     default:
       return { dotColor: "#7C3AED", badgeBg: "#F5F3FF", badgeText: "#5B21B6", label: "จุดแวะ", Icon: MapPinIcon };
   }
+}
+
+/**
+ * แถว "จุดเริ่มต้น" — แถวแรกของแต่ละวันในไทม์ไลน์
+ * -------------------------------------------------------------
+ * จุดเริ่มต้นไม่ได้อยู่ใน `day.stops` (มันคือ “จุดที่บันทึกไว้” ไม่ใช่จุดแวะของทริป)
+ * แต่แผนต้องอ่านออกว่า จุดเริ่มต้น → จุดเที่ยว → จุดกลับ
+ * → วาดแยกแถวหนึ่ง พร้อมระยะ/เวลาของ “ขาแรก” (ขาออกจากจุดเริ่มต้น)
+ * ขาแรก = leg ที่ fromIndex = 0 (จุดเริ่มต้นคือจุดแรกใน points)
+ */
+function StartPointRow({
+  label,
+  address,
+  time,
+  leg,
+}: {
+  label?: string | null;
+  address?: string | null;
+  time?: string;
+  leg?: TripPlanLeg;
+}) {
+  if (!label) return null;
+  const cfg = stopConfig("departure");
+  return (
+    <View className="flex-row mb-1">
+      {/* Timeline rail */}
+      <View className="items-center mr-3" style={{ width: 24 }}>
+        <View style={{ width: 14, height: 14, borderRadius: 7, backgroundColor: cfg.dotColor, marginTop: 14 }} />
+        <View style={{ width: 2, flex: 1, backgroundColor: cfg.dotColor + "35", marginVertical: 3 }} />
+      </View>
+
+      {/* การ์ดจุดเริ่มต้น */}
+      <View
+        className="flex-1 rounded-2xl mb-3 overflow-hidden"
+        style={{ borderWidth: 1, borderColor: cfg.dotColor + "30", backgroundColor: "#FAFAFA" }}
+      >
+        {/* Header — เวลา + ป้าย */}
+        <View className="flex-row items-center justify-between px-3.5 py-2" style={{ backgroundColor: cfg.dotColor + "10" }}>
+          <View className="flex-row items-center">
+            <ClockIcon size={13} color={cfg.dotColor} />
+            <Text style={{ color: cfg.dotColor, fontSize: 12, fontWeight: "700", marginLeft: 4 }}>
+              {time ?? ""}
+            </Text>
+          </View>
+          <View className="flex-row items-center rounded-full px-2.5 py-0.5" style={{ backgroundColor: cfg.badgeBg }}>
+            <cfg.Icon size={11} color={cfg.badgeText} />
+            <Text style={{ color: cfg.badgeText, fontSize: 10, fontWeight: "700", marginLeft: 3 }}>
+              {cfg.label}
+            </Text>
+          </View>
+        </View>
+
+        {/* Body */}
+        <View className="px-3.5 py-2.5">
+          <Text className="text-[14px] font-bold text-gray-900 mb-0.5">{label}</Text>
+          {address ? (
+            <Text className="text-[11px] text-gray-400 mt-0.5 italic">{address}</Text>
+          ) : null}
+        </View>
+
+        {/* ขาแรก: จุดเริ่มต้น → จุดแรก */}
+        {leg ? (
+          <View className="flex-row items-center px-3.5 py-2 border-t border-dashed" style={{ borderColor: cfg.dotColor + "25" }}>
+            <TruckIcon size={12} color={cfg.dotColor} />
+            <Text style={{ color: cfg.dotColor, fontSize: 11, marginLeft: 5 }}>
+              {driveLabel(leg.minutes) || "เดินทาง"}
+              {leg.km != null ? ` · ${leg.km.toFixed(1)} กม.` : ""} ไปจุดแรก
+            </Text>
+          </View>
+        ) : null}
+      </View>
+    </View>
+  );
 }
 
 export default function ItineraryViewer({ tripId, onBack, onPostCheckin }: ItineraryViewerProps) {
@@ -670,6 +744,14 @@ export default function ItineraryViewer({ tripId, onBack, onPostCheckin }: Itine
                 </Text>
               ) : null}
             </View>
+
+            {/* ── จุดเริ่มต้น (แถวแรกของแพลน) ───────────────────────── */}
+            <StartPointRow
+              label={day.startPoint?.label ?? trip.startPoint}
+              address={day.startPoint?.address ?? null}
+              time={di === 0 ? trip.startTime : undefined}
+              leg={(day.legs ?? []).find((l) => l.fromIndex === 0)}
+            />
 
             {day.stops.map((stop, si) => {
               const isWaypoint = !!stop.isWaypoint;

@@ -2549,6 +2549,32 @@ export default function AiChatScreen({
     );
   }
 
+  /**
+   * จุดอ้างอิงสำหรับขั้น "สถานที่ใกล้เคียง" ในโมดัลเลือกปลายทาง
+   * -------------------------------------------------------------
+   * · จุดเริ่มต้นที่ผู้ใช้เลือกไว้ (ถ้ามีพิกัด)
+   * · สถานที่ที่ผู้ใช้ติ๊กในการ์ดตั้งค่า (ข้อความล่าสุดที่มี planPlaces)
+   * → ระบบหาสถานที่รอบจุดเหล่านี้ได้ทันที
+   */
+  const nearbyPlanPlaces = (thread?.messages ?? [])
+    .filter((m) => (m.planPlaces?.length ?? 0) > 0)
+    .slice(-1)[0]?.planPlaces ?? [];
+  const chatStartPoint = draftSlots.startPoint;
+  const nearbyAnchors = [
+    ...(chatStartPoint?.coords
+      ? [
+          {
+            label: chatStartPoint.label,
+            coords: chatStartPoint.coords,
+          },
+        ]
+      : []),
+    ...nearbyPlanPlaces.map((p) => ({
+      label: p.label,
+      coords: p.coords,
+    })),
+  ];
+
   return (
     <View className="flex-1 bg-white">
       {/* Header */}
@@ -3381,6 +3407,7 @@ export default function AiChatScreen({
             : draftSlots.startPoint?.label?.replace("จุดเริ่มต้น", "").trim() || ""
         }
         initialStyle={draftSlots.style || ""}
+        nearbyAnchors={nearbyAnchors}
       />
 
       {/* ป๊อปอัปเลือกแท็กก่อนหาสถานที่ (ประเภท D) — มีปุ่มปิด/ยกเลิกเสมอ */}

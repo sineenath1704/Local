@@ -41,6 +41,10 @@ import {
 } from "../../data/tripsData";
 import OriginSelectorModal from "../../components/OriginSelectorModal";
 import TripTimeSheet from "../../components/TripTimeSheet";
+import TripAiPlaceSheet, {
+  type AiPickedPlace,
+  type AiPlaceAnchor,
+} from "../../components/TripAiPlaceSheet";
 import { getMyFolders, type Folder } from "../../services/folderService";
 import {
   getFolderContext,
@@ -85,6 +89,10 @@ interface PlanPlace {
   source: "registry" | "clip" | "manual";
   communityName?: string | null;
   clipCount?: number;
+  /** จังหวัด (ใช้หาสถานที่ใกล้เคียงในจังหวัดเดียวกัน) */
+  province?: string | null;
+  /** กำลังหาพิกัดอยู่ (เพิ่มสถานที่เอง — หาพิกัดเบื้องหลัง) */
+  resolving?: boolean;
 }
 
 /**
@@ -174,6 +182,17 @@ export default function ManualTripPlanner({
   const [originModal, setOriginModal] = useState(false);
   const [originResolving, setOriginResolving] = useState(false);
   const [originLink, setOriginLink] = useState("");
+  /**
+   * จุดกลับ (จุดจบของทริป) — ค่าเริ่มต้น = กลับจุดเริ่มต้น
+   * -------------------------------------------------------------
+   * เก็บแยกไว้ตั้งแต่แรก เผื่อรอบหน้าให้ผู้ใช้เลือกจุดกลับเองได้
+   * โดยไม่ต้องแก้รูปแบบข้อมูลของแพลน
+   */
+  const [customEnd, setCustomEnd] = useState<OriginChoice | null>(null);
+  /** โมดัลเลือก "จุดกลับ" (ค่าเริ่มต้น = กลับจุดเริ่มต้น) */
+  const [endModal, setEndModal] = useState(false);
+  /** กำลังหาพิกัดจุดกลับ */
+  const [endResolving, setEndResolving] = useState(false);
 
   // ── ขั้นที่ 2: สถานที่ ───────────────────────────────────────────────
   const [placeTab, setPlaceTab] = useState<"folder" | "manual">("folder");
@@ -191,7 +210,8 @@ export default function ManualTripPlanner({
   const [searching, setSearching] = useState(false);
   const [manualName, setManualName] = useState("");
   const [manualLink, setManualLink] = useState("");
-  const [addingManual, setAddingManual] = useState(false);
+  /** ชีต "เพิ่มสถานที่ด้วยเอไAI" */
+  const [aiSheetOpen, setAiSheetOpen] = useState(false);
 
   // ── ขั้นที่ 3: ลำดับ/เวลา/งบ ────────────────────────────────────────
   const [startTime, setStartTime] = useState("08:00");
@@ -202,6 +222,11 @@ export default function ManualTripPlanner({
 
   // ── ขั้นที่ 4: สรุป ──────────────────────────────────────────────────
   const [route, setRoute] = useState<RouteResult | null>(null);
+  /**
+   * จุดกลับที่เส้นทางปัจจุบันคำนวณมา
+   * → กันกรณีผู้ใช้เพิ่งเปลี่ยนจุดกลับ แล้วกดสร้างแพลนทันที (เส้นทางยังเป็นของเดิม)
+   */
+  const [routeEndLabel, setRouteEndLabel] = useState<string | null>(null);
   const [routeLoading, setRouteLoading] = useState(false);
   const [creating, setCreating] = useState(false);
 
@@ -260,6 +285,7 @@ export default function ManualTripPlanner({
           source: p.source === "registry" ? "registry" : "clip",
           communityName: p.communityName,
           clipCount: p.clipCount,
+          province: p.province ?? null,
         },
       ];
     });
@@ -294,54 +320,75 @@ export default function ManualTripPlanner({
         coords,
         source: "manual",
         communityName: hit.community,
+        province: hit.province ?? null,
       },
     ]);
     setManualQuery("");
     setLocalHits([]);
   };
 
-  /** ใส่สถานที่เอง: ชื่อ + ลิงก์ Google Maps (หาพิกัดให้อัตโนมัติ) */
-  const addManualPlace = async () => {
+  /**
+   * ใส่สถานที่เอง: ชื่อ + ลิงก์ Google Maps (หาพิกัดให้อัตโนมัติ)
+   * -------------------------------------------------------------
+   * เพิ่มลงรายการ **ทันที** แล้วค่อยหาพิกัดเบื้องหลัง
+   * (เดิมรอ backend ก่อนเพิ่ม → หน้าจอดูเหมือนค้าง ปุ่มกดซ้ำไม่ได้)
+   */
+  const addManualPlace = () => {
     const name = manualName.trim();
     const link = manualLink.trim();
     if (!name && !link) {
       Alert.alert("ยังไม่ได้ใส่สถานที่", "พิมพ์ชื่อสถานที่ หรือวางลิงก์ Google Maps");
       return;
     }
-    setAddingManual(true);
-    let coords: LatLng | null = null;
-    let label = name;
-    try {
-      if (link || name) {
-        const resolved = await resolvePlaceCoords({ url: link || null, text: link ? null : name });
-        if (resolved) {
-          coords = { lat: resolved.lat, lng: resolved.lng };
-          if (!label && resolved.label) label = resolved.label;
-        }
-      }
-    } catch {
-      // หาพิกัดไม่สำเร็จ → เพิ่มสถานที่ไปก่อน ไม่มีพิกัด (ยังใช้ได้ แค่ไม่ขึ้นบนแผนที่)
-      coords = null;
-    }
+
+    const key = `m-manual-${Date.now()}`;
+    const label = name || "สถานที่ที่เพิ่มเอง";
     setPlaces((prev) => [
       ...prev,
-      {
-        key: `m-manual-${Date.now()}`,
-        name: label || "สถานที่ที่เพิ่มเอง",
-        address: null,
-        coords,
-        source: "manual",
-      },
+      { key, name: label, address: null, coords: null, source: "manual", resolving: true },
     ]);
     setManualName("");
     setManualLink("");
-    setAddingManual(false);
-    if (!coords) {
-      Alert.alert(
-        "ยังหาพิกัดไม่ได้",
-        "เพิ่มสถานที่แล้ว แต่ยังไม่มีพิกัด — จะไม่แสดงบนแผนที่ (พิมพ์ชื่อหรือวางลิงก์ Google Maps ที่หาพิกัดได้)"
-      );
-    }
+
+    // หาพิกัดเบื้องหลัง — ไม่บล็อกหน้าจอ
+    void (async () => {
+      try {
+        const resolved = await resolvePlaceCoords({
+          url: link || null,
+          text: link ? null : name,
+        });
+        if (resolved) {
+          setPlaces((prev) =>
+            prev.map((p) =>
+              p.key === key
+                ? {
+                    ...p,
+                    name: p.name === "สถานที่ที่เพิ่มเอง" && resolved.label ? resolved.label : p.name,
+                    coords: { lat: resolved.lat, lng: resolved.lng },
+                    resolving: false,
+                  }
+                : p
+            )
+          );
+        } else {
+          setPlaces((prev) =>
+            prev.map((p) => (p.key === key ? { ...p, resolving: false } : p))
+          );
+          Alert.alert(
+            "ยังหาพิกัดไม่ได้",
+            "เพิ่มสถานที่แล้ว แต่ยังไม่มีพิกัด — จะไม่แสดงบนแผนที่ (พิมพ์ชื่อหรือวางลิงก์ Google Maps ที่หาพิกัดได้)"
+          );
+        }
+      } catch {
+        setPlaces((prev) =>
+          prev.map((p) => (p.key === key ? { ...p, resolving: false } : p))
+        );
+        Alert.alert(
+          "ยังหาพิกัดไม่ได้",
+          "เพิ่มสถานที่แล้ว แต่ยังไม่มีพิกัด — จะไม่แสดงบนแผนที่ (ต่อเน็ตใหม่แล้วลองใส่ลิงก์ Google Maps อีกครั้ง)"
+        );
+      }
+    })();
   };
 
   const movePlace = (index: number, dir: -1 | 1) => {
@@ -365,6 +412,33 @@ export default function ManualTripPlanner({
         ? { lat: origin.coords.lat, lng: origin.coords.lng }
         : null;
     setPlaces((prev) => orderByProximity(originCoords, prev));
+  };
+
+  /**
+   * เพิ่มสถานที่ที่เลือกจากชีต "เพิ่มสถานที่ด้วยเอไAI" ลงแผน
+   * → ตัดชื่อที่ซ้ำกับที่มีอยู่แล้วออกก่อน (ไม่ให้เพิ่มซ้ำ)
+   */
+  const handleAiAdd = (picked: AiPickedPlace[]) => {
+    // คำนวณนอก updater — Date.now() ห้ามอยู่ในโค้ดที่รันตอน render (กฎ react-hooks/purity)
+    const stamp = Date.now();
+    setPlaces((prev) => {
+      const existing = new Set(prev.map((p) => p.name.trim().toLowerCase()));
+      const add: PlanPlace[] = [];
+      picked.forEach((p, i) => {
+        const key = p.name.trim().toLowerCase();
+        if (existing.has(key)) return;
+        existing.add(key);
+        add.push({
+          key: `ai-${stamp}-${i}`,
+          name: p.name,
+          address: p.address ?? null,
+          coords: p.coords,
+          source: p.source,
+          province: p.province ?? null,
+        });
+      });
+      return add.length ? [...prev, ...add] : prev;
+    });
   };
 
   // ── จุดเริ่มต้นที่เลือก: ถ้าไม่มีพิกัด → ลองหาพิกัดให้อัตโนมัติ ──────
@@ -413,6 +487,51 @@ export default function ManualTripPlanner({
     }
   };
 
+  /**
+   * เลือก "จุดกลับ" (ค่าเริ่มต้น = กลับจุดเริ่มต้น)
+   * -------------------------------------------------------------
+   * เหมือนจุดเริ่มต้น: โชว์ทันที แล้วค่อยหาพิกัดเบื้องหลัง (ไม่ให้หน้าจอดูเหมือนค้าง)
+   */
+  const pickEnd = async (choice: OriginChoice) => {
+    if (choice.coords && choice.coords.lat !== 0) {
+      setCustomEnd({ ...choice, coords: choice.coords });
+      return;
+    }
+
+    const address = choice.address?.trim() ?? "";
+    const label = choice.label?.trim() ?? "";
+    const searchText =
+      address && !GENERIC_LABELS.includes(address)
+        ? address
+        : label && !GENERIC_LABELS.includes(label)
+        ? label
+        : null;
+
+    setCustomEnd({ ...choice, coords: null });
+    setEndResolving(true);
+    try {
+      const resolved = await resolvePlaceCoords({
+        url: choice.url ?? null,
+        text: searchText,
+      });
+      if (resolved) {
+        setCustomEnd({ ...choice, coords: { lat: resolved.lat, lng: resolved.lng } });
+      } else {
+        Alert.alert(
+          "จุดกลับยังไม่มีพิกัด",
+          "ไปต่อได้ แต่เส้นทางจะเป็นค่าประมาณ"
+        );
+      }
+    } catch {
+      Alert.alert(
+        "หาพิกัดไม่สำเร็จ",
+        "ไปต่อได้ แต่เส้นทางจะเป็นค่าประมาณ (ต่อเน็ตใหม่แล้วลองหาพิกัดอีกครั้ง)"
+      );
+    } finally {
+      setEndResolving(false);
+    }
+  };
+
   /** หาพิกัดจุดเริ่มต้นจากลิงก์ที่ผู้ใช้วางเอง */
   const resolveOriginLink = async () => {
     const link = originLink.trim();
@@ -440,6 +559,12 @@ export default function ManualTripPlanner({
   // ── คำนวณเส้นทาง (ตอนเข้าสู่ขั้นที่ 4) ─────────────────────────────────
   const calcRoute = useCallback(async (): Promise<RouteResult | null> => {
     if (!origin) return null;
+    // จุดกลับ = จุดที่ผู้ใช้เลือกไว้ ถ้ามี งั้นใช้จุดเริ่มต้น
+    const end = customEnd ?? origin;
+    const endCoords =
+      end.coords && end.coords.lat !== 0
+        ? { lat: end.coords.lat, lng: end.coords.lng }
+        : null;
     setRouteLoading(true);
     try {
       const points = [
@@ -451,22 +576,23 @@ export default function ManualTripPlanner({
           label: p.name,
           coords: p.coords ?? null,
         })),
-        // จบที่จุดเริ่มต้น (กลับเท้า)
+        // จบที่จุดกลับ (ค่าเริ่มต้น = กลับจุดเริ่มต้น)
         {
-          label: origin.label,
-          coords: origin.coords && origin.coords.lat !== 0 ? origin.coords : null,
+          label: end.label,
+          coords: endCoords,
         },
       ];
       // จุดที่ไม่มีพิกัดถูกข้ามไปเอง (ดู computeRoute) → ไม่มีพิกัดก็ยังได้ค่าประมาณ
       const result = await computeRoute(points);
       setRoute(result);
+      setRouteEndLabel(end.label);
       return result;
     } catch {
       return null;
     } finally {
       setRouteLoading(false);
     }
-  }, [origin, places]);
+  }, [origin, places, customEnd]);
 
   useEffect(() => {
     if (step !== 4) return;
@@ -496,9 +622,18 @@ export default function ManualTripPlanner({
         ? { lat: origin.coords.lat, lng: origin.coords.lng }
         : null;
 
+    // จุดกลับ = จุดที่ผู้ใช้เลือกไว้ ถ้ามี งั้นกลับจุดเริ่มต้น
+    const end = customEnd ?? origin;
+    const endPointCoords =
+      end.coords && end.coords.lat !== 0
+        ? { lat: end.coords.lat, lng: end.coords.lng }
+        : null;
+    const isSameAsStart = !customEnd || customEnd.label === origin.label;
+
     setCreating(true);
     try {
-      const result = route ?? (await calcRoute());
+      const result =
+        route && routeEndLabel === end.label ? route : (await calcRoute());
       const legs: TripPlanLeg[] = result?.legs ?? [];
       const totalKm = result?.totalKm ?? 0;
       const totalDriveMinutes = result?.totalDriveMinutes ?? 0;
@@ -509,6 +644,12 @@ export default function ManualTripPlanner({
         label: origin.label,
         address: origin.address || null,
         coords: originPointCoords,
+      };
+
+      const endPoint: TripPlanPoint = {
+        label: end.label,
+        address: end.address || null,
+        coords: endPointCoords,
       };
 
       // ── ไทม์ไลน์ของวัน (รูปแบบเดียวกับแพลน AI) ────────────────────
@@ -538,10 +679,10 @@ export default function ManualTripPlanner({
         clock = leave;
       });
 
-      // จุดสุดท้าย = กลับจุดเริ่มต้น (เหมือนแพลน AI)
+      // จุดสุดท้าย = จุดกลับ (ค่าเริ่มต้น = กลับจุดเริ่มต้น)
       const lastLeg = legs.find((l) => l.toIndex === places.length + 1);
       stops.push({
-        name: `กลับ ${origin.label}`,
+        name: `กลับ ${end.label}`,
         activity: "",
         stayHours: 0,
         driveToNextMins: 0,
@@ -550,7 +691,7 @@ export default function ManualTripPlanner({
         arriveTime: clock,
         leaveTime: clock,
         type: "return",
-        coordinates: originPointCoords ?? undefined,
+        coordinates: endPointCoords ?? undefined,
         distanceFromPrevKm: lastLeg?.km ?? null,
         note: "จุดสิ้นสุดของวัน",
       });
@@ -559,7 +700,7 @@ export default function ManualTripPlanner({
         day: 1,
         stops,
         startPoint: originPoint,
-        endPoint: originPoint,
+        endPoint,
         endPointType: "return",
         legs,
         totalKm,
@@ -600,8 +741,8 @@ export default function ManualTripPlanner({
         days: [day],
         summary,
         startPoint: originPoint,
-        endPoint: originPoint,
-        returnMode: "same_as_start",
+        endPoint,
+        returnMode: isSameAsStart ? "same_as_start" : "custom",
         startTime,
         budget: tripBudget,
         budgetPerPerson,
@@ -613,7 +754,7 @@ export default function ManualTripPlanner({
           appStatus: "draft",
           destinations: places.map((p) => p.name),
           folderPlaces: folderMeta,
-          returnMode: "same_as_start",
+          returnMode: isSameAsStart ? "same_as_start" : "custom",
           createdByUser: true,
         },
       };
@@ -622,7 +763,7 @@ export default function ManualTripPlanner({
       const planId = await createMyTripPlan({
         planName: title,
         startLocation: origin.label,
-        returnLocation: origin.label,
+        returnLocation: end.label,
         sourceFolderId: folderId,
         budgetLimit: budgetPerPerson || null,
         travelStyle: TRAVEL_STYLES.find((s) => s.key === style)?.label ?? null,
@@ -657,9 +798,9 @@ export default function ManualTripPlanner({
             }))
           : undefined,
         createdAt: Date.now(),
-        returnMode: "same_as_start",
-        endPoint: origin.label,
-        endPointCoords: originPointCoords ?? undefined,
+        returnMode: isSameAsStart ? "same_as_start" : "custom",
+        endPoint: end.label,
+        endPointCoords: endPointCoords ?? undefined,
         routeSource,
         routeCredit,
       };
@@ -689,6 +830,21 @@ export default function ManualTripPlanner({
     origin?.coords && origin.coords.lat !== 0
       ? { lat: origin.coords.lat, lng: origin.coords.lng }
       : null;
+
+  /** จุดอ้างอิงของชีต AI = จุดเริ่มต้น + สถานที่ที่เลือกแล้ว (เฉพาะจุดที่มีพิกัด) */
+  const aiAnchors: AiPlaceAnchor[] = [
+    ...(originCoords && origin
+      ? [{ label: origin.label, coords: originCoords, address: origin.address ?? null }]
+      : []),
+    ...places
+      .filter((p) => p.coords)
+      .map((p) => ({
+        label: p.name,
+        coords: p.coords!,
+        address: p.address ?? null,
+        province: p.province ?? null,
+      })),
+  ];
 
   // คำนวณตรง ๆ (ไม่ห่อ useMemo) — object ขนาดเล็ก และให้ React Compiler จัดการเอง
   const stepDone = {
@@ -903,6 +1059,18 @@ export default function ManualTripPlanner({
               })}
             </View>
 
+            {/* ── ปุ่มเพิ่มสถานที่ด้วยเอไAI (ใช้ได้ทั้งสองแท็บ) ── */}
+            <TouchableOpacity
+              onPress={() => setAiSheetOpen(true)}
+              activeOpacity={0.85}
+              className="mb-4 flex-row items-center justify-center bg-gradient-to-r from-violet-600 to-indigo-600 bg-violet-600 rounded-2xl py-3"
+            >
+              <SparklesIcon size={18} color="#FFFFFF" />
+              <Text className="text-white text-[13.5px] font-bold ml-1.5">
+                เพิ่มสถานที่ด้วยเอไAI
+              </Text>
+            </TouchableOpacity>
+
             {placeTab === "folder" ? (
               <View>
                 <Text className="text-[12.5px] font-bold text-gray-900 mb-2">
@@ -1083,21 +1251,17 @@ export default function ManualTripPlanner({
                   />
                   <TouchableOpacity
                     onPress={addManualPlace}
-                    disabled={addingManual}
                     activeOpacity={0.85}
                     className="flex-row items-center justify-center bg-violet-600 rounded-xl py-2.5"
                   >
-                    {addingManual ? (
-                      <ActivityIndicator size="small" color="#FFFFFF" />
-                    ) : (
-                      <>
-                        <PlusIcon size={16} color="#FFFFFF" />
-                        <Text className="text-white text-[13px] font-bold ml-1">
-                          เพิ่มสถานที่
-                        </Text>
-                      </>
-                    )}
+                    <PlusIcon size={16} color="#FFFFFF" />
+                    <Text className="text-white text-[13px] font-bold ml-1">
+                      เพิ่มสถานที่
+                    </Text>
                   </TouchableOpacity>
+                  <Text className="text-[11px] text-gray-400 mt-1.5">
+                    เพิ่มเข้ารายการทันที — ระบบจะหาพิกัดให้ในเบื้องหลัง
+                  </Text>
                 </View>
               </View>
             )}
@@ -1140,9 +1304,14 @@ export default function ManualTripPlanner({
                           {p.name}
                         </Text>
                         <Text className="text-[10.5px] text-gray-400" numberOfLines={1}>
-                          {p.coords ? "มีพิกัด" : "ยังไม่มีพิกัด"}
+                          {p.resolving
+                            ? "กำลังหาพิกัด…"
+                            : p.coords
+                            ? "มีพิกัด"
+                            : "ยังไม่มีพิกัด"}
                           {p.source === "clip" ? " · จากคลิปในโฟลเดอร์" : ""}
                           {p.source === "manual" ? " · ใส่เอง" : ""}
+                          {p.province ? ` · ${p.province}` : ""}
                         </Text>
                       </View>
                       <TouchableOpacity
@@ -1320,6 +1489,19 @@ export default function ManualTripPlanner({
             </View>
 
             <View className="mt-3 bg-white border border-gray-200 rounded-2xl overflow-hidden">
+              {/* จุดเริ่มต้นที่บันทึกไว้ — แถวแรกของแพลน */}
+              <View className="flex-row items-center px-3.5 py-2.5 border-b border-gray-100 bg-emerald-50/60">
+                <View className="w-6 h-6 rounded-full bg-emerald-100 items-center justify-center">
+                  <MapPinIcon size={12} color="#2D6A4F" />
+                </View>
+                <View className="flex-1 ml-2">
+                  <Text className="text-[11px] font-bold text-emerald-700">จุดเริ่มต้น</Text>
+                  <Text className="text-[13px] font-semibold text-gray-900" numberOfLines={1}>
+                    {origin?.label ?? "-"}
+                  </Text>
+                </View>
+              </View>
+
               {places.map((p, i) => (
                 <View
                   key={p.key}
@@ -1333,14 +1515,38 @@ export default function ManualTripPlanner({
                   </Text>
                 </View>
               ))}
-              <View className="flex-row items-center px-3.5 py-2.5">
+              <TouchableOpacity
+                onPress={() => setEndModal(true)}
+                activeOpacity={0.85}
+                className="flex-row items-center px-3.5 py-2.5"
+              >
                 <View className="w-6 h-6 rounded-full bg-gray-200 items-center justify-center">
                   <Text className="text-[11px] font-black text-gray-600">↩</Text>
                 </View>
-                <Text className="text-[13px] font-semibold text-gray-600 ml-2 flex-1">
-                  กลับ {origin?.label ?? "จุดเริ่มต้น"}
-                </Text>
-              </View>
+                <View className="flex-1 ml-2">
+                  <Text className="text-[11px] font-bold text-gray-500">จุดกลับ</Text>
+                  <Text className="text-[13px] font-semibold text-gray-600" numberOfLines={1}>
+                    กลับ {(customEnd ?? origin)?.label ?? "จุดเริ่มต้น"}
+                    {endResolving ? " · กำลังหาพิกัด…" : ""}
+                  </Text>
+                </View>
+                {customEnd ? (
+                  <TouchableOpacity
+                    onPress={() => setCustomEnd(null)}
+                    activeOpacity={0.8}
+                    hitSlop={6}
+                    className="px-2 py-1"
+                  >
+                    <Text className="text-[11.5px] font-bold text-violet-700">
+                      ↺ กลับจุดเริ่มต้น
+                    </Text>
+                  </TouchableOpacity>
+                ) : (
+                  <Text className="text-[11.5px] font-bold text-violet-700">
+                    เปลี่ยน
+                  </Text>
+                )}
+              </TouchableOpacity>
             </View>
 
             <TouchableOpacity
@@ -1424,6 +1630,19 @@ export default function ManualTripPlanner({
         defaultLabel="บ้าน"
       />
 
+      {/* เลือก "จุดกลับ" (ค่าเริ่มต้น = กลับจุดเริ่มต้น) */}
+      <OriginSelectorModal
+        visible={endModal}
+        onClose={() => setEndModal(false)}
+        onSelectOrigin={(o) => {
+          setEndModal(false);
+          void pickEnd(o);
+        }}
+        title="เลือกจุดกลับ"
+        subtitle="ปลายทางของทริป (ถ้าไม่เลือก = กลับจุดเริ่มต้น)"
+        defaultLabel="จุดกลับ"
+      />
+
       <TripTimeSheet
         visible={timeSheet}
         value={startTime}
@@ -1433,6 +1652,15 @@ export default function ManualTripPlanner({
           setStartTime(t);
           setTimeSheet(false);
         }}
+      />
+
+      {/* ชีต "เพิ่มสถานที่ด้วยเอไAI" — 3 สาขา (ใกล้เคียง / ตามสไตล์ / ใกล้จุดที่เลือก) */}
+      <TripAiPlaceSheet
+        visible={aiSheetOpen}
+        onClose={() => setAiSheetOpen(false)}
+        anchors={aiAnchors}
+        style={style}
+        onAdd={handleAiAdd}
       />
     </View>
   );
