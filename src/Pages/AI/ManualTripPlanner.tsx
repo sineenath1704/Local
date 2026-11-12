@@ -165,6 +165,14 @@ function MountProbe({ tag }: { tag: string }) {
   return null;
 }
 
+/**
+ * ชั่วคราว (debug): log ตอน "เรนเดอร์" (ก่อน commit) — ใช้หาจุดที่ค้าง
+ */
+function DrawProbe({ tag }: { tag: string }) {
+  console.log("[MTP] draw:", tag);
+  return null;
+}
+
 function kmText(km: number): string {
   return `${km.toFixed(1)} กม.`;
 }
@@ -1200,6 +1208,7 @@ export default function ManualTripPlanner({
             ) : (
               <View>
                 <MountProbe tag="manual-tab" />
+                <DrawProbe tag="manual-1-top" />
                 <Text className="text-[12.5px] font-bold text-gray-900 mb-2">
                   ค้นหาชื่อสถานที่ที่เคยบันทึกไว้ในแอป
                 </Text>
@@ -1226,6 +1235,7 @@ export default function ManualTripPlanner({
                     )}
                   </TouchableOpacity>
                 </View>
+                <DrawProbe tag="manual-2-after-search" />
 
                 {localHits.length ? (
                   <View className="mt-2 bg-white border border-gray-200 rounded-2xl overflow-hidden">
@@ -1276,6 +1286,7 @@ export default function ManualTripPlanner({
                     autoCapitalize="none"
                     className="bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 text-[13.5px] text-gray-900 mb-2"
                   />
+                  <DrawProbe tag="manual-3-after-inputs" />
                   <TouchableOpacity
                     onPress={addManualPlace}
                     activeOpacity={0.85}
