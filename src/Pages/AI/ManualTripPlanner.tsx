@@ -154,25 +154,6 @@ function orderByProximity(origin: LatLng | null, places: PlanPlace[]): PlanPlace
   return [...out, ...without];
 }
 
-/**
- * ชั่วคราว (debug): ยืนยันว่าส่วนนี้ถูก mount จริงไหม
- * → ดู log ในเทอร์มินัล Metro
- */
-function MountProbe({ tag }: { tag: string }) {
-  useEffect(() => {
-    console.log("[MTP] mount:", tag);
-  }, [tag]);
-  return null;
-}
-
-/**
- * ชั่วคราว (debug): log ตอน "เรนเดอร์" (ก่อน commit) — ใช้หาจุดที่ค้าง
- */
-function DrawProbe({ tag }: { tag: string }) {
-  console.log("[MTP] draw:", tag);
-  return null;
-}
-
 function kmText(km: number): string {
   return `${km.toFixed(1)} กม.`;
 }
@@ -215,6 +196,16 @@ export default function ManualTripPlanner({
 
   // ── ขั้นที่ 2: สถานที่ ───────────────────────────────────────────────
   const [placeTab, setPlaceTab] = useState<"folder" | "manual">("folder");
+  /**
+   * พาเนลแท็บ “ใส่เอง” พร้อม mount หรือยัง
+   * -------------------------------------------------------------
+   * บน iOS ถ้าสลับแท็บแล้ว mount ช่องกรอก (TextInput = native view หนัก)
+   * ใน commit เดียวกับที่ถอดแท็บเดิมออก แอปจะค้าง
+   * (JS thread ติด → เลื่อนได้แต่กดปุ่มไม่ได้)
+   * → เลยแยกเป็น 2 commit: commit แรกสลับแท็บ (ยังไม่มีช่องกรอก)
+   *   commit ถัดไป (tick หลัง) ค่อย mount ช่องกรอก
+   */
+  const [manualReady, setManualReady] = useState(false);
   const [folders, setFolders] = useState<Folder[]>([]);
   // เริ่มเป็น “กำลังโหลด” ตั้งแต่แรก (ไม่ต้อง setState ใน effect — React Compiler
   // บ่นว่า setState ตรง ๆ ใน effect แล้ว render ซ้ำ)
@@ -249,11 +240,16 @@ export default function ManualTripPlanner({
   const [routeLoading, setRouteLoading] = useState(false);
   const [creating, setCreating] = useState(false);
 
-  // ── ชั่วคราว (debug): ตรวจว่าหน้าค้างตรงไหน — เอาออกหลังเจอสาเหตุ ──────
-  // ถ้า log นี้ท่องมาเป็นพัน ๆ บรรทัด = มี render loop
+  // ── สลับแท็บ “ใส่เอง”: mount ช่องกรอกแยก commit (iOS) ───────────────
   useEffect(() => {
-    console.log("[MTP] render →", step, placeTab);
-  });
+    if (placeTab !== "manual" || manualReady) return;
+    // เลื่อนไปเฟรมถัดไป — ไม่อัปเดต state ระหว่างที่ React กำลัง render
+    // (ให้ native view ของ commit แรกเข้าจอเสร็จก่อน ค่อย mount ช่องกรอก)
+    const timer = setTimeout(() => {
+      requestAnimationFrame(() => setManualReady(true));
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [placeTab, manualReady]);
 
   // ── โหลดโฟลเดอร์ของฉัน (ครั้งเดียว) ─────────────────────────────────
   useEffect(() => {
@@ -277,12 +273,10 @@ export default function ManualTripPlanner({
 
   // ── เลือกโฟลเดอร์ → ดึงสถานที่ในโฟลเดอร์ ─────────────────────────────
   const loadFolder = useCallback(async (id: string) => {
-    console.log("[MTP] loadFolder start:", id);
     setFolderId(id);
     setFolderLoading(true);
     try {
       const ctx = await getFolderContext(id);
-      console.log("[MTP] loadFolder done:", ctx?.places?.length ?? 0);
       setFolderPlaces(ctx?.places ?? []);
     } catch {
       // โหลดสถานที่ในโฟลเดอร์ไม่สำเร็จ → ปล่อยว่างไว้ ไม่ให้หน้าจอพัง
@@ -322,11 +316,9 @@ export default function ManualTripPlanner({
   const searchLocal = async () => {
     const q = manualQuery.trim();
     if (!q) return;
-    console.log("[MTP] searchLocal start:", q);
     setSearching(true);
     try {
       const hits = await findLocalPlaces({ name: q });
-      console.log("[MTP] searchLocal done:", hits.length);
       setLocalHits(hits);
     } catch {
       setLocalHits([]);
@@ -365,7 +357,6 @@ export default function ManualTripPlanner({
   const addManualPlace = () => {
     const name = manualName.trim();
     const link = manualLink.trim();
-    console.log("[MTP] addManualPlace:", name, link);
     if (!name && !link) {
       Alert.alert("ยังไม่ได้ใส่สถานที่", "พิมพ์ชื่อสถานที่ หรือวางลิงก์ Google Maps");
       return;
@@ -1071,7 +1062,10 @@ export default function ManualTripPlanner({
                   <TouchableOpacity
                     key={key}
                     onPress={() => {
-                      console.log("[MTP] tap tab:", key);
+                      if (key === placeTab) return;
+                      // ออกจากแท็บ “ใส่เอง” → รอบหน้าต้อง mount ช่องกรอกใหม่
+                      // (iOS: mount พร้อมกับ commit ที่ถอดแท็บเดิมออก → แอปค้าง)
+                      if (key === "folder") setManualReady(false);
                       setPlaceTab(key);
                     }}
                     activeOpacity={0.8}
@@ -1106,7 +1100,6 @@ export default function ManualTripPlanner({
 
             {placeTab === "folder" ? (
               <View>
-                <MountProbe tag="folder-tab" />
                 <Text className="text-[12.5px] font-bold text-gray-900 mb-2">
                   เลือกโฟลเดอร์ที่มีสถานที่ที่อยากไป
                 </Text>
@@ -1205,10 +1198,8 @@ export default function ManualTripPlanner({
                   </View>
                 ) : null}
               </View>
-            ) : (
+            ) : manualReady ? (
               <View>
-                <MountProbe tag="manual-tab" />
-                <DrawProbe tag="manual-1-top" />
                 <Text className="text-[12.5px] font-bold text-gray-900 mb-2">
                   ค้นหาชื่อสถานที่ที่เคยบันทึกไว้ในแอป
                 </Text>
@@ -1235,7 +1226,6 @@ export default function ManualTripPlanner({
                     )}
                   </TouchableOpacity>
                 </View>
-                <DrawProbe tag="manual-2-after-search" />
 
                 {localHits.length ? (
                   <View className="mt-2 bg-white border border-gray-200 rounded-2xl overflow-hidden">
@@ -1286,7 +1276,6 @@ export default function ManualTripPlanner({
                     autoCapitalize="none"
                     className="bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 text-[13.5px] text-gray-900 mb-2"
                   />
-                  <DrawProbe tag="manual-3-after-inputs" />
                   <TouchableOpacity
                     onPress={addManualPlace}
                     activeOpacity={0.85}
@@ -1302,6 +1291,9 @@ export default function ManualTripPlanner({
                   </Text>
                 </View>
               </View>
+            ) : (
+              // ช่องกรอกยังไม่ mount — รอ commit ถัดไป (กัน iOS ค้างตอนสลับแท็บ)
+              <View className="h-[300px]" />
             )}
 
             {/* ── รายการที่เลือก (ทั้งสองแท็บ) ──────────────────── */}
