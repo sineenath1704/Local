@@ -23,7 +23,7 @@ import type { DiscoveryStyle } from "../data/tripsData";
  *
  * ปุ่ม 3 ตัว (กดได้เสมอ ผู้ใช้ไม่เคยติด):
  *   · "ยกเลิก"                → ถามเป็นแชทธรรมดา
- *   · "ให้เอไaiคิดให้"        → ให้ AI เลือกแท็กเองจากคำถาม แล้วดึงการ์ดเลย
+ *   · "ให้ AI คิดให้"        → ให้ AI เลือกแท็กเองจากคำถาม แล้วดึงการ์ดเลย
  *   · "ยืนยันแท็กที่เลือก"     → ใช้แท็กที่ผู้ใช้ติ๊กไว้
  *
  * ไม่มีช่องพิมพ์ — กดแท็กเท่านั้น (พื้นที่ที่เดาได้แสดงเป็นบรรทัดอ่านอย่างเดียว)
@@ -34,7 +34,7 @@ export interface ChatStylePickerModalProps {
   tags: DiscoveryStyle[];
   /** กำลังโหลดคลังแท็ก */
   loading?: boolean;
-  /** กำลังดึงการ์ดสถานที่จริงจาก Google (กดยืนยัน/ให้เอไaiคิดแล้ว) */
+  /** กำลังดึงการ์ดสถานที่จริงจาก Google (กดยืนยัน/ให้ AI คิดแล้ว) */
   busy?: boolean;
   /** พื้นที่ที่เดามาจากคำถาม (แสดงอ่านอย่างเดียว — ให้แก้ไขที่แชทแทน) */
   initialArea?: string;
@@ -42,7 +42,7 @@ export interface ChatStylePickerModalProps {
   question?: string;
   /** ผู้ใช้ยืนยันแท็กที่เลือก */
   onConfirm: (tags: DiscoveryStyle[]) => void;
-  /** ผู้ใช้กด "ให้เอไaiคิดให้" → ให้ AI เลือกแท็กเองแล้วดึงการ์ดเลย */
+  /** ผู้ใช้กด "ให้ AI คิดให้" → ให้ AI เลือกแท็กเองแล้วดึงการ์ดเลย */
   onAiPick: () => void;
   /** ผู้ใช้กดยกเลิก/ปิด → ถามเป็นแชทธรรมดา */
   onCancel: () => void;
@@ -189,7 +189,7 @@ export function ChatStylePickerModal({
             >
               <SparklesIcon size={17} color="#7C3AED" />
               <Text className="text-violet-700 font-bold text-[13.5px] ml-1.5">
-                ให้เอไaiคิดให้
+                ให้ AI คิดให้
               </Text>
             </TouchableOpacity>
 

@@ -11,7 +11,6 @@ import {
   ActivityIndicator,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   ArrowLeftIcon,
   MapPinIcon,
@@ -166,14 +165,6 @@ function minutesText(mins: number): string {
   return m ? `${h} ชม. ${m} นาที` : `${h} ชม.`;
 }
 
-/**
- * คีย์เก็บแท็บที่ผู้ใช้เลือกไว้ล่าสุด
- * -------------------------------------------------------------
- * กลับมาที่หน้าขั้นที่ 2 แล้วให้สวิฟไปแท็บเดิมทันที
- * (ไม่ใช่เริ่มที่ "จากโฟลเดอร์" ทุกครั้ง)
- */
-const PLACE_TAB_KEY = "trip_planner_place_tab";
-
 export default function ManualTripPlanner({
   onBack,
   onCreated,
@@ -203,18 +194,16 @@ export default function ManualTripPlanner({
   /** กำลังหาพิกัดจุดกลับ */
   const [endResolving, setEndResolving] = useState(false);
 
-  // ── ขั้นที่ 2: สถานที่ ───────────────────────────────────────────────
-  const [placeTab, setPlaceTab] = useState<"folder" | "manual">("folder");
+  // ── ขั้นที่ 2: สถานที่ (หน้าเดียว — โฟลเดอร์ + ค้นหา/ใส่เอง) ──────────
   /**
-   * พาเนลแท็บ “ใส่เอง” พร้อม mount หรือยัง
+   * ช่องค้นหา/ใส่สถานที่เอง mount แล้วหรือยัง
    * -------------------------------------------------------------
-   * บน iOS ถ้าสลับแท็บแล้ว mount ช่องกรอก (TextInput = native view หนัก)
-   * ใน commit เดียวกับที่ถอดแท็บเดิมออก แอปจะค้าง
-   * (JS thread ติด → เลื่อนได้แต่กดปุ่มไม่ได้)
-   * → เลยแยกเป็น 2 commit: commit แรกสลับแท็บ (ยังไม่มีช่องกรอก)
+   * บน iOS ถ้า mount ช่องกรอก (TextInput = native view หนัก) ใน commit เดียวกับ
+   * ที่ mount ส่วนอื่นของขั้นที่ 2 แอปจะค้าง (JS thread ติด → เลื่อนได้แต่กดปุ่มไม่ได้)
+   * → เลย mount แยก commit: commit แรกขึ้นโฟลเดอร์ก่อน
    *   commit ถัดไป (tick หลัง) ค่อย mount ช่องกรอก
    */
-  const [manualReady, setManualReady] = useState(false);
+  const [formReady, setFormReady] = useState(false);
   const [folders, setFolders] = useState<Folder[]>([]);
   // เริ่มเป็น “กำลังโหลด” ตั้งแต่แรก (ไม่ต้อง setState ใน effect — React Compiler
   // บ่นว่า setState ตรง ๆ ใน effect แล้ว render ซ้ำ)
@@ -229,7 +218,7 @@ export default function ManualTripPlanner({
   const [searching, setSearching] = useState(false);
   const [manualName, setManualName] = useState("");
   const [manualLink, setManualLink] = useState("");
-  /** ชีต "เพิ่มสถานที่ด้วยเอไAI" */
+  /** ชีต "เพิ่มสถานที่ด้วย AI" */
   const [aiSheetOpen, setAiSheetOpen] = useState(false);
 
   // ── ขั้นที่ 3: ลำดับ/เวลา/งบ ────────────────────────────────────────
@@ -249,35 +238,27 @@ export default function ManualTripPlanner({
   const [routeLoading, setRouteLoading] = useState(false);
   const [creating, setCreating] = useState(false);
 
-  // ── สลับแท็บ “ใส่เอง”: mount ช่องกรอกแยก commit (iOS) ───────────────
+  // ── เข้าขั้นที่ 2: mount ช่องกรอกแยก commit (iOS) ──────────────────────
   useEffect(() => {
-    if (placeTab !== "manual" || manualReady) return;
+    if (step !== 2 || formReady) return;
     // เลื่อนไปเฟรมถัดไป — ไม่อัปเดต state ระหว่างที่ React กำลัง render
     // (ให้ native view ของ commit แรกเข้าจอเสร็จก่อน ค่อย mount ช่องกรอก)
     const timer = setTimeout(() => {
-      requestAnimationFrame(() => setManualReady(true));
+      requestAnimationFrame(() => setFormReady(true));
     }, 0);
     return () => clearTimeout(timer);
-  }, [placeTab, manualReady]);
+  }, [step, formReady]);
 
-  // ── กู้แท็บที่ผู้ใช้เลือกไว้ล่าสุด ────────────────────────────────────
-  // กลับมาที่หน้านี้ (ออกจากหน้าแล้วกลับเข้ามาใหม่ / ปิดแอปแล้วเปิดใหม่)
-  // → สวิฟไปแท็บเดิมทันที ไม่ใช่เริ่มที่ "จากโฟลเดอร์" ทุกครั้ง
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const saved = await AsyncStorage.getItem(PLACE_TAB_KEY);
-        if (cancelled || saved !== "manual") return;
-        setPlaceTab("manual");
-      } catch {
-        // อ่านไม่ได้ → ใช้ค่าเริ่มต้น "จากโฟลเดอร์" ไปก่อน
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  /**
+   * เปลี่ยนขั้นตอน
+   * -------------------------------------------------------------
+   * ออกจากขั้นที่ 2 → รีเซ็ตช่องกรอก เพื่อให้กลับเข้ามาแล้ว mount ใหม่
+   * (mount TextInput พร้อมกับส่วนอื่นของขั้นที่ 2 → iOS ค้าง)
+   */
+  const goStep = (next: Step) => {
+    if (next !== 2) setFormReady(false);
+    setStep(next);
+  };
 
   // ── โหลดโฟลเดอร์ของฉัน (ครั้งเดียว) ─────────────────────────────────
   useEffect(() => {
@@ -464,7 +445,7 @@ export default function ManualTripPlanner({
   };
 
   /**
-   * เพิ่มสถานที่ที่เลือกจากชีต "เพิ่มสถานที่ด้วยเอไAI" ลงแผน
+   * เพิ่มสถานที่ที่เลือกจากชีต "เพิ่มสถานที่ด้วย AI" ลงแผน
    * → ตัดชื่อที่ซ้ำกับที่มีอยู่แล้วออกก่อน (ไม่ให้เพิ่มซ้ำ)
    */
   const handleAiAdd = (picked: AiPickedPlace[]) => {
@@ -656,12 +637,12 @@ export default function ManualTripPlanner({
   const createPlan = async () => {
     if (!origin) {
       Alert.alert("ยังไม่ได้เลือกจุดเริ่มต้น", "กลับไปเลือกจุดเริ่มต้นก่อน");
-      setStep(1);
+      goStep(1);
       return;
     }
     if (!places.length) {
       Alert.alert("ยังไม่ได้เลือกสถานที่", "เพิ่มสถานที่อย่างน้อย 1 แห่งก่อนสร้างแพลน");
-      setStep(2);
+      goStep(2);
       return;
     }
 
@@ -880,20 +861,20 @@ export default function ManualTripPlanner({
       ? { lat: origin.coords.lat, lng: origin.coords.lng }
       : null;
 
-  /** จุดอ้างอิงของชีต AI = จุดเริ่มต้น + สถานที่ที่เลือกแล้ว (เฉพาะจุดที่มีพิกัด) */
-  const aiAnchors: AiPlaceAnchor[] = [
-    ...(originCoords && origin
-      ? [{ label: origin.label, coords: originCoords, address: origin.address ?? null }]
-      : []),
-    ...places
-      .filter((p) => p.coords)
-      .map((p) => ({
-        label: p.name,
-        coords: p.coords!,
-        address: p.address ?? null,
-        province: p.province ?? null,
-      })),
-  ];
+  /**
+   * จุดอ้างอิงของชีต AI = สถานที่ที่ผู้ใช้เลือกไว้ในขั้นที่ 2 (เฉพาะจุดที่มีพิกัด)
+   * -------------------------------------------------------------
+   * ตามที่ผู้ใช้บอก: ให้หา "ใกล้เคียงที่เลือกไว้ในขั้นที่ 2"
+   * ไม่ใช่รอบจุดเริ่มต้น/ตำแหน่งที่บันทึกไว้
+   */
+  const aiAnchors: AiPlaceAnchor[] = places
+    .filter((p) => p.coords)
+    .map((p) => ({
+      label: p.name,
+      coords: p.coords!,
+      address: p.address ?? null,
+      province: p.province ?? null,
+    }));
 
   // คำนวณตรง ๆ (ไม่ห่อ useMemo) — object ขนาดเล็ก และให้ React Compiler จัดการเอง
   const stepDone = {
@@ -916,7 +897,7 @@ export default function ManualTripPlanner({
         return (
           <TouchableOpacity
             key={s.key}
-            onPress={() => setStep(s.key)}
+            onPress={() => goStep(s.key)}
             activeOpacity={0.7}
             className="flex-1 items-center mx-0.5"
           >
@@ -1075,111 +1056,57 @@ export default function ManualTripPlanner({
           </View>
         ) : null}
 
-        {/* ── ขั้นที่ 2: สถานที่ ────────────────────────────────── */}
+        {/* ── ขั้นที่ 2: สถานที่ (หน้าเดียว) ───────────────────── */}
         {step === 2 ? (
           <View>
-            <View className="flex-row bg-gray-100 rounded-xl p-1 mb-3">
-              {(
-                [
-                  ["folder", "จากโฟลเดอร์", FolderIcon],
-                  ["manual", "ใส่เอง", PencilSquareIcon],
-                ] as const
-              ).map(([key, label, Icon]) => {
-                const active = placeTab === key;
-                return (
-                  <TouchableOpacity
-                    key={key}
-                    onPress={() => {
-                      if (key === placeTab) return;
-                      // ออกจากแท็บ “ใส่เอง” → รอบหน้าต้อง mount ช่องกรอกใหม่
-                      // (iOS: mount พร้อมกับ commit ที่ถอดแท็บเดิมออก → แอปค้าง)
-                      if (key === "folder") setManualReady(false);
-                      setPlaceTab(key);
-                      // จำแท็บไว้ → กลับมาหน้านี้แล้วสวิฟไปแท็บเดิม
-                      void AsyncStorage.setItem(PLACE_TAB_KEY, key).catch(() => {});
-                    }}
-                    activeOpacity={0.8}
-                    className={`flex-1 flex-row items-center justify-center py-2 rounded-lg ${
-                      active ? "bg-white shadow-sm" : ""
-                    }`}
-                  >
-                    <Icon size={14} color={active ? "#7C3AED" : "#6B7280"} />
-                    <Text
-                      className={`text-[12.5px] font-bold ml-1.5 ${
-                        active ? "text-violet-700" : "text-gray-600"
-                      }`}
-                    >
-                      {label}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-
-            {/* ── ปุ่มเพิ่มสถานที่ด้วยเอไAI (ใช้ได้ทั้งสองแท็บ) ── */}
-            <TouchableOpacity
-              onPress={() => setAiSheetOpen(true)}
-              activeOpacity={0.85}
-              className="mb-4 flex-row items-center justify-center bg-gradient-to-r from-violet-600 to-indigo-600 bg-violet-600 rounded-2xl py-3"
-            >
-              <SparklesIcon size={18} color="#FFFFFF" />
-              <Text className="text-white text-[13.5px] font-bold ml-1.5">
-                เพิ่มสถานที่ด้วย AI
-              </Text>
-            </TouchableOpacity>
-
-            {placeTab === "folder" ? (
+            {/* ── โฟลเดอร์ (ถ้ามี) — อยู่บนสุด ───────────────── */}
+            {foldersLoading ? (
+              <ActivityIndicator color="#7C3AED" style={{ marginVertical: 12 }} />
+            ) : folders.length > 0 ? (
               <View>
-                <Text className="text-[12.5px] font-bold text-gray-900 mb-2">
-                  เลือกโฟลเดอร์ที่มีสถานที่ที่อยากไป
-                </Text>
-                {foldersLoading ? (
-                  <ActivityIndicator color="#7C3AED" style={{ marginVertical: 12 }} />
-                ) : folders.length === 0 ? (
-                  <View className="bg-gray-50 border border-gray-200 rounded-2xl p-4">
-                    <Text className="text-[12.5px] text-gray-500">
-                      ยังไม่มีโฟลเดอร์ — สร้างโฟลเดอร์จากคลิปที่เซฟไว้ก่อน หรือใช้แท็บ “ใส่เอง”
-                    </Text>
-                  </View>
-                ) : (
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    contentContainerStyle={{ paddingBottom: 8 }}
-                  >
-                    {folders.map((f) => {
-                      const active = folderId === f.id;
-                      return (
-                        <TouchableOpacity
-                          key={f.id}
-                          onPress={() => loadFolder(f.id)}
-                          activeOpacity={0.8}
-                          className={`mr-2 px-3.5 py-2.5 rounded-2xl border ${
-                            active
-                              ? "bg-violet-600 border-violet-600"
-                              : "bg-white border-gray-200"
+                <View className="flex-row items-center mb-2">
+                  <FolderIcon size={14} color="#6B7280" />
+                  <Text className="text-[12.5px] font-bold text-gray-900 ml-1.5">
+                    เลือกโฟลเดอร์ที่มีสถานที่ที่อยากไป
+                  </Text>
+                </View>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={{ paddingBottom: 8 }}
+                >
+                  {folders.map((f) => {
+                    const active = folderId === f.id;
+                    return (
+                      <TouchableOpacity
+                        key={f.id}
+                        onPress={() => loadFolder(f.id)}
+                        activeOpacity={0.8}
+                        className={`mr-2 px-3.5 py-2.5 rounded-2xl border ${
+                          active
+                            ? "bg-violet-600 border-violet-600"
+                            : "bg-white border-gray-200"
+                        }`}
+                      >
+                        <Text
+                          className={`text-[13px] font-bold ${
+                            active ? "text-white" : "text-gray-800"
+                          }`}
+                          numberOfLines={1}
+                        >
+                          {f.name}
+                        </Text>
+                        <Text
+                          className={`text-[11px] mt-0.5 ${
+                            active ? "text-violet-100" : "text-gray-400"
                           }`}
                         >
-                          <Text
-                            className={`text-[13px] font-bold ${
-                              active ? "text-white" : "text-gray-800"
-                            }`}
-                            numberOfLines={1}
-                          >
-                            {f.name}
-                          </Text>
-                          <Text
-                            className={`text-[11px] mt-0.5 ${
-                              active ? "text-violet-100" : "text-gray-400"
-                            }`}
-                          >
-                            {f.clip_count ?? 0} คลิป
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </ScrollView>
-                )}
+                          {f.clip_count ?? 0} คลิป
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
 
                 {folderLoading ? (
                   <ActivityIndicator color="#7C3AED" style={{ marginVertical: 12 }} />
@@ -1228,7 +1155,22 @@ export default function ManualTripPlanner({
                   </View>
                 ) : null}
               </View>
-            ) : manualReady ? (
+            ) : null}
+
+            {/* ── ปุ่มเพิ่มสถานที่ด้วย AI (อยู่ใต้โฟลเดอร์) ───── */}
+            <TouchableOpacity
+              onPress={() => setAiSheetOpen(true)}
+              activeOpacity={0.85}
+              className="mt-4 mb-4 flex-row items-center justify-center bg-violet-600 rounded-2xl py-3"
+            >
+              <SparklesIcon size={18} color="#FFFFFF" />
+              <Text className="text-white text-[13.5px] font-bold ml-1.5">
+                เพิ่มสถานที่ด้วย AI
+              </Text>
+            </TouchableOpacity>
+
+            {/* ── ค้นหาสถานที่ / ใส่เอง (อยู่ใต้โฟลเดอร์) ───────── */}
+            {formReady ? (
               <View>
                 <Text className="text-[12.5px] font-bold text-gray-900 mb-2">
                   ค้นหาชื่อสถานที่ที่เคยบันทึกไว้ในแอป
@@ -1288,9 +1230,12 @@ export default function ManualTripPlanner({
                 ) : null}
 
                 <View className="mt-4 bg-white border border-gray-200 rounded-2xl p-4">
-                  <Text className="text-[12.5px] font-bold text-gray-900 mb-2">
-                    หรือใส่สถานที่เอง
-                  </Text>
+                  <View className="flex-row items-center mb-2">
+                    <PencilSquareIcon size={14} color="#6B7280" />
+                    <Text className="text-[12.5px] font-bold text-gray-900 ml-1.5">
+                      หรือใส่สถานที่เอง
+                    </Text>
+                  </View>
                   <TextInput
                     value={manualName}
                     onChangeText={setManualName}
@@ -1322,11 +1267,11 @@ export default function ManualTripPlanner({
                 </View>
               </View>
             ) : (
-              // ช่องกรอกยังไม่ mount — รอ commit ถัดไป (กัน iOS ค้างตอนสลับแท็บ)
-              <View className="h-[300px]" />
+              // ช่องกรอกยังไม่ mount — รอ commit ถัดไป (กัน iOS ค้างตอนเข้าขั้นที่ 2)
+              <View className="h-[220px]" />
             )}
 
-            {/* ── รายการที่เลือก (ทั้งสองแท็บ) ──────────────────── */}
+            {/* ── รายการที่เลือก ─────────────────────────────────── */}
             <View className="mt-5">
               <View className="flex-row items-center mb-2">
                 <Text className="text-[13px] font-bold text-gray-900 flex-1">
@@ -1630,7 +1575,7 @@ export default function ManualTripPlanner({
         <View className="flex-row">
           {step > 1 ? (
             <TouchableOpacity
-              onPress={() => setStep((step - 1) as Step)}
+              onPress={() => goStep((step - 1) as Step)}
               activeOpacity={0.85}
               className="flex-1 py-3.5 rounded-2xl border border-gray-200 items-center justify-center mr-2"
             >
@@ -1640,7 +1585,7 @@ export default function ManualTripPlanner({
 
           {step < 4 ? (
             <TouchableOpacity
-              onPress={() => setStep((step + 1) as Step)}
+              onPress={() => goStep((step + 1) as Step)}
               disabled={!canNext}
               activeOpacity={0.85}
               className={`flex-1 py-3.5 rounded-2xl items-center justify-center ${
@@ -1714,7 +1659,7 @@ export default function ManualTripPlanner({
         }}
       />
 
-      {/* ชีต "เพิ่มสถานที่ด้วยเอไAI" — 3 สาขา (ใกล้เคียง / ตามสไตล์ / ใกล้จุดที่เลือก) */}
+      {/* ชีต "เพิ่มสถานที่ด้วย AI" — ใกล้เคียงกับที่เลือกในขั้นที่ 2 / สุ่มแรนด์ */}
       <TripAiPlaceSheet
         visible={aiSheetOpen}
         onClose={() => setAiSheetOpen(false)}

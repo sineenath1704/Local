@@ -13,6 +13,7 @@ import {
   MapPinIcon,
   CheckIcon,
   TruckIcon,
+  ChevronLeftIcon,
   ArrowPathIcon,
   ExclamationTriangleIcon,
 } from "react-native-heroicons/outline";
@@ -21,23 +22,27 @@ import {
   suggestTripPlaces,
   type NearbyPlace,
 } from "../services/tripService";
+import { haversineKm } from "../services/tripRouteService";
 import { TRAVEL_STYLES, type TravelStyle } from "../data/tripsData";
 import { THAI_PROVINCES } from "./TripDestinationPickerModal";
 
 /**
- * ชีต "เพิ่มสถานที่ด้วยเอไAI"
+ * ชีต "เพิ่มสถานที่ด้วย AI"
  * =============================================================
- * ใช้ในหน้า "สร้างแพลนเอง" — ผู้ใช้เลือกสถานที่เองได้ 3 ทาง:
+ * ใช้ในหน้า "สร้างแพลนเอง" — ผู้ใช้กดปุ่ม AI แล้วระบบหาสถานที่ให้เอง 2 แบบ:
  *
- *   A. ใกล้เคียง   → มีสถานที่ในแผน/โฟลเดอร์แล้ว → หารอบจุดที่เลือก
- *   B. ตามสไตล์     → ยังไม่มีสถานที่ → เลือกสไตล์ (+ จังหวัดถ้าอยากระบุ)
- *   C. ใกล้จุดที่เลือก → ติ๊กสถานที่แล้ว ≥1 → เดาจังหวัดจากจุดนั้น → หาใกล้เคียง
+ *   1. มีสถานที่ที่เลือกไว้ในขั้นที่ 2 แล้ว
+ *      → หาสถานที่ "ใกล้เคียงกับที่เลือก" (อ้างอิงจากสถานที่ในขั้นที่ 2
+ *        เท่านั้น — ไม่ใช่จุดเริ่มต้น/ตำแหน่งที่บันทึกไว้)
+ *   2. ยังไม่มีสถานที่เลย
+ *      → "สุ่มแรนด์" (สไตล์ + จังหวัด) มาแนะนำ โดยกรองให้เหลือแต่
+ *        สถานที่ในจังหวัดเดียวกันและอยู่ใกล้กัน (ไม่กระจายคนละจังหวัด)
  *
  * ข้อมูลมาจาก API ที่มีอยู่แล้ว (`/trips/nearby`, `/trips/suggest-places`)
  * → ผู้ใช้ต้องกดเพิ่มเอง ระบบไม่เพิ่มให้เงียบ ๆ
  */
 
-/** จุดอ้างอิงที่มีพิกัด (จุดเริ่มต้น + สถานที่ที่เลือกไว้ในแผน) */
+/** จุดอ้างอิงที่มีพิกัด (สถานที่ที่ผู้ใช้เลือกไว้ในขั้นที่ 2) */
 export interface AiPlaceAnchor {
   label: string;
   coords: { lat: number; lng: number };
@@ -67,7 +72,12 @@ interface ResultItem {
   source: string;
 }
 
-/** ข้อความสไตล์ที่ส่งให้เอไAI — เขียนให้ตรงกับที่ปลายทางเข้าใจ */
+/** ที่มาของผลลัพธ์ — ใช้บอกผู้ใช้ว่าตอนนี้ระบบหาจากอะไร */
+type SourceInfo =
+  | { kind: "nearby"; label: string }
+  | { kind: "trend"; styleKey: TravelStyle; province: string };
+
+/** ข้อความสไตล์ที่ส่งให้ AI — เขียนให้ตรงกับที่ปลายทางเข้าใจ */
 const STYLE_TO_AI: Record<TravelStyle, string> = {
   nature: "ธรรมชาติ ภูเขา และวิวสวย จุดชมวิว อุทยานแห่งชาติ ป่าไม้ น้ำตก",
   slowlife: "พักผ่อน สบายๆ ไม่เร่งรีบ แคมป์ปิ้ง ริมน้ำ สปา วิถีสโลว์ไลฟ์ ชุมชน OTOP",
@@ -111,6 +121,9 @@ const PROVINCES_BY_LENGTH = [...THAI_PROVINCES].sort(
   (a, b) => b.length - a.length
 );
 
+/** ระยะสูงสุด (กม.) ที่ถือว่า "อยู่ใกล้เคียงกัน" */
+const CLUSTER_KM = 30;
+
 /**
  * เดาจังหวัดจากข้อความที่อยู่
  * (ผลจาก Google Places มักไม่มีฟิลด์ province → ต้องเดาจากที่อยู่)
@@ -152,10 +165,36 @@ function fromNearby(p: NearbyPlace): ResultItem {
   };
 }
 
+/**
+ * เก็บเฉพาะกลุ่มสถานที่ที่อยู่ใกล้กันที่สุด
+ * -------------------------------------------------------------
+ * กันผลลัพธ์กระจายคนละจังหวัด / คนละฝั่งของจังหวัด
+ * (ตอนสุ่มแรนด์ ระบบอาจแนะนำมาทั้งจังหวัด — ต้องเหลือแต่กลุ่มเดียวกัน)
+ */
+function clusterByProximity(items: ResultItem[], km: number = CLUSTER_KM): ResultItem[] {
+  if (items.length <= 1) return items;
+  let best: ResultItem[] = [];
+  for (const anchor of items) {
+    const group = items.filter((b) => haversineKm(anchor.coords, b.coords) <= km);
+    if (group.length > best.length) best = group;
+  }
+  return best;
+}
+
+/**
+ * สุ่ม "แรนด์" = สไตล์ + จังหวัด
+ * (เรียกจากปุ่ม/effect เท่านั้น — ห้ามเรียกตอน render เพราะกฎ react-hooks/purity)
+ */
+function pickRandomTrend(): { styleKey: TravelStyle; province: string } {
+  const s = TRAVEL_STYLES[Math.floor(Math.random() * TRAVEL_STYLES.length)];
+  const p = THAI_PROVINCES[Math.floor(Math.random() * THAI_PROVINCES.length)];
+  return { styleKey: s.key, province: p };
+}
+
 export interface TripAiPlaceSheetProps {
   visible: boolean;
   onClose: () => void;
-  /** จุดอ้างอิงที่มีพิกัด (จุดเริ่มต้น + สถานที่ที่เลือกไว้แล้ว) */
+  /** จุดอ้างอิงที่มีพิกัด = สถานที่ที่ผู้ใช้เลือกไว้ในขั้นที่ 2 */
   anchors: AiPlaceAnchor[];
   /** สไตล์ที่เลือกไว้ในหน้าแพลน (ใช้เป็นค่าเริ่มต้น) */
   style?: TravelStyle;
@@ -170,29 +209,15 @@ export default function TripAiPlaceSheet({
   style,
   onAdd,
 }: TripAiPlaceSheetProps) {
-  // "menu" = เลือกวิธี · "style" = เลือกสไตล์/จังหวัด · "results" = ดูผลลัพธ์
-  const [mode, setMode] = useState<"menu" | "style" | "results">("menu");
+  // "results" = ดูผลลัพธ์ · "style" = เลือกสไตล์/จังหวัดเอง
+  const [mode, setMode] = useState<"results" | "style">("results");
   const [styleKey, setStyleKey] = useState<TravelStyle>(style ?? "slowlife");
   const [province, setProvince] = useState<string | null>(null);
   const [results, setResults] = useState<ResultItem[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // รีเซ็ตทุกครั้งที่เปิด (เลื่อนไป tick ถัดไป เพื่อไม่อัปเดต state ระหว่าง render)
-  useEffect(() => {
-    if (!visible) return;
-    const timer = setTimeout(() => {
-      setMode("menu");
-      setStyleKey(style ?? "slowlife");
-      setProvince(null);
-      setResults([]);
-      setSelectedIds([]);
-      setError(null);
-      setLoading(false);
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [visible, style]);
+  const [source, setSource] = useState<SourceInfo | null>(null);
 
   /** จุดอ้างอิงที่มีพิกัดจริง (ไม่มีพิกัดใช้เป็นจุดอ้างอิงไม่ได้) */
   const validAnchors = anchors.filter(
@@ -231,6 +256,7 @@ export default function TripAiPlaceSheet({
           ? [...prev, ...items.filter((i) => !prev.some((p) => p.name === i.name))]
           : items
       );
+      setSource({ kind: "nearby", label: anchor.label });
       setMode("results");
     } catch {
       setError("หาสถานที่ไม่สำเร็จ — ต่อเน็ตใหม่แล้วลองอีกครั้ง");
@@ -240,51 +266,46 @@ export default function TripAiPlaceSheet({
     }
   };
 
-  /** สาขา B: เลือกสไตล์ (+ จังหวัดถ้าอยากระบุ) → หาสถานที่ */
-  const searchByStyle = async () => {
+  /**
+   * สาขา "สุ่มแรนด์": ขอสถานที่ตามสไตล์ + จังหวัด แล้วเหลือแต่กลุ่มเดียวกัน
+   * -------------------------------------------------------------
+   * · ตัดรายการที่อยู่คนละจังหวัดออก (ไม่รู้จังหวัด → เชื่อ AI ไว้ก่อน)
+   * · แล้วเหลือเฉพาะกลุ่มที่อยู่ใกล้กัน (ไม่กระจายคนละจังหวัด)
+   */
+  const searchByTrend = async (sKey: TravelStyle, prov: string) => {
     setLoading(true);
     setError(null);
     try {
-      if (province) {
-        // ระบุจังหวัด → ให้ AI + Places แนะนำสถานที่ของจังหวัดนั้นตามสไตล์
-        const list = await suggestTripPlaces({
-          destination: province,
-          style: STYLE_TO_AI[styleKey],
-          count: 8,
-        });
-        const items: ResultItem[] = list
-          .filter((p) => p.latitude != null && p.longitude != null)
-          .map((p) => ({
-            id: `s-${p.placeId || p.name}`,
-            name: p.name,
-            address: p.address || null,
-            coords: { lat: p.latitude!, lng: p.longitude! },
-            province: p.province ?? province,
-            distanceKm: null,
-            rating: p.rating ?? null,
-            source: "ai",
-          }));
-        setResults(items);
-      } else {
-        // ไม่ระบุจังหวัด → หารอบจุดอ้างอิง (จุดเริ่มต้น/จุดที่เลือก) แล้วจัดอันดับตามสไตล์
-        const anchor = validAnchors[0];
-        if (!anchor) {
-          setError(
-            "เลือกจังหวัด หรือกลับไปเลือกจุดเริ่มต้นก่อน — ระบบต้องรู้จุดอ้างอิงถึงจะหาสถานที่ใกล้เคียงได้"
-          );
-          setResults([]);
-          setLoading(false);
-          return;
-        }
-        const list = await fetchNearbySuggestions({
-          near: { label: anchor.label, coords: anchor.coords },
-          radiusKm: 50,
-          limit: 20,
-          routePoints: validAnchors.map((a) => a.coords),
-        });
-        setResults(list.map(fromNearby));
-      }
+      const list = await suggestTripPlaces({
+        destination: prov,
+        style: STYLE_TO_AI[sKey],
+        count: 10,
+      });
+      const usable = list.filter((p) => p.latitude != null && p.longitude != null);
+      const sameArea = usable.filter((p) => {
+        const pv = p.province ?? guessProvinceFromText(p.address);
+        return !pv || pv === prov;
+      });
+      const items: ResultItem[] = sameArea.map((p) => ({
+        id: `s-${p.placeId || p.name}`,
+        name: p.name,
+        address: p.address || null,
+        coords: { lat: p.latitude!, lng: p.longitude! },
+        province: p.province ?? guessProvinceFromText(p.address) ?? prov,
+        distanceKm: null,
+        rating: p.rating ?? null,
+        source: "ai",
+      }));
+      const clustered = clusterByProximity(items);
+      setResults(clustered);
+      setStyleKey(sKey);
+      setSource({ kind: "trend", styleKey: sKey, province: prov });
       setMode("results");
+      if (!clustered.length) {
+        setError(
+          `ไม่พบสถานที่ที่อยู่ใกล้กันใน${prov} — ลองสุ่มใหม่หรือเลือกจังหวัดอื่น`
+        );
+      }
     } catch {
       setError("หาสถานที่ไม่สำเร็จ — ต่อเน็ตใหม่แล้วลองอีกครั้ง");
       setResults([]);
@@ -294,25 +315,56 @@ export default function TripAiPlaceSheet({
   };
 
   /**
-   * สาขา C: จุดที่ติ๊กไว้ → ดูว่าอยู่จังหวัดไหน → หาสถานที่ใกล้เคียงในจังหวัดเดียวกัน
+   * ค้นหาอัตโนมัติ (ใช้ตอนเปิดชีต และตอนกด "หาใหม่/สุ่มใหม่")
+   * · มีสถานที่ที่เลือกในขั้นที่ 2 → หารอบสถานที่เหล่านั้น
+   * · ไม่มี → สุ่มแรนด์มาแนะนำ
    */
-  const searchNearSelection = async () => {
-    const picked = results.filter((r) => selectedIds.includes(r.id));
-    const first = picked[0];
-    if (!first) return;
-    const prov = first.province ?? guessProvinceFromText(first.address);
-    if (!prov) {
-      setError(
-        "เดาจังหวัดจากสถานที่ที่เลือกไม่ได้ — ลองเลือกจังหวัดเอง หรือเลือกสถานที่ที่มีชื่อจังหวัดในชื่อ"
-      );
+  const runAuto = async () => {
+    const anchor = validAnchors[0];
+    if (anchor) {
+      await searchNearby(anchor, 30, "replace");
       return;
     }
-    await searchNearby(
-      { label: first.name, coords: first.coords, address: first.address, province: prov },
-      30,
-      "append"
-    );
+    const pick = pickRandomTrend();
+    await searchByTrend(pick.styleKey, pick.province);
   };
+
+  /** ผู้ใช้เลือกสไตล์/จังหวัดเอง */
+  const searchByStyle = async () => {
+    if (province) {
+      await searchByTrend(styleKey, province);
+      return;
+    }
+    // ไม่ระบุจังหวัด → ถ้ามีจุดอ้างอิงให้หารอบจุดนั้น ถ้าไม่มีก็สุ่มจังหวัดมา
+    const anchor = validAnchors[0];
+    if (anchor) {
+      await searchNearby(anchor, 50, "replace");
+      return;
+    }
+    const pick = pickRandomTrend();
+    await searchByTrend(styleKey, pick.province);
+  };
+
+  // รีเซ็ตทุกครั้งที่เปิด (เลื่อนไป tick ถัดไป เพื่อไม่อัปเดต state ระหว่าง render)
+  // แล้วค่อยเริ่มหาให้อัตโนมัติทันที
+  useEffect(() => {
+    if (!visible) return;
+    const timer = setTimeout(() => {
+      setMode("results");
+      setStyleKey(style ?? "slowlife");
+      setProvince(null);
+      setResults([]);
+      setSelectedIds([]);
+      setError(null);
+      setSource(null);
+      setLoading(true);
+      void runAuto();
+    }, 0);
+    return () => clearTimeout(timer);
+    // รันครั้งเดียวตอนเปิดชีต (ไม่เอา anchors มาใน deps — พ่อแม่ re-render
+    // ทุกครั้งที่พิมพ์ → ค้นใหม่ไม่รู้จบ)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, style]);
 
   /** เรียงผลลัพธ์ให้ตรงสไตล์ก่อน แล้วค่อยตามระยะ */
   const sorted = [...results].sort((a, b) => {
@@ -338,6 +390,10 @@ export default function TripAiPlaceSheet({
     onClose();
   };
 
+  const styleLabel =
+    TRAVEL_STYLES.find((s) => s.key === (source?.kind === "trend" ? source.styleKey : styleKey))
+      ?.label ?? "";
+
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <View className="flex-1 bg-black/60 justify-end">
@@ -345,88 +401,193 @@ export default function TripAiPlaceSheet({
           {/* Header */}
           <View className="flex-row items-center justify-between px-5 pt-4 pb-3 border-b border-gray-100">
             <View className="flex-row items-center flex-1">
-              {mode !== "menu" ? (
+              {mode === "style" ? (
                 <TouchableOpacity
-                  onPress={() => setMode(mode === "results" ? "style" : "menu")}
+                  onPress={() => setMode("results")}
                   className="mr-3 p-1 rounded-full bg-gray-100"
                 >
-                  <ArrowPathIcon size={17} color="#374151" />
+                  <ChevronLeftIcon size={17} color="#374151" />
                 </TouchableOpacity>
               ) : null}
-              <Text className="text-[17px] font-bold text-gray-900">
-                {mode === "menu"
-                  ? "เพิ่มสถานที่ด้วย AI"
-                  : mode === "style"
-                  ? "เลือกสไตล์และจังหวัด"
-                  : "สถานที่ที่ AI แนะนำ"}
-              </Text>
+              <View className="flex-1">
+                <Text className="text-[17px] font-bold text-gray-900">
+                  {mode === "style" ? "เลือกสไตล์และจังหวัด" : "เพิ่มสถานที่ด้วย AI"}
+                </Text>
+                {mode !== "style" && source ? (
+                  <View className="flex-row items-center mt-0.5">
+                    <MapPinIcon size={11} color="#9CA3AF" />
+                    <Text className="text-[11.5px] text-gray-500 ml-1" numberOfLines={1}>
+                      {source.kind === "nearby"
+                        ? `ใกล้เคียงกับ “${source.label}”`
+                        : `สุ่มแรนด์: ${styleLabel} · ${source.province}`}
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
             </View>
             <TouchableOpacity onPress={onClose} className="p-1 rounded-full bg-gray-100">
               <XMarkIcon size={20} color="#4B5563" />
             </TouchableOpacity>
           </View>
 
-          {/* ── เลือกวิธี ─────────────────────────────────────────── */}
-          {mode === "menu" ? (
-            <ScrollView className="flex-1 px-5 pt-4" contentContainerStyle={{ paddingBottom: 30 }}>
-              <TouchableOpacity
-                onPress={() => {
-                  const anchor = validAnchors[0];
-                  if (!anchor) return;
-                  void searchNearby(anchor, 30, "replace");
-                }}
-                disabled={validAnchors.length === 0}
-                activeOpacity={0.85}
-                className={`rounded-2xl border p-4 mb-3 ${
-                  validAnchors.length === 0
-                    ? "bg-gray-50 border-gray-200"
-                    : "bg-violet-50 border-violet-200"
-                }`}
-              >
-                <View className="flex-row items-center">
-                  <View className="w-10 h-10 rounded-xl bg-white items-center justify-center mr-3">
-                    <MapPinIcon size={20} color={validAnchors.length === 0 ? "#9CA3AF" : "#7C3AED"} />
-                  </View>
-                  <View className="flex-1">
-                    <Text className="text-[15px] font-bold text-gray-900">
-                      ใกล้เคียงกับที่เลือก
-                    </Text>
-                    <Text className="text-[12px] text-gray-500 mt-0.5">
-                      {validAnchors.length === 0
-                        ? "ยังไม่มีสถานที่ที่มีพิกัด — เลือกจุดเริ่มต้นหรือเพิ่มสถานที่ก่อน"
-                        : `หาสถานที่รอบ ${validAnchors[0].label} (รัศมี 30 กม.)`}
-                    </Text>
-                  </View>
-                </View>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                onPress={() => setMode("style")}
-                activeOpacity={0.85}
-                className="rounded-2xl border p-4 bg-emerald-50 border-emerald-200"
-              >
-                <View className="flex-row items-center">
-                  <View className="w-10 h-10 rounded-xl bg-white items-center justify-center mr-3">
-                    <SparklesIcon size={20} color="#059669" />
-                  </View>
-                  <View className="flex-1">
-                    <Text className="text-[15px] font-bold text-gray-900">
-                      เลือกตามสไตล์
-                    </Text>
-                    <Text className="text-[12px] text-gray-500 mt-0.5">
-                      เลือกสไตล์ที่ชอบ — จังหวัดไม่ระบุก็ได้ (ระบบจะหาจากจุดที่เลือก)
-                    </Text>
-                  </View>
-                </View>
-              </TouchableOpacity>
-
+          {/* ── ผลลัพธ์ ──────────────────────────────────────────── */}
+          {mode === "results" ? (
+            <View className="flex-1 px-4 pt-3">
               {loading ? (
-                <View className="flex-row items-center justify-center py-6">
-                  <ActivityIndicator color="#7C3AED" />
-                  <Text className="text-[12.5px] text-gray-500 ml-2">กำลังหาสถานที่…</Text>
+                <View className="flex-1 items-center justify-center py-16">
+                  <ActivityIndicator size="large" color="#7C3AED" />
+                  <Text className="text-gray-800 font-bold text-[15px] mt-4">
+                    กำลังหาสถานที่ใกล้เคียง...
+                  </Text>
+                  <Text className="text-gray-500 text-[12.5px] mt-1 text-center px-6">
+                    ระบบกำลังดูรอบจุดที่เลือกและจัดอันดับตามสไตล์
+                  </Text>
                 </View>
-              ) : null}
-            </ScrollView>
+              ) : sorted.length === 0 ? (
+                <View className="flex-1 items-center justify-center py-16 px-6">
+                  <Text className="text-gray-700 font-bold text-[14px]">ไม่พบสถานที่</Text>
+                  <Text className="text-gray-500 text-[12.5px] mt-1 text-center">
+                    ลองสุ่มใหม่ หรือเลือกสไตล์/จังหวัดเอง
+                  </Text>
+                  <TouchableOpacity
+                    onPress={() => setMode("style")}
+                    className="mt-4 bg-gray-100 rounded-xl px-4 py-2"
+                  >
+                    <Text className="text-violet-700 font-bold text-[13px]">
+                      ← เลือกสไตล์/จังหวัดเอง
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View className="flex-1">
+                  <View className="flex-row items-center justify-between mb-2">
+                    <Text className="text-[12.5px] text-gray-500">
+                      แตะที่กล่องเพื่อเลือก ({selectedIds.length}/{sorted.length})
+                    </Text>
+                    <TouchableOpacity
+                      onPress={() =>
+                        setSelectedIds(
+                          selectedIds.length === sorted.length
+                            ? []
+                            : sorted.map((r) => r.id)
+                        )
+                      }
+                    >
+                      <Text className="text-[12px] font-bold text-violet-700">
+                        {selectedIds.length === sorted.length
+                          ? "ล้างทั้งหมด"
+                          : "เลือกทั้งหมด"}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <ScrollView className="flex-1" contentContainerStyle={{ paddingBottom: 140 }}>
+                    {sorted.map((r) => {
+                      const isSelected = selectedIds.includes(r.id);
+                      return (
+                        <TouchableOpacity
+                          key={r.id}
+                          onPress={() => toggle(r.id)}
+                          activeOpacity={0.85}
+                          className={`mb-2.5 rounded-2xl border p-3.5 flex-row items-center ${
+                            isSelected
+                              ? "bg-violet-50 border-violet-400"
+                              : "bg-white border-gray-200"
+                          }`}
+                        >
+                          <View className="flex-1 mr-3">
+                            <Text className="text-[14px] font-bold text-gray-900" numberOfLines={1}>
+                              {r.name}
+                            </Text>
+                            {r.address ? (
+                              <Text className="text-[11.5px] text-gray-500 mt-0.5" numberOfLines={2}>
+                                {r.address}
+                              </Text>
+                            ) : null}
+                            <View className="flex-row items-center flex-wrap mt-1.5">
+                              {r.distanceKm != null ? (
+                                <View className="flex-row items-center bg-white rounded-full px-2 py-0.5 mr-1.5 border border-gray-200">
+                                  <TruckIcon size={11} color="#6B7280" />
+                                  <Text className="text-[10.5px] text-gray-600 ml-1">
+                                    {r.distanceKm.toFixed(1)} กม.
+                                  </Text>
+                                </View>
+                              ) : null}
+                              {r.province ? (
+                                <View className="bg-emerald-50 rounded-full px-2 py-0.5 mr-1.5">
+                                  <Text className="text-[10.5px] font-bold text-emerald-700">
+                                    {r.province}
+                                  </Text>
+                                </View>
+                              ) : null}
+                              {r.rating ? (
+                                <Text className="text-[10.5px] font-bold text-amber-600">
+                                  ⭐ {r.rating.toFixed(1)}
+                                </Text>
+                              ) : null}
+                            </View>
+                          </View>
+                          <View
+                            className={`w-6 h-6 rounded-full border items-center justify-center ${
+                              isSelected
+                                ? "bg-violet-600 border-violet-600"
+                                : "border-gray-300"
+                            }`}
+                          >
+                            {isSelected ? <CheckIcon size={13} color="#FFFFFF" /> : null}
+                          </View>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+
+                  {/* ปุ่มลอยด้านล่าง */}
+                  <View className="absolute bottom-0 left-0 right-0 bg-white pt-2 border-t border-gray-100">
+                    <View className="flex-row mb-2">
+                      <TouchableOpacity
+                        onPress={() => void runAuto()}
+                        disabled={loading}
+                        activeOpacity={0.85}
+                        className="flex-1 mr-1.5 flex-row items-center justify-center py-2.5 rounded-xl border border-violet-200 bg-violet-50"
+                      >
+                        <ArrowPathIcon size={15} color="#7C3AED" />
+                        <Text className="text-violet-700 font-bold text-[12.5px] ml-1.5">
+                          {source?.kind === "trend" ? "สุ่มใหม่" : "หาใหม่"}
+                        </Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        onPress={() => setMode("style")}
+                        activeOpacity={0.85}
+                        className="flex-1 ml-1.5 flex-row items-center justify-center py-2.5 rounded-xl border border-gray-200 bg-gray-50"
+                      >
+                        <SparklesIcon size={15} color="#4B5563" />
+                        <Text className="text-gray-700 font-bold text-[12.5px] ml-1.5">
+                          เลือกสไตล์เอง
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    {error ? (
+                      <Text className="text-[11.5px] text-amber-700 mb-2">{error}</Text>
+                    ) : null}
+
+                    <TouchableOpacity
+                      onPress={confirm}
+                      disabled={chosen.length === 0}
+                      activeOpacity={0.85}
+                      className={`rounded-xl py-3.5 items-center justify-center flex-row ${
+                        chosen.length > 0 ? "bg-violet-600" : "bg-gray-300"
+                      }`}
+                    >
+                      <SparklesIcon size={18} color="#FFFFFF" />
+                      <Text className="text-white font-bold text-[14px] ml-2">
+                        เพิ่มลงแผน ({chosen.length} แห่ง)
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
+            </View>
           ) : null}
 
           {/* ── เลือกสไตล์ + จังหวัด ───────────────────────────────── */}
@@ -463,7 +624,7 @@ export default function TripAiPlaceSheet({
                 จังหวัด (ไม่ระบุก็ได้)
               </Text>
               <Text className="text-[11.5px] text-gray-500 mb-2 leading-4">
-                ถ้าไม่ระบุจังหวัด ระบบจะหาสถานที่รอบจุดที่เลือก แล้วจัดอันดับตามสไตล์ให้
+                ถ้าไม่ระบุจังหวัด ระบบจะหารอบจุดที่เลือก หรือสุ่มจังหวัดมาให้
               </Text>
 
               <View className="flex-row flex-wrap mb-4">
@@ -536,154 +697,6 @@ export default function TripAiPlaceSheet({
                 </View>
               ) : null}
             </ScrollView>
-          ) : null}
-
-          {/* ── ผลลัพธ์ ──────────────────────────────────────────── */}
-          {mode === "results" ? (
-            <View className="flex-1 px-4 pt-3">
-              {loading ? (
-                <View className="flex-1 items-center justify-center py-16">
-                  <ActivityIndicator size="large" color="#7C3AED" />
-                  <Text className="text-gray-800 font-bold text-[15px] mt-4">
-                    กำลังหาสถานที่ใกล้เคียง...
-                  </Text>
-                  <Text className="text-gray-500 text-[12.5px] mt-1 text-center px-6">
-                    ระบบกำลังดูรอบจุดที่เลือกและจัดอันดับตามสไตล์
-                  </Text>
-                </View>
-              ) : sorted.length === 0 ? (
-                <View className="flex-1 items-center justify-center py-16">
-                  <Text className="text-gray-700 font-bold text-[14px]">ไม่พบสถานที่</Text>
-                  <TouchableOpacity
-                    onPress={() => setMode("style")}
-                    className="mt-4 bg-gray-100 rounded-xl px-4 py-2"
-                  >
-                    <Text className="text-violet-700 font-bold text-[13px]">
-                      ← ลองเปลี่ยนสไตล์หรือจังหวัด
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              ) : (
-                <View className="flex-1">
-                  <View className="flex-row items-center justify-between mb-2">
-                    <Text className="text-[12.5px] text-gray-500">
-                      แตะที่กล่องเพื่อเลือก ({selectedIds.length}/{sorted.length})
-                    </Text>
-                    <TouchableOpacity
-                      onPress={() =>
-                        setSelectedIds(
-                          selectedIds.length === sorted.length
-                            ? []
-                            : sorted.map((r) => r.id)
-                        )
-                      }
-                    >
-                      <Text className="text-[12px] font-bold text-violet-700">
-                        {selectedIds.length === sorted.length
-                          ? "ล้างทั้งหมด"
-                          : "เลือกทั้งหมด"}
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-
-                  <ScrollView className="flex-1" contentContainerStyle={{ paddingBottom: 120 }}>
-                    {sorted.map((r) => {
-                      const isSelected = selectedIds.includes(r.id);
-                      return (
-                        <TouchableOpacity
-                          key={r.id}
-                          onPress={() => toggle(r.id)}
-                          activeOpacity={0.85}
-                          className={`mb-2.5 rounded-2xl border p-3.5 flex-row items-center ${
-                            isSelected
-                              ? "bg-violet-50 border-violet-400"
-                              : "bg-white border-gray-200"
-                          }`}
-                        >
-                          <View className="flex-1 mr-3">
-                            <Text className="text-[14px] font-bold text-gray-900" numberOfLines={1}>
-                              {r.name}
-                            </Text>
-                            {r.address ? (
-                              <Text className="text-[11.5px] text-gray-500 mt-0.5" numberOfLines={2}>
-                                {r.address}
-                              </Text>
-                            ) : null}
-                            <View className="flex-row items-center flex-wrap mt-1.5">
-                              {r.distanceKm != null ? (
-                                <View className="flex-row items-center bg-white rounded-full px-2 py-0.5 mr-1.5 border border-gray-200">
-                                  <TruckIcon size={11} color="#6B7280" />
-                                  <Text className="text-[10.5px] text-gray-600 ml-1">
-                                    {r.distanceKm.toFixed(1)} กม.
-                                  </Text>
-                                </View>
-                              ) : null}
-                              {r.province ? (
-                                <View className="bg-emerald-50 rounded-full px-2 py-0.5 mr-1.5">
-                                  <Text className="text-[10.5px] font-bold text-emerald-700">
-                                    {r.province}
-                                  </Text>
-                                </View>
-                              ) : null}
-                              {r.rating ? (
-                                <Text className="text-[10.5px] font-bold text-amber-600">
-                                  ⭐ {r.rating.toFixed(1)}
-                                </Text>
-                              ) : null}
-                            </View>
-                          </View>
-                          <View
-                            className={`w-6 h-6 rounded-full border items-center justify-center ${
-                              isSelected
-                                ? "bg-violet-600 border-violet-600"
-                                : "border-gray-300"
-                            }`}
-                          >
-                            {isSelected ? <CheckIcon size={13} color="#FFFFFF" /> : null}
-                          </View>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </ScrollView>
-
-                  {/* ปุ่มลอยด้านล่าง */}
-                  <View className="absolute bottom-0 left-0 right-0 bg-white pt-2 border-t border-gray-100">
-                    {/* สาขา C: ติ๊กแล้ว → หาสถานที่ใกล้จังหวัดเดียวกัน */}
-                    {chosen.length > 0 ? (
-                      <TouchableOpacity
-                        onPress={() => void searchNearSelection()}
-                        disabled={loading}
-                        activeOpacity={0.85}
-                        className="mb-2 flex-row items-center justify-center py-2.5 rounded-xl border border-violet-200 bg-violet-50"
-                      >
-                        <MapPinIcon size={15} color="#7C3AED" />
-                        <Text className="text-violet-700 font-bold text-[12.5px] ml-1.5">
-                          หาใกล้เคียงในจังหวัดเดียวกับที่เลือก
-                        </Text>
-                      </TouchableOpacity>
-                    ) : null}
-
-                    {error ? (
-                      <Text className="text-[11.5px] text-amber-700 mb-2">{error}</Text>
-                    ) : null}
-
-                    <TouchableOpacity
-                      onPress={confirm}
-                      disabled={chosen.length === 0}
-                      activeOpacity={0.85}
-                      className={`rounded-xl py-3.5 items-center justify-center flex-row ${
-                        chosen.length > 0 ? "bg-violet-600" : "bg-gray-300"
-                      }`}
-                    >
-                      <SparklesIcon size={18} color="#FFFFFF" />
-                      <Text className="text-white font-bold text-[14px] ml-2">
-                        เพิ่มลงแผน ({chosen.length} แห่ง)
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              )}
-            </View>
           ) : null}
         </View>
       </View>

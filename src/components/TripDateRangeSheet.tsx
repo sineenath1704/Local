@@ -104,7 +104,7 @@ export default function TripDateRangeSheet({
   const [pickEnd, setPickEnd] = useState<string | null>(endDate ?? null);
 
   /**
-   * ค่าจากข้างนอกอาจเปลี่ยน (เช่น เอไaiไปแก้วันที่ในการ์ด หรือผู้ใช้เพิ่งยืนยัน)
+   * ค่าจากข้างนอกอาจเปลี่ยน (เช่น AI ไปแก้วันที่ในการ์ด หรือผู้ใช้เพิ่งยืนยัน)
    * → ปรับ state ตอน render (วิธีที่ React แนะนำ) ไม่ใช้ effect
    */
   const [lastStart, setLastStart] = useState<string | null>(startDate ?? null);

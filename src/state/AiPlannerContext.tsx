@@ -28,8 +28,8 @@ export interface ChatSeedExtras {
   clipContext?: ClipContext | null;
   video?: VideoPost | null;
   /**
-   * แผนทริปที่กำลังจะให้เอไaiช่วยแก้ (จากหน้าแผนทริป)
-   * → ส่งเป็นบล็อกข้อมูลใน system prompt ให้เอไaiอ้างอิงแผนเดิมได้
+   * แผนทริปที่กำลังจะให้ AI ช่วยแก้ (จากหน้าแผนทริป)
+   * → ส่งเป็นบล็อกข้อมูลใน system prompt ให้ AI อ้างอิงแผนเดิมได้
    */
   planContext?: unknown;
 }

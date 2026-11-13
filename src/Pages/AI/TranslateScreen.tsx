@@ -37,7 +37,7 @@ import {
 import { LanguagePickerSheet } from "../../components/LanguagePickerSheet";
 
 /**
- * TranslateScreen — "เอไAI ช่วยแปลภาษา"
+ * TranslateScreen — "AI ช่วยแปลภาษา"
  * -------------------------------------------------------------
  * เป็นคอนเทนต์ฝั่งขวาของสวิชในแท็บแชท (ดู AiHubScreen) → ไม่มีปุ่มย้อนกลับ
  * เพราะสวิชเองคือทางกลับ
@@ -268,7 +268,7 @@ export default function TranslateScreen() {
         keyboardShouldPersistTaps="handled"
       >
         <Text className="text-gray-400 text-[11px] pt-3 pb-2 leading-4">
-          พิมพ์หรือพูดคำที่เจอเวลาเที่ยว แล้วเอไai จะอธิบายความหมายในภาษาที่เราใช้
+          พิมพ์หรือพูดคำที่เจอเวลาเที่ยว แล้ว AI จะอธิบายความหมายในภาษาที่เราใช้
           พร้อมบอกว่าออกเสียงอย่างไร
         </Text>
 

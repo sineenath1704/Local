@@ -53,7 +53,7 @@ import {
  * แสดง: จุดเริ่ม → จุดสิ้นสุด · แผนที่เส้นทางจริง · ตารางเวลารายวัน
  *       · เวลาเปิด-ปิด · วิธีจอง/ติดต่อ · ต้นทุน (พร้อมที่มาของราคาน้ำมัน)
  *       · ที่พักที่ระบบเสนอ · ข้อควรระวัง
- * และปุ่ม: ยืนยันและบันทึก · เพิ่มจุดแวะ · แก้ไขกับเอไai
+ * และปุ่ม: ยืนยันและบันทึก · เพิ่มจุดแวะ · แก้ไขกับ AI
  */
 
 function money(n?: number | null): string {
@@ -130,7 +130,7 @@ interface TripPlanCardProps {
    */
   view?: "plan" | "summary";
   /**
-   * ซ่อนบรรทัดสรุปของเอไaiที่หัวการ์ดหรือไม่
+   * ซ่อนบรรทัดสรุปของ AI ที่หัวการ์ดหรือไม่
    * · false = ซ่อน (ตอนยังไม่ยืนยันแพลน ผู้ใช้ยังไม่อยากเห็นสรุปยาว ๆ)
    * · true  = แสดง (ตอนเป็นการ์ดสรุปสุดท้าย)
    */
@@ -155,7 +155,7 @@ interface TripPlanCardProps {
   busy?: boolean;
   /** กด "ยืนยันและบันทึกแพลน" */
   onConfirm?: () => void;
-  /** กด "แก้ไขกับเอไai" */
+  /** กด "แก้ไขกับ AI" */
   onEditWithAi?: () => void;
   /** กด "เพิ่มจุดแวะ" (ระบุวันได้) */
   onAddStop?: (dayIndex?: number) => void;
@@ -170,7 +170,7 @@ interface TripPlanCardProps {
   onFuelPriceOverride?: (price: number | null) => void;
   fuelPriceOverride?: number | null;
   /**
-   * ผู้ใช้/เอไai ระบุรถเองหรือยัง
+   * ผู้ใช้/AI ระบุรถเองหรือยัง
    * -------------------------------------------------------------
    * false = ยังไม่ได้ระบุ (backend ใช้ค่าเริ่มต้น) → ต้องถามอีกรอบตอนสรุปค่าใช้จ่าย
    */
@@ -358,7 +358,7 @@ export default function TripPlanCard({
           {plan.aiUsed ? (
             <View className="bg-violet-100 px-2 py-0.5 rounded-full">
               <Text className="text-violet-700 text-[11px] font-bold">
-                เอไai ช่วยเลือกจุด
+                AI ช่วยเลือกจุด
               </Text>
             </View>
           ) : (
@@ -1365,7 +1365,7 @@ export default function TripPlanCard({
               >
                 <SparklesIcon size={15} color="#4B5563" />
                 <Text className="text-gray-700 text-[13px] font-bold ml-1.5">
-                  แก้ไขกับเอไai
+                  แก้ไขกับ AI
                 </Text>
               </TouchableOpacity>
             ) : null}

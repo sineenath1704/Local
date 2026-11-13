@@ -41,7 +41,7 @@ type Nav =
       clipContext?: ClipContext | null;
       /** คลิปที่ผู้ใช้กูลับมา — แนบเป็นวิดีโอในแชท */
       video?: VideoPost | null;
-      /** แผนทริปที่กำลังจะให้เอไaiช่วยแก้ (จากหน้าแผนทริป) */
+      /** แผนทริปที่กำลังจะให้ AI ช่วยแก้ (จากหน้าแผนทริป) */
       planContext?: unknown;
     }
   | { view: "wizard"; folderId?: string }
@@ -81,7 +81,7 @@ export default function AiHubScreen({
   } = useAiPlanner();
 
   const [tab, setTab] = useState<HubTab>("chat");
-  // สวิชในแท็บแชท: เอไAI แชท ↔ เอไAI ช่วยแปลภาษา (สลับเนื้อหาใต้ปุ่ม)
+  // สวิชในแท็บแชท: AI แชท ↔ AI ช่วยแปลภาษา (สลับเนื้อหาใต้ปุ่ม)
   const [chatMode, setChatMode] = useState<"chat" | "translate">("chat");
   const [nav, setNav] = useState<Nav>({ view: "hub" });
   // กัน effect ทำงานซ้ำ (startFolderThread เปลี่ยนตัวอ้างทุกครั้งที่ threads เปลี่ยน)
@@ -226,14 +226,14 @@ export default function AiHubScreen({
         })}
       </View>
 
-      {/* ---- Chat tab (แชท AI "น้องโลคอล" + เอไAI ช่วยแปลภาษา) ---- */}
+      {/* ---- Chat tab (แชท AI "น้องโลคอล" + AI ช่วยแปลภาษา) ---- */}
       {tab === "chat" && (
         <View className="flex-1">
           {/* สวิช 2 ปุ่ม อยู่ข้างกัน — กดสลับเนื้อหาใต้ปุ่ม */}
           <View className="flex-row mx-4 mt-3 bg-gray-100 rounded-2xl p-1">
             {([
-              ["chat", "เอไAI แชท", ChatBubbleLeftRightIcon],
-              ["translate", "เอไAI ช่วยแปลภาษา", LanguageIcon],
+              ["chat", "AI แชท", ChatBubbleLeftRightIcon],
+              ["translate", "AI ช่วยแปลภาษา", LanguageIcon],
             ] as const).map(([key, label, Icon]) => {
               const active = chatMode === key;
               return (

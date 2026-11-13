@@ -69,7 +69,7 @@ export interface TripQuestionFlowProps {
   slots: TripSlots;
   /** ผู้ใช้เลือกตัวเลือก → อัปเดตข้อมูล (ยังไม่คำนวณค่าใช้จ่าย) */
   onChange: (slots: TripSlots) => void;
-  /** ผู้ใช้พิมพ์คำตอบเอง → ส่งเข้าแชทให้เอไaiจัดการต่อ */
+  /** ผู้ใช้พิมพ์คำตอบเอง → ส่งเข้าแชทให้ AI จัดการต่อ */
   onSubmitText: (text: string) => void;
   /** ข้อมูลครบแล้ว → กดสร้างแพลน (นี่คือจุดที่ "ค่าใช้จ่าย" เริ่มคำนวณ) */
   onCreatePlan: () => void;
@@ -252,7 +252,7 @@ export default function TripQuestionFlow({
     slots.budgetPerPerson != null ? String(slots.budgetPerPerson) : ""
   );
 
-  // ถ้าค่างบถูกเปลี่ยนจากที่อื่น (เช่นเอไaiเติมให้) → ช่องกรอกต้องตาม
+  // ถ้าค่างบถูกเปลี่ยนจากที่อื่น (เช่น AI เติมให้) → ช่องกรอกต้องตาม
   useEffect(() => {
     const fromSlots = slots.budgetPerPerson != null ? String(slots.budgetPerPerson) : "";
     if (fromSlots === budgetText.replace(/[^0-9]/g, "")) return;
@@ -326,15 +326,15 @@ export default function TripQuestionFlow({
     });
   };
 
-  /** ผู้ใช้พิมพ์คำตอบเอง → ลองจัดการในแอปก่อน ถ้าไม่ได้ค่อยส่งให้เอไai */
+  /** ผู้ใช้พิมพ์คำตอบเอง → ลองจัดการในแอปก่อน ถ้าไม่ได้ค่อยส่งให้AI*/
   const handleSubmitTyped = async () => {
     const text = answerText.trim();
     if (!text || resolving || !question) return;
 
-    // กลับจุดเดิม / กลับคนละจุด → ให้เอไaiเป็นคนจัดการคำพูด
+    // กลับจุดเดิม / กลับคนละจุด → ให้ AI เป็นคนจัดการคำพูด
     if (QUESTION_META[question].kind === "mode") {
       setAnswerText("");
-      // โหมด setup: ไม่ยิงเอไai (ผู้ใช้กด "ข้าม" ได้แทน) → ใช้ค่าเริ่มต้น "กลับจุดเดิม"
+      // โหมด setup: ไม่ยิง AI (ผู้ใช้กด "ข้าม" ได้แทน) → ใช้ค่าเริ่มต้น "กลับจุดเดิม"
       if (isSetup) {
         onChange({ ...latest.current, returnMode: "same_as_start", endPoint: null });
         return;
@@ -352,15 +352,15 @@ export default function TripQuestionFlow({
         return;
       }
       setAnswerText("");
-      if (isSetup) return; // อ่านไม่ได้ → ข้ามได้ ไม่ต้องยิงเอไai
+      if (isSetup) return; // อ่านไม่ได้ → ข้ามได้ ไม่ต้องยิง AI
       onSubmitText(text);
       return;
     }
 
-    // วันที่ → ให้เอไaiเป็นคนแปลง (เดือนไทย/คำอย่าง "3 วัน" เป็นเรื่องของโมเดล)
+    // วันที่ → ให้ AI เป็นคนแปลง (เดือนไทย/คำอย่าง "3 วัน" เป็นเรื่องของโมเดล)
     if (QUESTION_META[question].kind === "date") {
       setAnswerText("");
-      if (isSetup) return; // โหมด setup ใช้ปฏิทินของแอปแทน (ไม่ยิงเอไai)
+      if (isSetup) return; // โหมด setup ใช้ปฏิทินของแอปแทน (ไม่ยิง AI)
       onSubmitText(text);
       return;
     }
@@ -399,11 +399,11 @@ export default function TripQuestionFlow({
         return;
       }
 
-      // หาพิกัดไม่ได้ → ให้เอไaiช่วยต่อ (มักหาชื่อสถานที่ให้แม่นกว่า)
+      // หาพิกัดไม่ได้ → ให้ AI ช่วยต่อ (มักหาชื่อสถานที่ให้แม่นกว่า)
       setAnswerText("");
       if (isSetup) {
         // โหมด setup: เก็บแค่ชื่อไว้ (ยังไม่มีพิกัด) → ผู้ใช้แก้ต่อได้ที่แถวสรุป
-        // ไม่ยิงเอไai (ผู้ใช้ยืนยันแล้วค่อยคำนวณแพลน)
+        // ไม่ยิง AI (ผู้ใช้ยืนยันแล้วค่อยคำนวณแพลน)
         const target = originTargetOf(question);
         const prev = latest.current;
         const isFirstAsk = question === "startPoint" || question === "endPoint";
@@ -897,7 +897,7 @@ export default function TripQuestionFlow({
             </TouchableOpacity>
           ) : null}
 
-          {/* พิมพ์คำตอบเอง — โหมด setup ซ่อนไว้สำหรับวันที่/กลับที่ (เพราะให้เอไaiแปลง)
+          {/* พิมพ์คำตอบเอง — โหมด setup ซ่อนไว้สำหรับวันที่/กลับที่ (เพราะให้ AI แปลง)
               ใช้ตัวเลือกของแอปแทน (ปฏิทิน/ล้อเวลา/ชิป) */}
           {!(isSetup && (meta.kind === "date" || meta.kind === "mode")) ? (
           <View className="flex-row items-center mt-3">

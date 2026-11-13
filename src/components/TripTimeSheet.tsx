@@ -203,7 +203,7 @@ export default function TripTimeSheet({
   const insets = useSafeAreaInsets();
   /**
    * เริ่มจากค่าที่ส่งเข้ามา
-   * (ค่านอกอาจเปลี่ยนระหว่างที่ล้อยังเปิดอยู่ เช่น เอไaiไปกำหนดเวลาให้
+   * (ค่านอกอาจเปลี่ยนระหว่างที่ล้อยังเปิดอยู่ เช่น AI ไปกำหนดเวลาให้
    *   → ปรับ state ตอน render ไม่ใช้ effect ตามวิธีของ React)
    */
   const initial = parseHhMm(value);

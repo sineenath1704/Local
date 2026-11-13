@@ -481,7 +481,7 @@ export default function ItineraryViewer({ tripId, onBack, onPostCheckin }: Itine
   const overBudget = !b.withinBudget;
 
   /**
-   * สรุปแพลน (ร่างที่ยังไม่ยืนยัน ถ้ามี) → ส่งให้เอไAI ช่วยปรับ
+   * สรุปแพลน (ร่างที่ยังไม่ยืนยัน ถ้ามี) → ส่งให้ AI ช่วยปรับ
    * มีช่วงเวลาที่อยู่ · จุดแวะระหว่างทาง · เวลาเดินทางต่อขา · ระยะ/เวลารวม
    */
   const sendBackToAi = () => {

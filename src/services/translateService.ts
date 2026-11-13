@@ -3,7 +3,7 @@ import { aiFetch } from "./aiHttp";
 import type { TranslateResult } from "../data/translateData";
 
 /**
- * ยิงไปหา "เอไAI ช่วยแปลภาษา" ฝั่ง backend
+ * ยิงไปหา "AI ช่วยแปลภาษา" ฝั่ง backend
  * -------------------------------------------------------------
  * · /ai-translate  = แปลข้อความ (เป็นของ AI ฝั่งบ้าน)
  * · /ai-transcribe = ถอดเสียงที่ผู้ใช้พูด (Gemini) → แล้วค่อยแปลต่อ

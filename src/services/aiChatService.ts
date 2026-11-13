@@ -30,7 +30,7 @@ export interface ChatReply {
   reply: string;
   placeCandidates?: PlaceChoice[];
   /**
-   * สถานะข้อมูลแผนทริป — มีเฉพาะตอนที่เอไaiกำลังช่วยวางแผนทริป
+   * สถานะข้อมูลแผนทริป — มีเฉพาะตอนที่ AI กำลังช่วยวางแผนทริป
    * (ไม่มี = ข้อความธรรมดา → ห้ามแสดงปุ่มแผน)
    */
   tripDraft?: TripDraft;
@@ -195,7 +195,7 @@ function parsePlaceCards(raw: unknown): ChatPlaceCard[] | undefined {
 }
 
 /**
- * แปลงสไตล์ที่เอไaiเสนอจาก backend
+ * แปลงสไตล์ที่ AI เสนอจาก backend
  * ข้อมูลผิดรูปแบบ → ทิ้งทีละแบบ (ถ้าเหลือน้อยกว่า 2 → ใช้ชุดสำรองแทน)
  */
 function parseDiscoveryStyles(raw: unknown): DiscoveryStyle[] {
@@ -302,11 +302,11 @@ export const FALLBACK_DISCOVERY_TAGS: DiscoveryStyle[] = [
 
 /** คำตอบของเส้นทาง "ถามแนะนำสถานที่" */
 export interface DiscoveryPlacesReply {
-  /** คำตอบข้อความของเอไaiในแชท */
+  /** คำตอบข้อความของ AI ในแชท */
   reply: string;
   /** การ์ดสถานที่เรียงลงมา */
   places: ChatPlaceCard[];
-  /** แท็กที่ใช้หาสถานที่ (ผู้ใช้เลือกเอง หรือให้เอไaiเลือกให้) */
+  /** แท็กที่ใช้หาสถานที่ (ผู้ใช้เลือกเอง หรือให้ AI เลือกให้) */
   tags: DiscoveryStyle[];
   /** พื้นที่ที่ใช้ค้น (null = ทั่วประเทศไทย) */
   area: string | null;
@@ -342,7 +342,7 @@ export async function requestDiscoveryTags(opts: {
 }
 
 /**
- * ขอสถานที่ตามแท็กที่ผู้ใช้เลือก (หรือให้เอไaiเลือกให้)
+ * ขอสถานที่ตามแท็กที่ผู้ใช้เลือก (หรือให้ AI เลือกให้)
  * -------------------------------------------------------------
  * คืนคำตอบข้อความ + การ์ดสถานที่ (ข้อมูลจริงจาก Google Places)
  *
@@ -358,7 +358,7 @@ export async function requestDiscoveryPlaces(opts: {
   excludePlaceIds?: string[];
   /** ชื่อสถานที่ที่เคยได้ไปแล้ว — ห้ามย้ำ */
   excludeNames?: string[];
-  /** true = ให้เอไaiเลือกแท็กเองจากคำถาม (ไม่ต้องยืนยัน) */
+  /** true = ให้ AI เลือกแท็กเองจากคำถาม (ไม่ต้องยืนยัน) */
   aiPicks?: boolean;
 }): Promise<DiscoveryPlacesReply> {
   const data = await withToast<{
@@ -467,8 +467,8 @@ export interface SendChatOptions {
    */
   tripDraft?: TripSlotsWire | null;
   /**
-   * แผนทริปที่กำลังจะให้เอไaiแก้ไข (จาก ItineraryViewer) → แทรกเป็นบล็อกข้อมูล
-   * ใน system prompt เพื่อให้เอไaiรู้ว่าแก้อะไรจากแผนเดิม
+   * แผนทริปที่กำลังจะให้ AI แก้ไข (จาก ItineraryViewer) → แทรกเป็นบล็อกข้อมูล
+   * ใน system prompt เพื่อให้ AI รู้ว่าแก้อะไรจากแผนเดิม
    */
   planContext?: unknown;
   /**

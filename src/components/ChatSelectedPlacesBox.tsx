@@ -14,7 +14,7 @@ export interface ChatSelectedPlace {
 }
 
 export interface ChatSelectedPlacesBoxProps {
-  /** รายการสถานที่ที่ผู้ใช้เลือก (แหล่งเดียวกับที่ส่งให้เอไai) */
+  /** รายการสถานที่ที่ผู้ใช้เลือก (แหล่งเดียวกับที่ส่งให้ AI) */
   places: ChatSelectedPlace[];
   /** จุดเริ่มต้นของผู้ใช้ (ที่ที่ผู้ใช้อยู่) → ใช้เป็นต้นทางในป๊อปอัปแผนที่ */
   startPoint?: { label: string; coords?: { lat: number; lng: number } | null } | null;
@@ -103,7 +103,7 @@ export function ChatPlaceMapModal({
  * -------------------------------------------------------------
  * · แต่ละกล่องมีปุ่ม "Google Map" → เปิด **ป๊อปอัปแผนที่** (เหมือนป๊อปอัปเลือกสไตล์)
  *   ในป๊อปอัปจะเห็นเส้นทางจาก "จุดเริ่มต้นของผู้ใช้" → สถานที่ที่เลือกกล่องนั้น
- * · ข้อมูลในกล่องมาจาก `planPlaces` ตัวเดียวกับที่ส่งให้เอไai → สิ่งที่เห็นกับที่ส่งต่างกันไม่ได้
+ * · ข้อมูลในกล่องมาจาก `planPlaces` ตัวเดียวกับที่ส่งให้ AI → สิ่งที่เห็นกับที่ส่งต่างกันไม่ได้
  */
 export default function ChatSelectedPlacesBox({
   places,
