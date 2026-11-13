@@ -150,9 +150,9 @@ export function describeError(
   const host = hostOf(url);
   switch (kind) {
     case "network":
-      return `ต่อ ${host} ไม่ได้ — backend ไม่ได้รัน หรือ EXPO_PUBLIC_API_BASE_URL ชี้ผิดที่`;
+      return `ต่อ ${host} ไม่ได้ — การเชื่อมต่อถูกตัดก่อนเซิร์ฟเวอร์ตอบ (เน็ตหลุด · เซิร์ฟเวอร์ปิดงานก่อนเสร็จ · หรือ backend ไม่ได้รัน)`;
     case "timeout":
-      return `AI ไม่ตอบใน ${Math.round((timeoutMs ?? 0) / 1000)} วินาที (timeout)`;
+      return `AI ไม่ตอบใน ${Math.round((timeoutMs ?? 0) / 1000)} วินาที (timeout) — เซิร์ฟเวอร์ยังคิดไม่เสร็จ ลองใหม่อีกครั้ง`;
     case "not-configured":
       return "เซิร์ฟเวอร์ยังไม่ได้ตั้งค่า AI (ANTHROPIC_AUTH_TOKEN) — กำลังใช้คำตอบตัวอย่าง";
     case "upstream-auth":

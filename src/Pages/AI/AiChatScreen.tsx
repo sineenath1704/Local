@@ -534,8 +534,40 @@ export default function AiChatScreen({
   const [replanning, setReplanning] = useState<string | null>(null);
   /** ราคาน้ำมันที่ผู้ใช้ระบุเอง — key = id ข้อความ */
   const [fuelOverride, setFuelOverride] = useState<Record<string, number | null>>({});
+  /**
+   * ข้อความ error ของการ์ดแพลนที่คำนวณไม่สำเร็จ — key = id ข้อความ
+   * -------------------------------------------------------------
+   * · เดิมล้มเหลวแล้วการ์ดแพลนโผล่เปล่า (ไม่มี `plan` → ไม่วาดอะไรเลย)
+   *   ผู้ใช้ต้องเริ่มใหม่ทั้งหมด แม้ตัวเลือกที่กรอกไว้ยังอยู่
+   * · เก็บ error ไว้ต่อข้อความ → วาดการ์ด "คำนวณไม่สำเร็จ + ปุ่มลองใหม่"
+   */
+  const [planErrors, setPlanErrors] = useState<Record<string, string | null>>({});
   /** จุดที่ผู้ใช้เพิ่มเองจากรายการจุดใกล้เคียง — key = id ข้อความ */
   const [extraStops, setExtraStops] = useState<Record<string, PlanTripRequest["extraStops"]>>({});
+  /**
+   * จุดที่ผู้ใช้เลือก "ล่าสุด" (ข้ามข้อความ) — สำรองเผื่อการ์ดใหม่ไม่มีจุดเดิมติดมา
+   * -------------------------------------------------------------
+   * · `extraStops` เก็บรายข้อความ → พอผู้ใช้พิมพ์คำใหม่ การ์ดใหม่จะไม่มีจุดเดิม
+   *   (ของที่ผู้ใช้เลือกไว้หาย → "เอาสิ่งที่เลือกไปจัดต่อไม่ได้")
+   * · ตัวนี้คือ "ความจำระดับแผน" → ใช้เป็นตัวสำรองเฉพาะกรณีที่การ์ดเป้าหมาย
+   *   ไม่มีจุดของตัวเอง (ไม่ทับของที่การ์ดมีอยู่แล้ว)
+   */
+  const draftStopsRef = useRef<NonNullable<PlanTripRequest["extraStops"]>>([]);
+  const [draftStops, setDraftStops] = useState<
+    NonNullable<PlanTripRequest["extraStops"]>
+  >([]);
+  /** จำจุดที่ผู้ใช้เลือก (เก็บต่อข้อความ + เก็บระดับแผน) */
+  const rememberStops = useCallback(
+    (messageId: string, stops?: PlanTripRequest["extraStops"]) => {
+      const list = stops ?? [];
+      setExtraStops((prev) => ({ ...prev, [messageId]: list }));
+      if (list.length > 0) {
+        draftStopsRef.current = list;
+        setDraftStops(list);
+      }
+    },
+    []
+  );
   /** sheet จุดใกล้เคียง */
   const [nearbyOpen, setNearbyOpen] = useState(false);
   const [nearbyMessageId, setNearbyMessageId] = useState<string | null>(null);
@@ -1015,6 +1047,7 @@ export default function AiChatScreen({
         }))
       );
       updateMessage(threadId, messageId, { plan: result.plan, planMeta: meta });
+      setPlanErrors((prev) => ({ ...prev, [messageId]: null }));
       return result.plan;
     } catch (err) {
       const aiErr = asAiError(err);
@@ -1033,6 +1066,11 @@ export default function AiChatScreen({
         "คำนวณแผนไม่สำเร็จ",
         aiErr?.message ?? "เรียกตัวคำนวณแผนทริปไม่สำเร็จ ลองใหม่อีกครั้ง"
       );
+      setPlanErrors((prev) => ({
+        ...prev,
+        [messageId]:
+          aiErr?.message ?? "เรียกตัวคำนวณแพลนทริปไม่สำเร็จ ลองใหม่อีกครั้ง",
+      }));
       return null;
     } finally {
       setReplanning(null);
@@ -1048,6 +1086,29 @@ export default function AiChatScreen({
       role: "assistant",
       content: formatPlanSummary(plan),
     });
+  };
+
+  /**
+   * จุดที่จะส่งไปกับคำขอวางแพลน
+   * -------------------------------------------------------------
+   * ลำดับ: จุดที่ผู้ใช้เพิ่งเลือก → จุดของการ์ดเป้าหมาย → จุดที่เลือกไว้ล่าสุด (สำรอง)
+   * ข้อสุดท้ายคือตัวที่ทำให้ "เอาสิ่งที่เลือกไปจัดต่อได้" แม้การ์ดใหม่จะไม่มีจุดเดิมติดมา
+   */
+  const resolvePlanStops = (
+    targetId: string,
+    explicit?: PlanTripRequest["extraStops"]
+  ): NonNullable<PlanTripRequest["extraStops"]> => {
+    if (explicit && explicit.length > 0) return explicit;
+    const own = extraStops[targetId];
+    if (own && own.length > 0) return own;
+    const fallback = draftStopsRef.current;
+    if (fallback.length > 0) {
+      console.log(
+        "[AiChatScreen] การ์ดนี้ไม่มีจุดของตัวเอง → ใช้จุดที่ผู้ใช้เลือกไว้ล่าสุดต่อ:",
+        fallback.length
+      );
+    }
+    return fallback;
   };
 
   const handleCreatePlan = async (
@@ -1072,7 +1133,7 @@ export default function AiChatScreen({
     console.log("[AiChatScreen] handleCreatePlan called, rawSlots:", rawSlots);
 
     // ตรวจสอบก่อนว่ามีสถานที่ให้วางแผนหรือไม่ (ถ้าไม่มีทั้งโฟลเดอร์ และไม่มี extraStops)
-    const currentExtra = opts?.extraStops ?? extraStops[targetId] ?? [];
+    const currentExtra = resolvePlanStops(targetId, opts?.extraStops);
     const hasFolder = Boolean(attachedFolderId || thread?.folderId);
     if (!hasFolder && currentExtra.length === 0) {
       console.log("[AiChatScreen] ไม่มีสถานที่และไม่มีโฟลเดอร์ เปิด TripDestinationPickerModal ทันที");
@@ -1085,7 +1146,7 @@ export default function AiChatScreen({
 
     // ถ้าผู้ใช้กดข้ามจุดเริ่มต้น หรือจุดยังไม่มีพิกัด ให้เตรียมค่าเริ่มต้นที่ใช้งานได้
     // วันที่: ผู้ใช้ข้ามไม่ระบุ → ใช้วันนี้ (จำนวนวันคิดจากจำนวนจุดที่เลือก · 3 จุดต่อวัน)
-    const pickedCount = (opts?.extraStops ?? extraStops[targetId] ?? []).length;
+    const pickedCount = currentExtra.length;
     const fallbackDays = Math.min(
       TRIP_MAX_DAYS,
       Math.max(1, Math.ceil(pickedCount / 3))
@@ -1116,13 +1177,16 @@ export default function AiChatScreen({
       const plan = await runPlan(
         targetId,
         buildPlanRequest(slots, {
-          extraStops: opts?.extraStops ?? extraStops[targetId] ?? [],
+          extraStops: currentExtra,
           fuelPriceOverride: fuelOverride[targetId] ?? null,
         })
       );
       if (plan) {
         clearDraftCards();
         setEditingPlanMessageId(null);
+        // แผนเสร็จแล้ว → ล้างความจำระดับแผน (ไม่ให้จุดของแผนเก่าหลุดไปปนแผนใหม่)
+        draftStopsRef.current = [];
+        setDraftStops([]);
         // สรุปแผนทั้งหมดกลับให้ผู้ใช้ในแชท (ข้อ 2.3)
         // → การ์ดแพลนดูรายละเอียด แต่ในแชทต้องมีภาพรวมทั้งทริปด้วย
         if (opts?.appendSummary !== false) appendPlanSummaryMessage(plan);
@@ -1178,7 +1242,7 @@ export default function AiChatScreen({
       );
       return;
     }
-    setExtraStops((prev) => ({ ...prev, [messageId]: stops }));
+    rememberStops(messageId, stops);
 
     // ── จุดเริ่มต้นต้องมาจาก "ที่บันทึก" ของผู้ใช้ ─────────────────
     // สถานที่ที่ผู้ใช้ติ๊กไว้ไม่ใช่จุดเริ่มต้น (เป็นจุดปลายทางของเส้นทาง)
@@ -1205,6 +1269,9 @@ export default function AiChatScreen({
     // อ่านจากแหล่งเดียวกับที่การ์ดโชว์ชิป → สิ่งที่เห็นคือสิ่งที่จะส่ง
     const setupMsg = thread?.messages.find((m) => m.id === setupId);
     const stops = setupMsg?.planPlaces ?? [];
+    // การ์ดตั้งค่าไม่มีจุดของตัวเอง → ใช้จุดที่ผู้ใช้เลือกไว้ก่อนหน้านี้ต่อ
+    // (ไม่งั้นสิ่งที่เลือกไว้จะหายทั้งที่กดยืนยันแล้ว)
+    const effectiveStops = stops.length > 0 ? stops : draftStopsRef.current;
     if (stops.length === 0) {
       console.warn(
         "[AiChatScreen] handleCreatePlanFromSetup: ไม่มีสถานที่ที่ผู้ใช้ติ๊กในการ์ดตั้งค่า"
@@ -1218,8 +1285,8 @@ export default function AiChatScreen({
     appendMessage(threadId, {
       role: "user",
       content: formatTripSetupText(slots),
-      planPlaces: stops,
-      aiNote: formatPlanPlacesContext(stops, slots),
+      planPlaces: effectiveStops,
+      aiNote: formatPlanPlacesContext(effectiveStops, slots),
     });
 
     // ── ข้อความใหม่ของ AI = ที่เกาะของการ์ดแพลน ───────────────
@@ -1229,13 +1296,13 @@ export default function AiChatScreen({
       content: "",
       planView: "staged",
     });
-    setExtraStops((prev) => ({ ...prev, [planId]: stops }));
+    rememberStops(planId, effectiveStops);
 
     // ปิดการ์ดตั้งค่า (ไม่ต้องโผล่ซ้ำ)
     updateMessage(threadId, setupId, { planSetup: false });
 
     await handleCreatePlan(setupId, {
-      extraStops: stops,
+      extraStops: effectiveStops,
       targetId: planId,
       appendSummary: false,
     });
@@ -1265,7 +1332,7 @@ export default function AiChatScreen({
       planView: "summary",
       planFromId: messageId,
     });
-    setExtraStops((prev) => ({ ...prev, [sumId]: extraStops[messageId] ?? [] }));
+    rememberStops(sumId, extraStops[messageId] ?? []);
     if (fuelOverride[messageId] != null) {
       setFuelOverride((prev) => ({ ...prev, [sumId]: fuelOverride[messageId] }));
     }
@@ -1318,10 +1385,8 @@ export default function AiChatScreen({
     const targetId = pendingPlanMessageId;
 
     // บันทึกสถานที่ลงใน extraStops ของข้อความนี้
-    setExtraStops((prev) => ({
-      ...prev,
-      [targetId]: [...(prev[targetId] ?? []), ...stops],
-    }));
+    const mergedStops = [...(extraStops[targetId] ?? []), ...stops];
+    rememberStops(targetId, mergedStops);
 
     const rawSlots = draftSlotsRef.current;
     const slots: TripSlots = {
@@ -1566,7 +1631,7 @@ export default function AiChatScreen({
         website: place.website ?? null,
       },
     ];
-    setExtraStops((prev) => ({ ...prev, [messageId]: next }));
+    rememberStops(messageId, next);
     setNearbyOpen(false);
     const plan = thread?.messages.find((m) => m.id === messageId)?.plan;
     if (!plan) return;
@@ -2465,16 +2530,29 @@ export default function AiChatScreen({
    * → วันที่/เวลาใช้ตัวเลือกของแอปเอง (ปฏิทิน + ล้อเวลา) ที่เปิดจากระดับหน้าจอ
    */
   const renderQuestionFlow = (forMessageId?: string) => (
-    <TripQuestionFlow
-      slots={draftSlots}
-      onChange={applyDraftSlots}
-      onSubmitText={(text) => void send(text)}
-      onCreatePlan={() => void handleCreatePlan(forMessageId ?? activeDraftMessageId ?? "")}
-      creating={planning}
-      onRequestOrigin={setCardOriginTarget}
-      onRequestDateRange={() => openCardPicker("date")}
-      onRequestTime={() => openCardPicker("time")}
-    />
+    <View>
+      {/* จุดที่ผู้ใช้เลือกไว้ก่อนหน้านี้ → จะถูกใช้ต่อในแพลนนี้ (บอกให้เห็นด้วย) */}
+      {draftStops.length > 0 ? (
+        <View className="mt-2 rounded-2xl border border-violet-200 bg-violet-50 px-3 py-2">
+          <Text className="text-[11.5px] font-bold text-violet-800">
+            สถานที่ที่เลือกไว้ก่อนหน้านี้จะถูกใช้ต่อ ({draftStops.length} แห่ง)
+          </Text>
+          <Text className="text-violet-700 text-[11px] mt-0.5">
+            {draftStops.map((s) => s.label).join(" · ")}
+          </Text>
+        </View>
+      ) : null}
+      <TripQuestionFlow
+        slots={draftSlots}
+        onChange={applyDraftSlots}
+        onSubmitText={(text) => void send(text)}
+        onCreatePlan={() => void handleCreatePlan(forMessageId ?? activeDraftMessageId ?? "")}
+        creating={planning}
+        onRequestOrigin={setCardOriginTarget}
+        onRequestDateRange={() => openCardPicker("date")}
+        onRequestTime={() => openCardPicker("time")}
+      />
+    </View>
   );
 
   /**
@@ -2488,10 +2566,22 @@ export default function AiChatScreen({
     // แหล่งเดียวของรายการที่ผู้ใช้ติ๊ก (เก็บไว้กับข้อความการ์ดตั้งค่า)
     // → ชิปที่เห็น = สิ่งที่จะถูกส่งไปสร้างแพลน (ไม่มีทางหลุด)
     const stops = msg?.planPlaces ?? [];
+    // การ์ดนี้ไม่มีจุดของตัวเอง → เอาจุดที่ผู้ใช้เลือกไว้ก่อนหน้านี้มาใช้ต่อ
+    // (ไม่งั้นของที่เลือกไว้จะหายเงียบ ๆ ทั้งที่กดยืนยันแล้ว)
+    const cardStops: NonNullable<AiChatMessage["planPlaces"]> =
+      stops.length > 0
+        ? stops
+        : draftStops.map((s) => ({
+            label: s.label,
+            address: s.address ?? null,
+            coords: s.coords,
+            openingHours: s.openingHours ?? null,
+            website: s.website ?? null,
+          }));
     // จุดเริ่มต้นอยู่ไกลจากสถานที่ที่เลือกมากไหม (ขับข้ามจังหวัด → แผนจะเพี้ยน)
     const startCoords = draftSlots.startPoint?.coords ?? null;
     const farthestKm = startCoords
-      ? stops.reduce(
+      ? cardStops.reduce(
           (max, s) => Math.max(max, straightLineKm(startCoords, s.coords)),
           0
         )
@@ -2505,9 +2595,9 @@ export default function AiChatScreen({
     return (
       <TripQuestionFlow
         mode="setup"
-        places={stops.map((s) => s.label)}
+        places={cardStops.map((s) => s.label)}
         onSelectPlace={(i) => {
-          const picked = stops[i];
+          const picked = cardStops[i];
           if (picked) setSetupMapPlace(picked);
         }}
         startDistanceHint={startDistanceHint}
@@ -2590,7 +2680,7 @@ export default function AiChatScreen({
         </View>
         <View className="flex-1">
           <Text className="text-[15px] font-bold text-gray-900" numberOfLines={1}>
-            {thread?.title ?? "แชท AI"}
+            {thread?.title ?? "AI ช่วยคิด"}
           </Text>
           <Text className="text-[11px] text-gray-400">
             {folder
@@ -2912,6 +3002,47 @@ export default function AiChatScreen({
 
                   {/* แผนที่คำนวณเสร็จแล้ว → การ์ดแผน (แผนที่จริง · เวลา · ต้นทุน · เพิ่ม/ลบจุด) */}
                   {!mine && !failed && item.plan ? renderPlanCard(item.id, item.plan) : null}
+
+                  {/* กำลังคำนวณแพลน (ยังไม่มีแผน) → ต้องเห็นสถานะ ไม่ใช่การ์ดโผล่เปล่า */}
+                  {!mine && !failed && !item.plan && planning && item.planView === "staged" ? (
+                    <View className="mt-2 self-stretch rounded-2xl border border-violet-200 bg-violet-50 px-3 py-2.5 flex-row items-center">
+                      <ActivityIndicator size="small" color="#7C3AED" />
+                      <Text className="text-[12.5px] font-bold text-violet-800 ml-2">
+                        กำลังคำนวณแพลน... (โมเดลคิดช้าได้ เดี๋ยวเสร็จเอง)
+                      </Text>
+                    </View>
+                  ) : null}
+
+                  {/* คำนวณแพลนไม่สำเร็จ → บอกเหตุผล + ปุ่มลองใหม่
+                      (เดิมการ์ดโผล่เปล่า เพราะไม่มี `plan` → ผู้ใช้ต้องเริ่มใหม่ทั้งหมด) */}
+                  {!mine && !failed && !item.plan && planErrors[item.id] ? (
+                    <View className="mt-2 self-stretch rounded-2xl border border-red-200 bg-red-50 px-3 py-2.5">
+                      <Text className="text-[12.5px] font-bold text-red-800">
+                        คำนวณแพลนไม่สำเร็จ
+                      </Text>
+                      <Text className="text-[12px] text-red-700 mt-0.5">
+                        {planErrors[item.id]}
+                      </Text>
+                      <TouchableOpacity
+                        onPress={() =>
+                          void handleCreatePlan(item.id, {
+                            targetId: item.id,
+                            appendSummary: false,
+                          })
+                        }
+                        disabled={planning}
+                        activeOpacity={0.85}
+                        className={`mt-2 self-start flex-row items-center bg-red-600 rounded-full px-3.5 py-2 ${
+                          planning ? "opacity-50" : ""
+                        }`}
+                      >
+                        <ArrowPathIcon size={14} color="#FFFFFF" />
+                        <Text className="text-white text-[12.5px] font-bold ml-1.5">
+                          {planning ? "กำลังคำนวณ..." : "ลองคำนวณใหม่"}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : null}
 
                   {/* การ์ด "ตั้งค่าแพลนทริป" (ขั้นที่ 1 ของ flow ใหม่) — ผู้ใช้กรอกเองก่อนสร้างแพลน */}
                   {!mine && !failed && item.planSetup ? (

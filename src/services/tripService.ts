@@ -1,4 +1,4 @@
-import { API_TIMEOUT_MS } from "./apiConfig";
+import { API_TIMEOUT_MS, AI_PLAN_TIMEOUT_MS } from "./apiConfig";
 import {
   ItineraryDay,
   TripBudget,
@@ -321,7 +321,7 @@ export async function generateTripPlan(
       save: req.save ?? false,
       planId: req.planId ?? undefined,
     },
-    timeoutMs: API_TIMEOUT_MS * 12,
+    timeoutMs: AI_PLAN_TIMEOUT_MS,
     onSettled: (ok, error) => {
       if (!ok && error) toastAiError(error);
     },

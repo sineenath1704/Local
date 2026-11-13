@@ -25,7 +25,6 @@ import {
   TruckIcon,
   SparklesIcon,
   ExclamationTriangleIcon,
-  PencilSquareIcon,
 } from "react-native-heroicons/outline";
 
 import { useAiPlanner } from "../../state/AiPlannerContext";
@@ -38,6 +37,8 @@ import {
   TripBudget,
   TripPlanLeg,
   TripPlanPoint,
+  TripPlanVehicle,
+  TripPlan,
 } from "../../data/tripsData";
 import OriginSelectorModal from "../../components/OriginSelectorModal";
 import TripTimeSheet from "../../components/TripTimeSheet";
@@ -50,8 +51,11 @@ import {
   getFolderContext,
   type FolderPlaceInfo,
 } from "../../services/folderContextService";
-import { findLocalPlaces, type LocalPlace } from "../../services/placesLocalService";
-import { resolvePlaceCoords } from "../../services/placesService";
+import {
+  resolvePlaceCoords,
+  verifyPlaceOnGoogle,
+  type PlaceCandidate,
+} from "../../services/placesService";
 import {
   computeRoute,
   haversineKm,
@@ -59,13 +63,29 @@ import {
   type RouteResult,
 } from "../../services/tripRouteService";
 import { createMyTripPlan } from "../../services/tripPlanService";
+import {
+  fetchFuelPrices,
+  type FuelPriceSnapshot,
+} from "../../services/tripService";
+import {
+  COST_VEHICLES,
+  costVehicleByKey,
+  fuelPriceFromSnapshot,
+  computeTravelCost,
+  computeFuelLitres,
+  computeKwh,
+  formatBaht,
+  type CostVehicleKey,
+  type CostVehicleOption,
+} from "../../services/vehicleCostService";
 
 /**
  * สร้างแพลนทริปด้วยตัวเอง (ไม่ใช้ AI)
  * =============================================================
  * · จุดเริ่มต้น = จุดที่บันทึกไว้ (OriginSelectorModal)
- * · สถานที่ = เลือกจากโฟลเดอร์ หรือใส่เอง (ค้นหาในทะเบียนของแอป / วางลิงก์ Google Maps)
+ * · สถานที่ = เลือกจากโฟลเดอร์ หรือค้นใน Google Maps (ติ๊กเลือกได้หลายแห่ง)
  * · เส้นทาง + เวลาเดินทาง = คำนวณฝั่งแอป (OSRM สาธารณะ + คำนวณสำรอง)
+ * · รถที่ใช้ + ราคาต่อหน่วย (ราคาสด) + ค่าใช้จ่ายรายจุด = คำนวณในขั้นที่ 4
  * · ผลลัพธ์ = `Trip` รูปแบบเดียวกับแพลนที่ AI ทำ (ดู `buildTrip` ท้ายไฟล์)
  *   → บันทึกลง `trip_plans` → แก้ไขต่อในหน้าแพลนได้เลย
  */
@@ -74,19 +94,33 @@ type Step = 1 | 2 | 3 | 4;
 
 const STEPS: { key: Step; title: string; hint: string }[] = [
   { key: 1, title: "จุดเริ่มต้น", hint: "เลือกจากที่บันทึกไว้" },
-  { key: 2, title: "สถานที่", hint: "จากโฟลเดอร์ หรือใส่เอง" },
+  { key: 2, title: "สถานที่", hint: "จากโฟลเดอร์ หรือค้นใน Google Maps" },
   { key: 3, title: "ลำดับและเวลา", hint: "จัดรูทและกำหนดเวลา" },
   { key: 4, title: "สรุป", hint: "ตรวจแล้วกดสร้างแพลน" },
 ];
 
-/** จุดหนึ่งจุดที่ผู้ใช้เลือก (จากโฟลเดอร์หรือใส่เอง) */
+/**
+ * ขั้นตอนที่มีช่องกรอก (TextInput) → ต้อง mount ช้ากว่าหนึ่ง commit
+ * -------------------------------------------------------------
+ * บน iOS ถ้า mount TextInput (native view หนัก) ใน commit เดียวกับที่
+ * มีการ unmount ส่วนอื่น แอปจะค้าง (JS thread ติด → เลื่อนได้แต่กดปุ่มไม่ได้)
+ */
+const FORM_STEPS: Step[] = [2, 3, 4];
+
+/** จุดหนึ่งจุดที่ผู้ใช้เลือก (จากโฟลเดอร์ / Google Maps / AI) */
 interface PlanPlace {
   key: string;
   name: string;
   address?: string | null;
   coords?: LatLng | null;
-  /** ที่มา: registry = ยืนยันในทะเบียน · clip = มาจากคลิปในโฟลเดอร์ · manual = ใส่เอง */
-  source: "registry" | "clip" | "manual";
+  /**
+   * ที่มา:
+   * · registry = ยืนยันในทะเบียน
+   * · clip     = มาจากคลิปในโฟลเดอร์
+   * · google   = ค้นเจอจาก Google Maps
+   * · manual   = เพิ่มผ่าน AI (ชีต “เพิ่มสถานที่ด้วย AI”)
+   */
+  source: "registry" | "clip" | "google" | "manual";
   communityName?: string | null;
   clipCount?: number;
   /** จังหวัด (ใช้หาสถานที่ใกล้เคียงในจังหวัดเดียวกัน) */
@@ -194,9 +228,9 @@ export default function ManualTripPlanner({
   /** กำลังหาพิกัดจุดกลับ */
   const [endResolving, setEndResolving] = useState(false);
 
-  // ── ขั้นที่ 2: สถานที่ (หน้าเดียว — โฟลเดอร์ + ค้นหา/ใส่เอง) ──────────
+  // ── ขั้นที่ 2: สถานที่ (หน้าเดียว — โฟลเดอร์ + ค้นใน Google Maps) ───────
   /**
-   * ช่องค้นหา/ใส่สถานที่เอง mount แล้วหรือยัง
+   * ช่องค้นหาสถานที่ mount แล้วหรือยัง
    * -------------------------------------------------------------
    * บน iOS ถ้า mount ช่องกรอก (TextInput = native view หนัก) ใน commit เดียวกับ
    * ที่ mount ส่วนอื่นของขั้นที่ 2 แอปจะค้าง (JS thread ติด → เลื่อนได้แต่กดปุ่มไม่ได้)
@@ -213,11 +247,19 @@ export default function ManualTripPlanner({
   const [folderLoading, setFolderLoading] = useState(false);
   const [places, setPlaces] = useState<PlanPlace[]>([]);
 
-  const [manualQuery, setManualQuery] = useState("");
-  const [localHits, setLocalHits] = useState<LocalPlace[]>([]);
+  /**
+   * ค้นหาสถานที่จาก Google Maps
+   * -------------------------------------------------------------
+   * ผู้ใช้พิมพ์ → ยิง `/places/verify` → ได้ผู้สมัครหลายแห่งมาให้ติ๊ก
+   * (ติ๊กได้หลายแห่ง แล้วกด “เพิ่ม N แห่งลงแพลน” ทีเดียว)
+   */
+  const [placeQuery, setPlaceQuery] = useState("");
+  const [gHits, setGHits] = useState<PlaceCandidate[]>([]);
+  /** placeId ที่ติ๊กไว้ */
+  const [gSelected, setGSelected] = useState<string[]>([]);
   const [searching, setSearching] = useState(false);
-  const [manualName, setManualName] = useState("");
-  const [manualLink, setManualLink] = useState("");
+  /** backend ยังไม่ได้ตั้งค่า Google Places → ต้องบอกผู้ใช้ */
+  const [gConfigured, setGConfigured] = useState<boolean | null>(null);
   /** ชีต "เพิ่มสถานที่ด้วย AI" */
   const [aiSheetOpen, setAiSheetOpen] = useState(false);
 
@@ -238,9 +280,22 @@ export default function ManualTripPlanner({
   const [routeLoading, setRouteLoading] = useState(false);
   const [creating, setCreating] = useState(false);
 
-  // ── เข้าขั้นที่ 2: mount ช่องกรอกแยก commit (iOS) ──────────────────────
+  // ── ขั้นที่ 4: รถที่ใช้ + ค่าใช้จ่าย ─────────────────────────────────
+  /** รถที่เลือก (ใช้คำนวณค่าน้ำมัน/ค่าไฟ) */
+  const [vehicleKey, setVehicleKey] = useState<CostVehicleKey>("private_car");
+  /** ราคาต่อหน่วย (บาท/ลิตร หรือ บาท/kWh) — ดึงราคาสดมาให้ แก้เองได้ */
+  const [unitPriceText, setUnitPriceText] = useState("");
+  /** ผู้ใช้พิมพ์ราคาเองแล้ว → ห้ามระบบเติมราคาสดทับ */
+  const [unitPriceTouched, setUnitPriceTouched] = useState(false);
+  /** snapshot ราคาสดที่ดึงมา (ไว้บอกที่มาของราคา) */
+  const [fuelSnapshot, setFuelSnapshot] = useState<FuelPriceSnapshot | null>(null);
+  const [fuelLoading, setFuelLoading] = useState(false);
+  /** ค่าใช้จ่ายต่อจุด (บาท) — key = key ของ PlanPlace */
+  const [placeCosts, setPlaceCosts] = useState<Record<string, string>>({});
+
+  // ── เข้าขั้นที่มีช่องกรอก: mount ช่องกรอกแยก commit (iOS) ───────────────
   useEffect(() => {
-    if (step !== 2 || formReady) return;
+    if (!FORM_STEPS.includes(step) || formReady) return;
     // เลื่อนไปเฟรมถัดไป — ไม่อัปเดต state ระหว่างที่ React กำลัง render
     // (ให้ native view ของ commit แรกเข้าจอเสร็จก่อน ค่อย mount ช่องกรอก)
     const timer = setTimeout(() => {
@@ -252,11 +307,11 @@ export default function ManualTripPlanner({
   /**
    * เปลี่ยนขั้นตอน
    * -------------------------------------------------------------
-   * ออกจากขั้นที่ 2 → รีเซ็ตช่องกรอก เพื่อให้กลับเข้ามาแล้ว mount ใหม่
-   * (mount TextInput พร้อมกับส่วนอื่นของขั้นที่ 2 → iOS ค้าง)
+   * ออกจากขั้นที่มีช่องกรอก → รีเซ็ตช่องกรอก เพื่อให้กลับเข้ามาแล้ว mount ใหม่
+   * (mount TextInput พร้อมกับส่วนอื่น → iOS ค้าง)
    */
   const goStep = (next: Step) => {
-    if (next !== 2) setFormReady(false);
+    if (next !== step) setFormReady(false);
     setStep(next);
   };
 
@@ -321,104 +376,70 @@ export default function ManualTripPlanner({
     });
   };
 
-  // ── ค้นหาสถานที่ในทะเบียนของแอป ──────────────────────────────────────
-  const searchLocal = async () => {
-    const q = manualQuery.trim();
+  // ── ค้นหาสถานที่จาก Google Maps ───────────────────────────────────────
+  /**
+   * พิมพ์ค้นหา → ยิง `/places/verify` (Google Places Text Search ฝั่ง backend)
+   * -------------------------------------------------------------
+   * · คีย์ของ Google เป็น server-only → แอปยิงเองไม่ได้ ต้องผ่าน backend
+   * · ค้นไม่มีขอบเขตจังหวัด → ได้ผู้สมัครหลายแห่งมาให้ผู้ใช้ติ๊กเอง
+   */
+  const searchGooglePlaces = async () => {
+    const q = placeQuery.trim();
     if (!q) return;
     setSearching(true);
     try {
-      const hits = await findLocalPlaces({ name: q });
-      setLocalHits(hits);
+      const res = await verifyPlaceOnGoogle({ placeName: q });
+      setGConfigured(res.configured);
+      setGHits(res.candidates ?? []);
+      setGSelected([]);
     } catch {
-      setLocalHits([]);
+      setGHits([]);
+      setGConfigured(null);
     } finally {
       setSearching(false);
     }
   };
 
-  const addLocalHit = (hit: LocalPlace) => {
-    const coords =
-      hit.latitude != null && hit.longitude != null
-        ? { lat: hit.latitude, lng: hit.longitude }
-        : null;
-    setPlaces((prev) => [
-      ...prev,
-      {
-        key: `m-${hit.id}-${Date.now()}`,
-        name: hit.name,
-        address: [hit.community, hit.district, hit.province].filter(Boolean).join(" · ") || null,
-        coords,
-        source: "manual",
-        communityName: hit.community,
-        province: hit.province ?? null,
-      },
-    ]);
-    setManualQuery("");
-    setLocalHits([]);
+  /** ติ๊ก/เอาติ๊กผู้สมัคร (เลือกได้หลายแห่ง) */
+  const toggleGoogleHit = (placeId: string) => {
+    setGSelected((prev) =>
+      prev.includes(placeId)
+        ? prev.filter((id) => id !== placeId)
+        : [...prev, placeId]
+    );
   };
 
   /**
-   * ใส่สถานที่เอง: ชื่อ + ลิงก์ Google Maps (หาพิกัดให้อัตโนมัติ)
-   * -------------------------------------------------------------
-   * เพิ่มลงรายการ **ทันที** แล้วค่อยหาพิกัดเบื้องหลัง
-   * (เดิมรอ backend ก่อนเพิ่ม → หน้าจอดูเหมือนค้าง ปุ่มกดซ้ำไม่ได้)
+   * เพิ่มผู้สมัครที่ติ๊กไว้ลงแพลน (หลายแห่งพร้อมกัน)
+   * → ตัดชื่อที่ซ้ำกับที่มีอยู่แล้วออกก่อน
    */
-  const addManualPlace = () => {
-    const name = manualName.trim();
-    const link = manualLink.trim();
-    if (!name && !link) {
-      Alert.alert("ยังไม่ได้ใส่สถานที่", "พิมพ์ชื่อสถานที่ หรือวางลิงก์ Google Maps");
-      return;
-    }
-
-    const key = `m-manual-${Date.now()}`;
-    const label = name || "สถานที่ที่เพิ่มเอง";
-    setPlaces((prev) => [
-      ...prev,
-      { key, name: label, address: null, coords: null, source: "manual", resolving: true },
-    ]);
-    setManualName("");
-    setManualLink("");
-
-    // หาพิกัดเบื้องหลัง — ไม่บล็อกหน้าจอ
-    void (async () => {
-      try {
-        const resolved = await resolvePlaceCoords({
-          url: link || null,
-          text: link ? null : name,
+  const addGoogleHits = () => {
+    // คำนวณนอก updater — Date.now() ห้ามอยู่ในโค้ดที่รันตอน render (กฎ react-hooks/purity)
+    const stamp = Date.now();
+    const picked = gHits.filter((h) => gSelected.includes(h.placeId));
+    if (!picked.length) return;
+    setPlaces((prev) => {
+      const existing = new Set(prev.map((p) => p.name.trim().toLowerCase()));
+      const add: PlanPlace[] = [];
+      picked.forEach((h, i) => {
+        const nameKey = h.name.trim().toLowerCase();
+        if (!nameKey || existing.has(nameKey)) return;
+        existing.add(nameKey);
+        add.push({
+          key: `g-${stamp}-${i}`,
+          name: h.name,
+          address: h.address || null,
+          coords:
+            h.latitude != null && h.longitude != null
+              ? { lat: h.latitude, lng: h.longitude }
+              : null,
+          source: "google",
+          province: h.province ?? null,
         });
-        if (resolved) {
-          setPlaces((prev) =>
-            prev.map((p) =>
-              p.key === key
-                ? {
-                    ...p,
-                    name: p.name === "สถานที่ที่เพิ่มเอง" && resolved.label ? resolved.label : p.name,
-                    coords: { lat: resolved.lat, lng: resolved.lng },
-                    resolving: false,
-                  }
-                : p
-            )
-          );
-        } else {
-          setPlaces((prev) =>
-            prev.map((p) => (p.key === key ? { ...p, resolving: false } : p))
-          );
-          Alert.alert(
-            "ยังหาพิกัดไม่ได้",
-            "เพิ่มสถานที่แล้ว แต่ยังไม่มีพิกัด — จะไม่แสดงบนแผนที่ (พิมพ์ชื่อหรือวางลิงก์ Google Maps ที่หาพิกัดได้)"
-          );
-        }
-      } catch {
-        setPlaces((prev) =>
-          prev.map((p) => (p.key === key ? { ...p, resolving: false } : p))
-        );
-        Alert.alert(
-          "ยังหาพิกัดไม่ได้",
-          "เพิ่มสถานที่แล้ว แต่ยังไม่มีพิกัด — จะไม่แสดงบนแผนที่ (ต่อเน็ตใหม่แล้วลองใส่ลิงก์ Google Maps อีกครั้ง)"
-        );
-      }
-    })();
+      });
+      return add.length ? [...prev, ...add] : prev;
+    });
+    setGSelected([]);
   };
 
   const movePlace = (index: number, dir: -1 | 1) => {
@@ -633,6 +654,65 @@ export default function ManualTripPlanner({
     return () => clearTimeout(timer);
   }, [step, calcRoute]);
 
+  /**
+   * ดึงราคาน้ำมัน/ไฟสด (ขั้นที่ 4)
+   * -------------------------------------------------------------
+   * · ราคาสด = GET /trips/fuel-price (backend ไปอ่าน pttor.com)
+   * · ผู้ใช้แก้เองได้ เพราะราคาวันที่ไปเที่ยวอาจไม่ใช่ราคาวันนี้
+   * · ดึงไม่ได้ก็ไม่พังหน้าจอ — ให้ผู้ใช้กรอกเอง
+   */
+  useEffect(() => {
+    if (step !== 4) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void (async () => {
+        setFuelLoading(true);
+        const snap = await fetchFuelPrices();
+        if (cancelled) return;
+        setFuelSnapshot(snap);
+        setFuelLoading(false);
+      })();
+    }, 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [step]);
+
+  /**
+   * เติมราคาต่อหน่วยตามรถที่เลือก (จากราคาสดที่เพิ่งมา หรือที่มีอยู่แล้ว)
+   * -------------------------------------------------------------
+   * · เปลี่ยนรถ → ราคาต้องตามชนิดเชื้อเพลิงของรถคันใหม่
+   * · ถ้าผู้ใช้พิมพ์ราคาเองแล้ว → ไม่ทับ (ยกเว้นตอนเปลี่ยนรถ)
+   */
+  useEffect(() => {
+    if (unitPriceTouched) return;
+    const v = costVehicleByKey(vehicleKey);
+    const p = fuelPriceFromSnapshot(fuelSnapshot, v);
+    const timer = setTimeout(() => {
+      setUnitPriceText(p != null ? String(p) : "");
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [fuelSnapshot, vehicleKey, unitPriceTouched]);
+
+  /** เปลี่ยนรถ → ราคาหน่วยต้องตามชนิดเชื้อเพลิงของรถคันใหม่ */
+  const pickVehicle = (v: CostVehicleOption) => {
+    setVehicleKey(v.key);
+    // ปลดล็อกให้ราคาสดเติมราคาใหม่ให้อัตโนมัติ
+    setUnitPriceTouched(false);
+  };
+
+  /** ผู้ใช้แก้ราคาเอง → ห้ามระบบเติมทับ */
+  const editUnitPrice = (text: string) => {
+    setUnitPriceText(text);
+    setUnitPriceTouched(true);
+  };
+
+  /** แก้ค่าใช้จ่ายของจุดหนึ่ง */
+  const setPlaceCost = (key: string, text: string) => {
+    setPlaceCosts((prev) => ({ ...prev, [key]: text }));
+  };
+
   // ── สร้างแพลน ────────────────────────────────────────────────────────
   const createPlan = async () => {
     if (!origin) {
@@ -705,6 +785,8 @@ export default function ManualTripPlanner({
           coordinates: p.coords ?? undefined,
           distanceFromPrevKm: legIn?.km ?? null,
           note: p.address ?? undefined,
+          /** ค่าใช้จ่ายที่ผู้ใช้กรอกในหน้ายืนยันแพลน */
+          estimatedCost: Number(placeCosts[p.key]) || undefined,
         });
         clock = leave;
       });
@@ -738,15 +820,60 @@ export default function ManualTripPlanner({
         warnings: [],
       };
 
-      const fuelCost = Math.round(totalKm * 8);
+      // ── ค่าใช้จ่าย ────────────────────────────────────────────────
+      // ค่าเดินทางคำนวณจากรถที่เลือก + ราคาต่อหน่วย (ราคาสดที่ดึงมา/ที่ผู้ใช้แก้)
+      const fuelCost = Math.round(computeTravelCost(totalKm, vehicle, unitPrice));
+      // ค่าใช้จ่ายที่ผู้ใช้กรอกรายจุดในหน้ายืนยันแพลน
+      const activityCost = places.reduce(
+        (sum, p) => sum + (Number(placeCosts[p.key]) || 0),
+        0
+      );
+      const totalCost = fuelCost + activityCost;
       const budgetPerPerson = Number(budget) || 0;
+      // ผู้เดินทาง 1 คน → ค่าใช้จ่ายต่อคน = ค่าใช้จ่ายทั้งหมด (เหมือนที่ backend คิด)
+      const perPerson = Math.round(totalCost);
       const tripBudget: TripBudget = {
         lodging: 0,
         fuel: fuelCost,
         food: 0,
-        total: fuelCost,
-        perPerson: budgetPerPerson,
-        withinBudget: true,
+        activities: activityCost,
+        total: totalCost,
+        perPerson,
+        withinBudget: budgetPerPerson > 0 ? perPerson <= budgetPerPerson : true,
+      };
+
+      /** รถ + ที่มาของราคา (เก็บลงแพลน → อ่านกลับได้ในหน้าแพลน) */
+      const fuelPriceKey = vehicle.fuelPriceKey;
+      const fuelTypeLabel =
+        fuelPriceKey && fuelSnapshot?.labels?.[fuelPriceKey]
+          ? String(fuelSnapshot.labels[fuelPriceKey])
+          : fuelPriceKey ?? null;
+      const planVehicle: TripPlanVehicle = {
+        key: vehicle.key,
+        label: vehicle.fullLabel,
+        model: null,
+        kmPerLitre: vehicle.kmPerLitre,
+        fuelType: fuelTypeLabel,
+        fuelPricePerLitre: unitPrice || null,
+        fuelPriceSource: fuelSnapshot?.source ?? "ผู้ใช้กรอกเอง",
+        fuelPriceEffectiveDate: fuelSnapshot?.effectiveDate ?? undefined,
+        fuelPriceFetchedAt: fuelSnapshot?.fetchedAt ?? undefined,
+        fuelPriceIsEstimate: fuelSnapshot?.isEstimate ?? true,
+        fuelPriceText: unitPrice
+          ? `${formatBaht(unitPrice)} บาท/${vehicle.priceUnit === "kwh" ? "kWh" : "ลิตร"}`
+          : undefined,
+      };
+      const planFuel: TripPlan["fuel"] = {
+        fuelType: fuelTypeLabel,
+        pricePerLitre: unitPrice || null,
+        kmPerLitre: vehicle.kmPerLitre,
+        source: fuelSnapshot?.source ?? "ผู้ใช้กรอกเอง",
+        effectiveDate: fuelSnapshot?.effectiveDate ?? null,
+        fetchedAt: fuelSnapshot?.fetchedAt ?? null,
+        isEstimate: fuelSnapshot?.isEstimate ?? true,
+        text: unitPrice
+          ? `${formatBaht(unitPrice)} บาท/${vehicle.priceUnit === "kwh" ? "kWh" : "ลิตร"}`
+          : null,
       };
 
       const title =
@@ -780,6 +907,9 @@ export default function ManualTripPlanner({
         daysCount: 1,
         routeSource,
         routeCredit,
+        // รถ + ที่มาของราคา → อ่านกลับได้ในหน้าแพลน (tripPlanService แปลงกลับให้อยู่แล้ว)
+        vehicle: planVehicle,
+        fuel: planFuel,
         __meta: {
           appStatus: "draft",
           destinations: places.map((p) => p.name),
@@ -833,6 +963,8 @@ export default function ManualTripPlanner({
         endPointCoords: endPointCoords ?? undefined,
         routeSource,
         routeCredit,
+        vehicle: planVehicle,
+        fuel: planFuel,
       };
 
       addTrip(trip);
@@ -883,6 +1015,27 @@ export default function ManualTripPlanner({
     3: true,
     4: false,
   };
+
+  // ── ค่าใช้จ่าย (ขั้นที่ 4) ─────────────────────────────────────────────
+  /** รถที่เลือก (พร้อมค่าปริยายของรถคันนั้น) */
+  const vehicle = costVehicleByKey(vehicleKey);
+  /** ราคาต่อหน่วย (บาท/ลิตร หรือ บาท/kWh) */
+  const unitPrice = Number(unitPriceText) || 0;
+  /** ค่าเดินทาง (บาท) = ระยะ ÷ อัตราประสิทธิภาพ × ราคาต่อหน่วย */
+  const travelCost = computeTravelCost(route?.totalKm ?? 0, vehicle, unitPrice);
+  /** จำนวนลิตร/กิโลวัตต์ที่จะใช้ (ไว้แสดงใต้ราคา) */
+  const fuelLitres = computeFuelLitres(route?.totalKm ?? 0, vehicle);
+  const fuelKwh = computeKwh(route?.totalKm ?? 0, vehicle);
+  /** รวมค่าใช้จ่ายที่ผู้ใช้กรอกในแต่ละจุด */
+  const activitiesCost = places.reduce(
+    (sum, p) => sum + (Number(placeCosts[p.key]) || 0),
+    0
+  );
+  const grandTotal = travelCost + activitiesCost;
+  /** หน่วยของราคาที่ต้องกรอก */
+  const priceUnitLabel = vehicle.priceUnit === "kwh" ? "บาท/kWh" : "บาท/ลิตร";
+  /** งบต่อคนที่ผู้ใช้กรอกในขั้นที่ 3 */
+  const budgetAmount = Number(budget) || 0;
 
   // ขั้นที่ 1 ผ่านได้ตราบใดที่ “เลือกจุดเริ่มต้นแล้ว” — ไม่บังคับว่าต้องมีพิกัด
   // (ถ้าบังคับ ปุ่ม “ถัดไป” จะกดไม่ได้เลย → ผู้ใช้ติดค้างที่ขั้นที่ 1)
@@ -1169,24 +1322,27 @@ export default function ManualTripPlanner({
               </Text>
             </TouchableOpacity>
 
-            {/* ── ค้นหาสถานที่ / ใส่เอง (อยู่ใต้โฟลเดอร์) ───────── */}
+            {/* ── ค้นหาสถานที่จาก Google Maps (อยู่ใต้โฟลเดอร์) ── */}
             {formReady ? (
               <View>
-                <Text className="text-[12.5px] font-bold text-gray-900 mb-2">
-                  ค้นหาชื่อสถานที่ที่เคยบันทึกไว้ในแอป
+                <Text className="text-[12.5px] font-bold text-gray-900 mb-1">
+                  ค้นหาสถานที่จาก Google Maps
+                </Text>
+                <Text className="text-[11.5px] text-gray-500 mb-2 leading-5">
+                  พิมพ์ชื่อสถานที่ → เลือกได้หลายแห่งพร้อมกัน (ติ๊กที่ชื่อ แล้วกดเพิ่มลงแพลน)
                 </Text>
                 <View className="flex-row items-center">
                   <TextInput
-                    value={manualQuery}
-                    onChangeText={setManualQuery}
-                    onSubmitEditing={searchLocal}
-                    placeholder="พิมพ์ชื่อสถานที่"
+                    value={placeQuery}
+                    onChangeText={setPlaceQuery}
+                    onSubmitEditing={searchGooglePlaces}
+                    placeholder="เช่น วัดพระแก้ว ภูเก็ต"
                     placeholderTextColor="#9CA3AF"
                     returnKeyType="search"
                     className="flex-1 bg-white border border-gray-200 rounded-xl px-3 py-2.5 text-[13.5px] text-gray-900"
                   />
                   <TouchableOpacity
-                    onPress={searchLocal}
+                    onPress={searchGooglePlaces}
                     disabled={searching}
                     activeOpacity={0.8}
                     className="ml-2 bg-gray-900 rounded-xl px-3.5 py-2.5"
@@ -1199,72 +1355,74 @@ export default function ManualTripPlanner({
                   </TouchableOpacity>
                 </View>
 
-                {localHits.length ? (
-                  <View className="mt-2 bg-white border border-gray-200 rounded-2xl overflow-hidden">
-                    {localHits.map((h) => (
-                      <TouchableOpacity
-                        key={h.id}
-                        onPress={() => addLocalHit(h)}
-                        activeOpacity={0.8}
-                        className="flex-row items-center px-3.5 py-3 border-b border-gray-100"
-                      >
-                        <View className="flex-1">
-                          <Text className="text-[13px] font-semibold text-gray-900">
-                            {h.name}
-                          </Text>
-                          <Text className="text-[11px] text-gray-500" numberOfLines={1}>
-                            {[
-                              h.community,
-                              h.district,
-                              h.province,
-                              h.latitude != null ? "มีพิกัด" : "ยังไม่มีพิกัด",
-                            ]
-                              .filter(Boolean)
-                              .join(" · ")}
-                          </Text>
-                        </View>
-                        <PlusIcon size={18} color="#7C3AED" />
-                      </TouchableOpacity>
-                    ))}
+                {gConfigured === false ? (
+                  <View className="mt-2 bg-amber-50 border border-amber-100 rounded-xl px-3 py-2">
+                    <Text className="text-[11.5px] text-amber-800 leading-5">
+                      ยังค้นจาก Google Maps ไม่ได้ (เซิร์ฟเวอร์ยังไม่ได้ตั้งค่า Google
+                      Places) — เลือกจากโฟลเดอร์หรือใช้ปุ่ม “เพิ่มสถานที่ด้วย AI” แทน
+                    </Text>
                   </View>
                 ) : null}
 
-                <View className="mt-4 bg-white border border-gray-200 rounded-2xl p-4">
-                  <View className="flex-row items-center mb-2">
-                    <PencilSquareIcon size={14} color="#6B7280" />
-                    <Text className="text-[12.5px] font-bold text-gray-900 ml-1.5">
-                      หรือใส่สถานที่เอง
-                    </Text>
+                {gHits.length ? (
+                  <View className="mt-2 bg-white border border-gray-200 rounded-2xl overflow-hidden">
+                    {gHits.map((h) => {
+                      const on = gSelected.includes(h.placeId);
+                      return (
+                        <TouchableOpacity
+                          key={h.placeId}
+                          onPress={() => toggleGoogleHit(h.placeId)}
+                          activeOpacity={0.8}
+                          className="flex-row items-center px-3.5 py-3 border-b border-gray-100"
+                        >
+                          <View
+                            className={`w-5 h-5 rounded-md border items-center justify-center mr-2.5 ${
+                              on ? "bg-violet-600 border-violet-600" : "border-gray-300"
+                            }`}
+                          >
+                            {on ? (
+                              <CheckIcon size={13} color="#FFFFFF" />
+                            ) : null}
+                          </View>
+                          <View className="flex-1">
+                            <Text className="text-[13px] font-semibold text-gray-900">
+                              {h.name}
+                            </Text>
+                            <Text className="text-[11px] text-gray-500" numberOfLines={1}>
+                              {[
+                                h.address,
+                                h.province,
+                                h.latitude != null ? "มีพิกัด" : "ยังไม่มีพิกัด",
+                              ]
+                                .filter(Boolean)
+                                .join(" · ")}
+                            </Text>
+                          </View>
+                        </TouchableOpacity>
+                      );
+                    })}
+                    <TouchableOpacity
+                      onPress={addGoogleHits}
+                      disabled={!gSelected.length}
+                      activeOpacity={0.85}
+                      className={`flex-row items-center justify-center py-3 ${
+                        gSelected.length ? "bg-violet-600" : "bg-gray-100"
+                      }`}
+                    >
+                      <PlusIcon
+                        size={16}
+                        color={gSelected.length ? "#FFFFFF" : "#9CA3AF"}
+                      />
+                      <Text
+                        className={`text-[13px] font-bold ml-1 ${
+                          gSelected.length ? "text-white" : "text-gray-400"
+                        }`}
+                      >
+                        เพิ่ม {gSelected.length} แห่งลงแพลน
+                      </Text>
+                    </TouchableOpacity>
                   </View>
-                  <TextInput
-                    value={manualName}
-                    onChangeText={setManualName}
-                    placeholder="ชื่อสถานที่"
-                    placeholderTextColor="#9CA3AF"
-                    className="bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 text-[13.5px] text-gray-900 mb-2"
-                  />
-                  <TextInput
-                    value={manualLink}
-                    onChangeText={setManualLink}
-                    placeholder="ลิงก์ Google Maps (ถ้ามี)"
-                    placeholderTextColor="#9CA3AF"
-                    autoCapitalize="none"
-                    className="bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 text-[13.5px] text-gray-900 mb-2"
-                  />
-                  <TouchableOpacity
-                    onPress={addManualPlace}
-                    activeOpacity={0.85}
-                    className="flex-row items-center justify-center bg-violet-600 rounded-xl py-2.5"
-                  >
-                    <PlusIcon size={16} color="#FFFFFF" />
-                    <Text className="text-white text-[13px] font-bold ml-1">
-                      เพิ่มสถานที่
-                    </Text>
-                  </TouchableOpacity>
-                  <Text className="text-[11px] text-gray-400 mt-1.5">
-                    เพิ่มเข้ารายการทันที — ระบบจะหาพิกัดให้ในเบื้องหลัง
-                  </Text>
-                </View>
+                ) : null}
               </View>
             ) : (
               // ช่องกรอกยังไม่ mount — รอ commit ถัดไป (กัน iOS ค้างตอนเข้าขั้นที่ 2)
@@ -1289,7 +1447,7 @@ export default function ManualTripPlanner({
               {places.length === 0 ? (
                 <View className="bg-gray-50 border border-dashed border-gray-300 rounded-2xl p-4">
                   <Text className="text-[12.5px] text-gray-500 text-center">
-                    ยังไม่ได้เลือกสถานที่ — เลือกจากโฟลเดอร์ หรือใส่เอง
+                  ยังไม่ได้เลือกสถานที่ — เลือกจากโฟลเดอร์ หรือค้นใน Google Maps
                   </Text>
                 </View>
               ) : (
@@ -1315,7 +1473,8 @@ export default function ManualTripPlanner({
                             ? "มีพิกัด"
                             : "ยังไม่มีพิกัด"}
                           {p.source === "clip" ? " · จากคลิปในโฟลเดอร์" : ""}
-                          {p.source === "manual" ? " · ใส่เอง" : ""}
+                          {p.source === "google" ? " · จาก Google Maps" : ""}
+                          {p.source === "manual" ? " · เพิ่มด้วย AI" : ""}
                           {p.province ? ` · ${p.province}` : ""}
                         </Text>
                       </View>
@@ -1418,28 +1577,35 @@ export default function ManualTripPlanner({
               })}
             </View>
 
-            <Text className="text-[13px] font-bold text-gray-900 mt-4 mb-2">
-              ชื่อแพลน (ถ้าไม่ใส่จะตั้งให้อัตโนมัติ)
-            </Text>
-            <TextInput
-              value={planName}
-              onChangeText={setPlanName}
-              placeholder={`ทริป ${places[0]?.name ?? "ของฉัน"}`}
-              placeholderTextColor="#9CA3AF"
-              className="bg-white border border-gray-200 rounded-xl px-3 py-2.5 text-[13.5px] text-gray-900 mb-4"
-            />
+            {/* ช่องกรอกของขั้นที่ 3 — mount แยก commit (กัน iOS ค้างตอนเปลี่ยนขั้น) */}
+            {formReady ? (
+              <View>
+                <Text className="text-[13px] font-bold text-gray-900 mt-4 mb-2">
+                  ชื่อแพลน (ถ้าไม่ใส่จะตั้งให้อัตโนมัติ)
+                </Text>
+                <TextInput
+                  value={planName}
+                  onChangeText={setPlanName}
+                  placeholder={`ทริป ${places[0]?.name ?? "ของฉัน"}`}
+                  placeholderTextColor="#9CA3AF"
+                  className="bg-white border border-gray-200 rounded-xl px-3 py-2.5 text-[13.5px] text-gray-900 mb-4"
+                />
 
-            <Text className="text-[13px] font-bold text-gray-900 mb-2">
-              งบต่อคน (ถ้ายังไม่รู้ เว้นว่างไว้ได้)
-            </Text>
-            <TextInput
-              value={budget}
-              onChangeText={setBudget}
-              placeholder="เช่น 1500"
-              placeholderTextColor="#9CA3AF"
-              keyboardType="numeric"
-              className="bg-white border border-gray-200 rounded-xl px-3 py-2.5 text-[13.5px] text-gray-900"
-            />
+                <Text className="text-[13px] font-bold text-gray-900 mb-2">
+                  งบต่อคน (ถ้ายังไม่รู้ เว้นว่างไว้ได้)
+                </Text>
+                <TextInput
+                  value={budget}
+                  onChangeText={setBudget}
+                  placeholder="เช่น 1500"
+                  placeholderTextColor="#9CA3AF"
+                  keyboardType="numeric"
+                  className="bg-white border border-gray-200 rounded-xl px-3 py-2.5 text-[13.5px] text-gray-900"
+                />
+              </View>
+            ) : (
+              <View className="h-[130px] mt-4" />
+            )}
           </View>
         ) : null}
 
@@ -1493,6 +1659,85 @@ export default function ManualTripPlanner({
               ) : null}
             </View>
 
+            {/* ── รถที่ใช้ + ราคาต่อหน่วย (ไว้คำนวณค่าเดินทาง) ───── */}
+            <View className="mt-3 bg-white border border-gray-200 rounded-2xl p-4">
+              <View className="flex-row items-center mb-2">
+                <TruckIcon size={15} color="#2563EB" />
+                <Text className="text-[13px] font-bold text-gray-900 ml-1.5">
+                  รถที่ใช้
+                </Text>
+              </View>
+              <View className="flex-row flex-wrap">
+                {COST_VEHICLES.map((v) => {
+                  const on = vehicleKey === v.key;
+                  return (
+                    <TouchableOpacity
+                      key={v.key}
+                      onPress={() => pickVehicle(v)}
+                      activeOpacity={0.8}
+                      className={`mr-2 mb-2 px-3 py-2 rounded-full border ${
+                        on ? "bg-blue-600 border-blue-600" : "bg-white border-gray-200"
+                      }`}
+                    >
+                      <Text
+                        className={`text-[12.5px] font-bold ${
+                          on ? "text-white" : "text-gray-600"
+                        }`}
+                      >
+                        {v.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <Text className="text-[11.5px] text-gray-500 leading-5">
+                {vehicle.usesFuel
+                  ? `ประหยัดประมาณ ${vehicle.kmPerLitre} กม./ลิตร`
+                  : vehicle.key === "ev"
+                  ? `ใช้ประมาณ ${vehicle.energyPer100km} kWh ต่อ 100 กม.`
+                  : "ขนส่งสาธารณะ — ไม่คิดค่าเดินทางอัตโนมัติ"}
+              </Text>
+
+              {vehicle.priceUnit ? (
+                formReady ? (
+                  <View className="mt-3">
+                    <Text className="text-[12.5px] font-bold text-gray-900 mb-1.5">
+                      ราคา{vehicle.priceUnit === "kwh" ? "ค่าไฟ" : "น้ำมัน"} ({priceUnitLabel})
+                    </Text>
+                    <View className="flex-row items-center">
+                      <TextInput
+                        value={unitPriceText}
+                        onChangeText={editUnitPrice}
+                        placeholder="เช่น 32.50"
+                        placeholderTextColor="#9CA3AF"
+                        keyboardType="decimal-pad"
+                        className="flex-1 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 text-[13.5px] text-gray-900"
+                      />
+                      {fuelLoading ? (
+                        <ActivityIndicator
+                          size="small"
+                          color="#6B7280"
+                          style={{ marginLeft: 8 }}
+                        />
+                      ) : null}
+                    </View>
+                    <Text className="text-[11px] text-gray-400 mt-1.5">
+                      {fuelSnapshot
+                        ? `ราคาสดจาก ${fuelSnapshot.source}${
+                            fuelSnapshot.effectiveDate
+                              ? ` (${fuelSnapshot.effectiveDate})`
+                              : ""
+                          } — แก้เองได้`
+                        : "ดึงราคาสดไม่ได้ — กรอกเองได้"}
+                    </Text>
+                  </View>
+                ) : (
+                  // ช่องกรอกยังไม่ mount — รอ commit ถัดไป (กัน iOS ค้าง)
+                  <View className="h-[96px] mt-3" />
+                )
+              ) : null}
+            </View>
+
             <View className="mt-3 bg-white border border-gray-200 rounded-2xl overflow-hidden">
               {/* จุดเริ่มต้นที่บันทึกไว้ — แถวแรกของแพลน */}
               <View className="flex-row items-center px-3.5 py-2.5 border-b border-gray-100 bg-emerald-50/60">
@@ -1510,14 +1755,40 @@ export default function ManualTripPlanner({
               {places.map((p, i) => (
                 <View
                   key={p.key}
-                  className="flex-row items-center px-3.5 py-2.5 border-b border-gray-100"
+                  className="px-3.5 py-2.5 border-b border-gray-100"
                 >
-                  <View className="w-6 h-6 rounded-full bg-violet-100 items-center justify-center">
-                    <Text className="text-[11px] font-black text-violet-700">{i + 1}</Text>
+                  <View className="flex-row items-center">
+                    <View className="w-6 h-6 rounded-full bg-violet-100 items-center justify-center">
+                      <Text className="text-[11px] font-black text-violet-700">{i + 1}</Text>
+                    </View>
+                    <Text
+                      className="text-[13px] font-semibold text-gray-900 ml-2 flex-1"
+                      numberOfLines={1}
+                    >
+                      {p.name}
+                    </Text>
                   </View>
-                  <Text className="text-[13px] font-semibold text-gray-900 ml-2 flex-1" numberOfLines={1}>
-                    {p.name}
-                  </Text>
+
+                  {/* ค่าใช้จ่ายของจุดนี้ (บาท) */}
+                  {formReady ? (
+                    <View className="flex-row items-center mt-2 ml-8">
+                      <Text className="text-[11.5px] text-gray-500 flex-1">
+                        ค่าใช้จ่ายที่จุดนี้
+                      </Text>
+                      <TextInput
+                        value={placeCosts[p.key] ?? ""}
+                        onChangeText={(t) => setPlaceCost(p.key, t)}
+                        placeholder="0"
+                        placeholderTextColor="#9CA3AF"
+                        keyboardType="numeric"
+                        className="w-24 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5 text-[13px] text-gray-900 text-right"
+                      />
+                      <Text className="text-[11.5px] text-gray-500 ml-1.5">บาท</Text>
+                    </View>
+                  ) : (
+                    // ช่องกรอกยังไม่ mount — รอ commit ถัดไป (กัน iOS ค้าง)
+                    <View className="h-[32px] mt-2 ml-8" />
+                  )}
                 </View>
               ))}
               <TouchableOpacity
@@ -1563,6 +1834,59 @@ export default function ManualTripPlanner({
                 คำนวณเส้นทางใหม่
               </Text>
             </TouchableOpacity>
+
+            {/* ── สรุปค่าใช้จ่าย ─────────────────────────────────── */}
+            <View className="mt-2 bg-white border border-gray-200 rounded-2xl p-4">
+              <Text className="text-[13px] font-bold text-gray-900 mb-2">
+                สรุปค่าใช้จ่าย
+              </Text>
+
+              <View className="flex-row items-center justify-between py-1">
+                <Text className="text-[12.5px] text-gray-600">
+                  ค่าเดินทาง ({vehicle.fullLabel})
+                </Text>
+                <Text className="text-[12.5px] font-bold text-gray-900">
+                  {formatBaht(travelCost)} บาท
+                </Text>
+              </View>
+              {fuelLitres != null ? (
+                <Text className="text-[11px] text-gray-400">
+                  ใช้ประมาณ {fuelLitres} ลิตร · {kmText(route?.totalKm ?? 0)}
+                </Text>
+              ) : fuelKwh != null ? (
+                <Text className="text-[11px] text-gray-400">
+                  ใช้ประมาณ {fuelKwh} kWh · {kmText(route?.totalKm ?? 0)}
+                </Text>
+              ) : null}
+
+              <View className="flex-row items-center justify-between py-1">
+                <Text className="text-[12.5px] text-gray-600">
+                  ค่าใช้จ่ายที่จุดต่าง ๆ ({places.length} จุด)
+                </Text>
+                <Text className="text-[12.5px] font-bold text-gray-900">
+                  {formatBaht(activitiesCost)} บาท
+                </Text>
+              </View>
+
+              <View className="h-px bg-gray-100 my-2" />
+
+              <View className="flex-row items-center justify-between">
+                <Text className="text-[13px] font-bold text-gray-900">รวม</Text>
+                <Text className="text-[16px] font-black text-violet-700">
+                  {formatBaht(grandTotal)} บาท
+                </Text>
+              </View>
+              {budgetAmount > 0 ? (
+                <Text
+                  className={`text-[11.5px] mt-1 ${
+                    grandTotal <= budgetAmount ? "text-emerald-600" : "text-red-600"
+                  }`}
+                >
+                  งบต่อคนที่ตั้งไว้ {formatBaht(budgetAmount)} บาท ·{" "}
+                  {grandTotal <= budgetAmount ? "อยู่ในงบ" : "เกินงบ"}
+                </Text>
+              ) : null}
+            </View>
           </View>
         ) : null}
       </ScrollView>

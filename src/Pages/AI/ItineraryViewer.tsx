@@ -716,6 +716,26 @@ export default function ItineraryViewer({ tripId, onBack, onPostCheckin }: Itine
               <Text className="text-gray-800 text-[12.5px] font-medium">{(val as number).toLocaleString()} ฿</Text>
             </View>
           ))}
+          {/* ค่าใช้จ่ายที่ผู้ใช้กรอกรายจุด (แพลนที่ทำเอง) — มีเฉพาะที่กรอกไว้ */}
+          {b.activities ? (
+            <View className="flex-row justify-between mb-1">
+              <Text className="text-gray-600 text-[12.5px]">ค่าใช้จ่ายที่จุดต่าง ๆ</Text>
+              <Text className="text-gray-800 text-[12.5px] font-medium">
+                {b.activities.toLocaleString()} ฿
+              </Text>
+            </View>
+          ) : null}
+          {/* รถที่ใช้ + ราคาที่คิด (แพลนที่ทำเอง) */}
+          {trip.vehicle ? (
+            <Text className="text-[11px] text-gray-500 mt-1">
+              รถ: {trip.vehicle.label}
+              {trip.vehicle.fuelPricePerLitre
+                ? ` · ${trip.vehicle.fuelPricePerLitre.toLocaleString()} ฿/${
+                    trip.vehicle.key === "ev" ? "kWh" : "ลิตร"
+                  }`
+                : ""}
+            </Text>
+          ) : null}
           <View className="h-px bg-gray-200 my-2" />
           <View className="flex-row justify-between items-center">
             <Text className="text-gray-900 font-bold text-[14px]">รวม</Text>

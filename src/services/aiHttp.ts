@@ -243,7 +243,16 @@ export async function aiFetch<T>(opts: AiFetchOptions): Promise<T> {
     // AbortError = our timeout; anything else = the request never landed
     // (wrong host, backend down, CORS, DNS).
     const isAbort = err?.name === "AbortError" || err?.name === "TimeoutError";
-    const kind: AiErrorKind = isAbort ? "timeout" : "network";
+    /**
+     * React Native (iOS) ไม่โยน AbortError เวลา fetch ถูก abort
+     * → โยนเป็น TypeError "Network request failed" แทน
+     *
+     * ถ้าเวลาที่ใช้ไปถึงงบเวลาของเรา = น่าจะเป็น timeout ของเราเอง
+     * (เซิร์ฟเวอร์ยังทำงานอยู่ แค่ช้าเกินงบ) → ต้องบอกผู้ใช้ว่า "หมดเวลารอ"
+     * ไม่ใช่ "ต่อเซิร์ฟเวอร์ไม่ได้" (ซึ่งทำให้เขาไปไล่เช็คว่า backend ตายไปหรือเปล่า)
+     */
+    const hitBudget = Date.now() - startedAt >= timeoutMs - 500;
+    const kind: AiErrorKind = isAbort || hitBudget ? "timeout" : "network";
     const message = describeError(kind, null, String(err?.message ?? ""), url, timeoutMs);
 
     record(finish(null, "error", truncate(String(err?.message ?? ""), 2000), null, kind, message));

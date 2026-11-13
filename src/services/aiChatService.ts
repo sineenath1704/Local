@@ -1,4 +1,4 @@
-import { API_TIMEOUT_MS } from "./apiConfig";
+import { API_TIMEOUT_MS, AI_CHAT_TIMEOUT_MS } from "./apiConfig";
 import { aiFetch, AiError, AiFetchOptions, toastAiError } from "./aiHttp";
 import type {
   PlaceChoice,
@@ -378,7 +378,7 @@ export async function requestDiscoveryPlaces(opts: {
       excludeNames: opts.excludeNames,
       aiPicks: opts.aiPicks ? true : undefined,
     },
-    timeoutMs: API_TIMEOUT_MS * 5,
+    timeoutMs: AI_CHAT_TIMEOUT_MS,
   });
 
   if (typeof data?.reply !== "string") {
@@ -390,7 +390,7 @@ export async function requestDiscoveryPlaces(opts: {
       label: "ai-chat/discovery",
       url: "",
       durationMs: 0,
-      timeoutMs: API_TIMEOUT_MS * 5,
+      timeoutMs: AI_CHAT_TIMEOUT_MS,
     });
   }
 
@@ -504,7 +504,7 @@ export async function sendChat(
       label: "ai-chat",
       url: "",
       durationMs: 0,
-      timeoutMs: API_TIMEOUT_MS * 3,
+      timeoutMs: AI_CHAT_TIMEOUT_MS,
     });
   }
   // ส่ง token ทุกครั้งที่มี session — ไม่ใช่เฉพาะโหมด host-self
@@ -541,7 +541,7 @@ export async function sendChat(
       planContext: opts.planContext ?? undefined,
       discoveryDismissed: opts.discoveryDismissed ? true : undefined,
     },
-    timeoutMs: API_TIMEOUT_MS * 3,
+    timeoutMs: AI_CHAT_TIMEOUT_MS,
   });
   if (typeof data?.reply !== "string") {
     // 2xx but the payload isn't what we expect — record it rather than guess.
@@ -553,7 +553,7 @@ export async function sendChat(
       label: "ai-chat",
       url: "",
       durationMs: 0,
-      timeoutMs: API_TIMEOUT_MS * 3,
+      timeoutMs: AI_CHAT_TIMEOUT_MS,
     });
   }
   const placeCandidates = parsePlaceCandidates(data.placeCandidates);

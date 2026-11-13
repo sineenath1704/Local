@@ -1,10 +1,21 @@
 import React, { useMemo, useState } from "react";
-import { View, Text, TouchableOpacity, Linking, Platform } from "react-native";
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  Linking,
+  Platform,
+  Alert,
+  ScrollView,
+} from "react-native";
 import { requireOptionalNativeModule } from "expo";
 import {
   MapPinIcon,
   ArrowTopRightOnSquareIcon,
   ExclamationTriangleIcon,
+  ClockIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
 } from "react-native-heroicons/outline";
 
 /**
@@ -29,6 +40,10 @@ export interface RouteMapStop {
 
 /** ขาเส้นทาง (geometry มาจาก OSRM หรือค่าประมาณ) */
 export interface RouteMapLeg {
+  /** index ของจุดต้นทางใน [จุดเริ่มต้น, ...จุดแวะ, จุดสิ้นสุด] */
+  fromIndex?: number;
+  /** index ของจุดปลายทางในชุดเดียวกัน */
+  toIndex?: number;
   km?: number;
   minutes?: number;
   source?: string;
@@ -144,6 +159,8 @@ function TripRouteMap({
   routeCredit,
 }: TripRouteMapProps) {
   const [layout, setLayout] = useState({ width: 0, height });
+  /** ซ้อนการ์ด "เวลาขับแต่ละขา" บนแผนที่ — ย่อ/ขยายได้ */
+  const [legsOpen, setLegsOpen] = useState(true);
 
   /** expo-maps มี native module ไหม (null = รันใน Expo Go) */
   const mapsAvailable = useMemo(() => {
@@ -244,23 +261,100 @@ function TripRouteMap({
     return fitCamera(all, layout.width, layout.height);
   }, [startCoords, endCoords, stopList, layout.width, layout.height]);
 
-  /** ลิงก์เปิดใน Google Maps (เส้นทางจริงของ Google — ผู้ใช้คุ้นเคย) */
+  /**
+   * ป้ายของแต่ละจุด เรียงตาม index ที่ `legs` อ้างถึง
+   * -------------------------------------------------------------
+   * `legs[].fromIndex/toIndex` อ้างถึงตำแหน่งใน array จุดต้นฉบับ
+   * [จุดเริ่มต้น, ...จุดแวะ, จุดสิ้นสุด] → สร้าง map ที่ index เดียวกัน
+   * (ใช้ `stops` ตัวเต็ม ไม่ใช่ตัวที่กรองพิกัดแล้ว เพื่อให้ index ไม่เลื่อน)
+   */
+  const stopNameByIndex = useMemo(() => {
+    const m = new Map<number, string>();
+    m.set(0, startPoint?.label ?? "จุดเริ่มต้น");
+    stops.forEach((s, i) => m.set(i + 1, s.name));
+    m.set(stops.length + 1, endPoint?.label ?? "จุดสิ้นสุด");
+    return m;
+  }, [startPoint?.label, endPoint?.label, stops]);
+
+  /** เวลาขับของแต่ละขา (ซ้อนบนแผนที่) */
+  const legRows = useMemo(
+    () =>
+      legs
+        .map((leg, i) => {
+          const fromIdx = leg.fromIndex ?? 0;
+          const toIdx = leg.toIndex ?? fromIdx + 1;
+          return {
+            id: `leg-${i}`,
+            from: stopNameByIndex.get(fromIdx) ?? `จุดที่ ${fromIdx}`,
+            to: stopNameByIndex.get(toIdx) ?? `จุดที่ ${toIdx}`,
+            km: typeof leg.km === "number" ? leg.km : null,
+            minutes: typeof leg.minutes === "number" ? leg.minutes : null,
+          };
+        })
+        .filter((r) => r.minutes != null || r.km != null),
+    [legs, stopNameByIndex]
+  );
+
+  /** เวลารวมทุกขา (นาที) + ระยะรวม (กม.) */
+  const legTotals = useMemo(() => {
+    let minutes = 0;
+    let km = 0;
+    legRows.forEach((r) => {
+      minutes += r.minutes ?? 0;
+      km += r.km ?? 0;
+    });
+    return { minutes: Math.round(minutes), km: Math.round(km * 10) / 10 };
+  }, [legRows]);
+
+  /**
+   * เปิดใน Google Maps — ต้องโชว์เส้นทางครบทุกจุด
+   * -------------------------------------------------------------
+   * · ใช้รูปแบบ URL ตามที่ Google กำหนด (พิกัดคั่นด้วย `,` · จุดกลางคั่นด้วย `|`)
+   * · ตัดพิกัดที่ไม่ใช่ตัวเลข / เป็น (0,0) ออกก่อน
+   *   (เดิมใส่พิกัดเพี้ยนลงไปด้วย → Google หาเส้นทางไม่เจอ
+   *    เลยเปิดมาแล้วเห็นแค่ข้อความ ไม่มีแผนที่ขึ้น)
+   * · Google รับจุดกลางได้สูงสุด 9 จุด → เกินให้ตัดทิ้งพร้อมบอกผู้ใช้
+   */
   const openInGoogleMaps = () => {
-    const points: { lat: number; lng: number }[] = [];
-    if (startCoords) points.push(startCoords);
-    points.push(...stopList.map((s) => s.coords!));
-    if (endCoords) points.push(endCoords);
-    if (!points.length) return;
+    const pts: { lat: number; lng: number }[] = [];
+    const push = (c?: { lat: number; lng: number } | null) => {
+      if (!c) return;
+      if (!Number.isFinite(c.lat) || !Number.isFinite(c.lng)) return;
+      if (c.lat === 0 && c.lng === 0) return;
+      pts.push(c);
+    };
+    push(startCoords);
+    stopList.forEach((s) => push(s.coords));
+    push(endCoords);
+
+    if (pts.length < 2) {
+      Alert.alert(
+        "ยังเปิดเส้นทางไม่ได้",
+        "ต้องมีจุดที่มีพิกัดอย่างน้อย 2 จุด (จุดเริ่มต้น + จุดแวะ) จึงจะเปิดเส้นทางใน Google Maps ได้"
+      );
+      return;
+    }
+
     const fmt = (p: { lat: number; lng: number }) => `${p.lat},${p.lng}`;
-    const origin = fmt(points[0]);
-    const destination = fmt(points[points.length - 1]);
-    const waypoints = points.slice(1, -1).map(fmt).join("|");
+    const MAX_WAYPOINTS = 9;
+    const origin = fmt(pts[0]);
+    const destination = fmt(pts[pts.length - 1]);
+    const mid = pts.slice(1, -1);
+    const dropped = Math.max(0, mid.length - MAX_WAYPOINTS);
+    const waypoints = mid.slice(0, MAX_WAYPOINTS).map(fmt).join("|");
     const url =
-      `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(origin)}` +
-      `&destination=${encodeURIComponent(destination)}` +
-      (waypoints ? `&waypoints=${encodeURIComponent(waypoints)}` : "") +
+      `https://www.google.com/maps/dir/?api=1&origin=${origin}` +
+      `&destination=${destination}` +
+      (waypoints ? `&waypoints=${waypoints}` : "") +
       `&travelmode=driving`;
     Linking.openURL(url).catch(() => undefined);
+    if (dropped > 0) {
+      Alert.alert(
+        "เปิดได้แค่บางส่วน",
+        `Google Maps รับจุดกลางได้สูงสุด ${MAX_WAYPOINTS} จุด — เส้นทางนี้มี ${mid.length} จุดกลาง\n` +
+          `จึงตัดไป ${dropped} จุด (ดูเส้นทางครบทั้งหมดได้ในแผนที่ในแอป)`
+      );
+    }
   };
 
   /** แผนที่สำรอง — ใช้เมื่อไม่มี native module หรือแผนที่พัง */
@@ -369,6 +463,62 @@ function TripRouteMap({
             </Text>
           </View>
         )}
+
+        {/* ซ้อนบนแผนที่: เวลาขับของแต่ละขา (ย่อ/ขยายได้) */}
+        {showMap && legRows.length ? (
+          <View
+            pointerEvents="box-none"
+            style={{
+              position: "absolute",
+              top: 8,
+              left: 8,
+              maxWidth: "78%",
+            }}
+          >
+            <View className="bg-white/95 rounded-xl border border-gray-200 overflow-hidden">
+              <TouchableOpacity
+                onPress={() => setLegsOpen((v) => !v)}
+                activeOpacity={0.8}
+                className="flex-row items-center px-2.5 py-1.5 bg-gray-50"
+              >
+                <ClockIcon size={12} color="#4B5563" />
+                <Text className="text-[11px] font-bold text-gray-700 ml-1 flex-1">
+                  เวลาขับแต่ละขา
+                  {legTotals.minutes ? ` · รวม ${legTotals.minutes} นาที` : ""}
+                </Text>
+                {legsOpen ? (
+                  <ChevronUpIcon size={13} color="#6B7280" />
+                ) : (
+                  <ChevronDownIcon size={13} color="#6B7280" />
+                )}
+              </TouchableOpacity>
+              {legsOpen ? (
+                <ScrollView
+                  style={{ maxHeight: Math.max(80, height * 0.45) }}
+                  showsVerticalScrollIndicator={false}
+                >
+                  {legRows.map((r) => (
+                    <View
+                      key={r.id}
+                      className="flex-row items-center px-2.5 py-1 border-t border-gray-100"
+                    >
+                      <Text
+                        className="text-[10.5px] text-gray-600 flex-1"
+                        numberOfLines={1}
+                      >
+                        {r.from} → {r.to}
+                      </Text>
+                      <Text className="text-[10.5px] font-bold text-gray-800 ml-2">
+                        {r.minutes != null ? `${r.minutes} นาที` : "-"}
+                        {r.km != null ? ` · ${r.km} กม.` : ""}
+                      </Text>
+                    </View>
+                  ))}
+                </ScrollView>
+              ) : null}
+            </View>
+          </View>
+        ) : null}
       </View>
 
       {/* คำอธิบายที่มาของข้อมูล + ปุ่มเปิดใน Google Maps */}
