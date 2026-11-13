@@ -11,6 +11,7 @@ import {
   ActivityIndicator,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   ArrowLeftIcon,
   MapPinIcon,
@@ -165,6 +166,14 @@ function minutesText(mins: number): string {
   return m ? `${h} ชม. ${m} นาที` : `${h} ชม.`;
 }
 
+/**
+ * คีย์เก็บแท็บที่ผู้ใช้เลือกไว้ล่าสุด
+ * -------------------------------------------------------------
+ * กลับมาที่หน้าขั้นที่ 2 แล้วให้สวิฟไปแท็บเดิมทันที
+ * (ไม่ใช่เริ่มที่ "จากโฟลเดอร์" ทุกครั้ง)
+ */
+const PLACE_TAB_KEY = "trip_planner_place_tab";
+
 export default function ManualTripPlanner({
   onBack,
   onCreated,
@@ -250,6 +259,25 @@ export default function ManualTripPlanner({
     }, 0);
     return () => clearTimeout(timer);
   }, [placeTab, manualReady]);
+
+  // ── กู้แท็บที่ผู้ใช้เลือกไว้ล่าสุด ────────────────────────────────────
+  // กลับมาที่หน้านี้ (ออกจากหน้าแล้วกลับเข้ามาใหม่ / ปิดแอปแล้วเปิดใหม่)
+  // → สวิฟไปแท็บเดิมทันที ไม่ใช่เริ่มที่ "จากโฟลเดอร์" ทุกครั้ง
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const saved = await AsyncStorage.getItem(PLACE_TAB_KEY);
+        if (cancelled || saved !== "manual") return;
+        setPlaceTab("manual");
+      } catch {
+        // อ่านไม่ได้ → ใช้ค่าเริ่มต้น "จากโฟลเดอร์" ไปก่อน
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // ── โหลดโฟลเดอร์ของฉัน (ครั้งเดียว) ─────────────────────────────────
   useEffect(() => {
@@ -1067,6 +1095,8 @@ export default function ManualTripPlanner({
                       // (iOS: mount พร้อมกับ commit ที่ถอดแท็บเดิมออก → แอปค้าง)
                       if (key === "folder") setManualReady(false);
                       setPlaceTab(key);
+                      // จำแท็บไว้ → กลับมาหน้านี้แล้วสวิฟไปแท็บเดิม
+                      void AsyncStorage.setItem(PLACE_TAB_KEY, key).catch(() => {});
                     }}
                     activeOpacity={0.8}
                     className={`flex-1 flex-row items-center justify-center py-2 rounded-lg ${
@@ -1094,7 +1124,7 @@ export default function ManualTripPlanner({
             >
               <SparklesIcon size={18} color="#FFFFFF" />
               <Text className="text-white text-[13.5px] font-bold ml-1.5">
-                เพิ่มสถานที่ด้วยเอไAI
+                เพิ่มสถานที่ด้วย AI
               </Text>
             </TouchableOpacity>
 
