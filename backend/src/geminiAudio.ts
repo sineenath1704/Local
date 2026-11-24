@@ -1,4 +1,5 @@
 import { config, isGeminiConfigured } from "./config";
+import { callAiText } from "./aiStream";
 
 /**
  * ถอดเสียงพูดสั้น ๆ ด้วย Gemini (สำหรับปุ่มไมค์ในหน้าแปลภาษา)
@@ -75,7 +76,7 @@ export function normalizeAudioMime(mimeType?: string): string {
  * คืน `ok: false` เมื่อเรียกไม่สำเร็จ (ไม่มีคีย์ / เน็ตล่ม / โมเดลตอบไม่ใช่ JSON)
  * และ `ok: true` พร้อม text = "" เมื่อไฟล์นั้นไม่มีเสียงพูดจริง ๆ
  */
-export async function transcribeAudio(
+async function transcribeAudioViaGemini(
   audioBase64: string,
   mimeType?: string
 ): Promise<AudioTranscribeResult> {
@@ -165,6 +166,113 @@ export async function transcribeAudio(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * ถอดเสียงผ่านโมเดลเกตเวย์ (MiniMax) — ทางสำรองเมื่อ Gemini ใช้ไม่ได้
+ * -------------------------------------------------------------
+ * · Gemini ยังเป็นตัวหลัก — ค่านี้ทำงานเฉพาะตอนที่ Gemini ล้ม
+ * · เกตเวย์เป็น Anthropic-compatible → ส่งไฟล์เสียงเป็นบล็อก base64
+ *   ถ้าเกตเวย์/โมเดลไม่รองรับไฟล์เสียงจะตอบ 4xx → คืนเหตุผลที่ชัดเจน
+ *   (ไม่โกหกว่า "ถอดไม่ได้" เหมือนกับที่มีเสียงจริง)
+ */
+async function transcribeAudioViaGateway(
+  audioBase64: string,
+  mimeType?: string
+): Promise<AudioTranscribeResult> {
+  if (!config.ai.baseUrl || !config.ai.authToken) {
+    return {
+      ok: false,
+      reason:
+        "ยังไม่ได้ตั้งค่าโมเดลสำรอง (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN)",
+    };
+  }
+
+  try {
+    const res = await callAiText({
+      url: `${config.ai.baseUrl}/v1/messages`,
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": config.ai.authToken,
+        "anthropic-version": "2023-06-01",
+      },
+      body: {
+        model: config.ai.model,
+        max_tokens: 2048,
+        temperature: 0,
+        system: TRANSCRIBE_AUDIO_PROMPT,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "ถอดเสียงพูดในไฟล์เสียงนี้ออกเป็นข้อความ" },
+              {
+                type: "document",
+                source: {
+                  type: "base64",
+                  media_type: normalizeAudioMime(mimeType),
+                  data: audioBase64,
+                },
+              },
+            ],
+          },
+        ],
+      },
+      timeoutMs: config.gemini.timeoutMs,
+    });
+
+    if (!res.ok) {
+      return {
+        ok: false,
+        reason: `โมเดลสำรองตอบกลับ ${res.status} (อาจไม่รองรับไฟล์เสียง)`,
+      };
+    }
+
+    const parsed = parseJson(res.text);
+    if (!parsed || typeof parsed !== "object") {
+      return { ok: false, reason: "โมเดลสำรองตอบมาไม่ใช่ JSON ที่อ่านได้" };
+    }
+
+    // โมเดลอาจตั้งชื่อคีย์เองได้ → รับได้หลายแบบ (เหมือนฝั่ง Gemini)
+    const rawTranscript =
+      parsed.transcript ?? parsed.text ?? parsed.transcription ?? parsed.content;
+    const text = typeof rawTranscript === "string" ? rawTranscript.trim() : "";
+
+    return { ok: true, text };
+  } catch (err: any) {
+    return {
+      ok: false,
+      reason: err?.message ?? "โมเดลสำรองเรียกไม่สำเร็จ",
+    };
+  }
+}
+
+/**
+ * ถอดเสียงจากไฟล์เสียงที่เข้ารหัสเป็น base64
+ * -------------------------------------------------------------
+ * Gemini ก่อน (ตัวหลัก) → ถ้า Gemini ล้ม ให้สลับไปใช้โมเดลเกตเวย์ (MiniMax)
+ * → ถ้าล้มทั้งคู่ คืนเหตุผลของทั้งสองทางให้ผู้ใช้เห็น
+ *
+ * คืน `ok: true` พร้อม text = "" เมื่อไฟล์นั้นไม่มีเสียงพูดจริง ๆ
+ */
+export async function transcribeAudio(
+  audioBase64: string,
+  mimeType?: string
+): Promise<AudioTranscribeResult> {
+  if (!audioBase64) {
+    return { ok: false, reason: "ไม่มีไฟล์เสียง" };
+  }
+
+  const primary = await transcribeAudioViaGemini(audioBase64, mimeType);
+  if (primary.ok) return primary;
+
+  const fallback = await transcribeAudioViaGateway(audioBase64, mimeType);
+  if (fallback.ok) return fallback;
+
+  return {
+    ok: false,
+    reason: `${primary.reason} · ทางสำรองก็ไม่สำเร็จ: ${fallback.reason}`,
+  };
 }
 
 /** ดึง JSON object ออกจากคำตอบที่อาจมีบทความห่อหุ้ม */

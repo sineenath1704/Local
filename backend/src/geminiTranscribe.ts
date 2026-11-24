@@ -41,7 +41,7 @@ const CLIP_MIME = "video/mp4";
 export type ClipAudioType = "speech" | "music" | "mixed" | "none";
 
 /** How the clip's bytes reached Gemini. */
-type Transport = "external-url" | "files-api";
+type Transport = "external-url" | "files-api" | "gateway";
 
 export interface TranscriptResult {
   /** The spoken words, verbatim. Empty when the clip has no speech. */

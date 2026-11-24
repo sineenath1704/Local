@@ -28,6 +28,7 @@
  */
 
 import { config, isGeminiConfigured } from "./config";
+import { callAiText } from "./aiStream";
 
 /** base เดียวกับที่ใช้ถอดเสียง (`geminiTranscribe.ts`) — เก็บแยกไฟล์เพราะคนละโมดูล */
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
@@ -359,9 +360,122 @@ async function requestGroundedSearch(
 }
 
 /**
+ * ค้นเว็บผ่านโมเดลเกตเวย์ — ทางสำรองเมื่อ Gemini ใช้ไม่ได้
+ * ============================================================
+ * · Gemini + Google Search (Grounding) ยังเป็นตัวหลัก — ค่านี้ทำงานตอนที่ตัวหลักล้ม
+ * · โมเดลเกตเวย์ (MiniMax) **ไม่มีเครื่องมือค้นเว็บแบบ Grounding**
+ *   → ทางสำรองนี้จึงตอบ "จากความรู้ของโมเดล" แทน → **ไม่มีลิงก์แหล่งที่มา**
+ *   → ดีกว่าค้นไม่ได้แล้วปล่อยให้แชทไปต่อโดยไม่มีข้อมูลเลย
+ */
+const GATEWAY_SEARCH_TIMEOUT_MS = 25_000;
+
+/** prompt ของทางสำรอง — ต่างจากของ Grounding ตรงที่ไม่มี "ใช้ Google Search" */
+function buildGatewaySearchPrompt(
+  question: string,
+  placeName: string | null,
+  placeAddress: string | null
+): string {
+  const lines = [
+    "คุณคือผู้ช่วยตอบคำถามเกี่ยวกับการท่องเที่ยวในประเทศไทย",
+    "",
+    "คำถามของผู้ใช้: " + question,
+  ];
+  if (placeName) lines.push("ชื่อสถานที่ที่เกี่ยวข้อง: " + placeName);
+  if (placeAddress) lines.push("ที่ตั้ง: " + placeAddress);
+  lines.push(
+    "",
+    "วิธีตอบ:",
+    "- ตอบจากความรู้ที่คุณมี สั้น กระชับ (ไม่เกินประมาณ 600 ตัวอักษร)",
+    "- ถ้าเป็นคำถามเรื่องรอบข้าง (ที่พัก/ร้านอาหาร/คาเฟ่ใกล้ ๆ) ให้แนะนำเป็นชื่อสถานที่ที่รู้จักจริง",
+    "- ห้ามแต่งชื่อสถานที่ ราคา เบอร์โทร หรือเวลาเปิดที่ไม่แน่ใจ",
+    "- ถ้าไม่รู้จริง ๆ ให้บอกว่าไม่แน่ใจ อย่าเดา",
+    "",
+    'ตอบกลับเป็น JSON ตาม schema ที่กำหนดเท่านั้น: {"answer":"...","placeName":"...","tags":["..."]}',
+    "- answer = คำตอบภาษาไทย",
+    "- placeName = ชื่อสถานที่หลักที่คำถามพูดถึง (ถ้าไม่มีให้เป็นค่าว่าง)",
+    "- tags = หมวดหมู่ที่เหมาะสม จากรายการนี้เท่านั้น: " + TRAVEL_TOPIC_TAGS.join(", ")
+  );
+  return lines.join("\n");
+}
+
+/**
+ * ถามโมเดลเกตเวย์แทนการค้นเว็บ
+ * -------------------------------------------------------------
+ * คืน `null` เมื่อเรียกไม่ได้ (ไม่มี token · ปลายทางตอบผิด · ตอบมาไม่มีเนื้อหา)
+ */
+async function searchViaGateway(input: {
+  question: string;
+  placeName: string | null;
+  placeAddress: string | null;
+}): Promise<TravelSearchResult | null> {
+  if (!config.ai.baseUrl || !config.ai.authToken) return null;
+
+  try {
+    const res = await callAiText({
+      url: `${config.ai.baseUrl}/v1/messages`,
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": config.ai.authToken,
+        "anthropic-version": "2023-06-01",
+      },
+      body: {
+        model: config.ai.model,
+        max_tokens: 2048,
+        temperature: 0.3,
+        system: buildGatewaySearchPrompt(
+          input.question,
+          input.placeName,
+          input.placeAddress
+        ),
+        messages: [{ role: "user", content: input.question }],
+      },
+      timeoutMs: GATEWAY_SEARCH_TIMEOUT_MS,
+    });
+
+    if (!res.ok) {
+      console.warn(
+        `[gemini-search] โมเดลสำรองตอบกลับ ${res.status} — ค้นเว็บไม่ได้`
+      );
+      return null;
+    }
+
+    const parsed = parseJsonLoose(res.text);
+    const answer =
+      typeof parsed?.answer === "string" && parsed.answer.trim()
+        ? parsed.answer.trim()
+        : res.text.trim();
+    if (!answer) return null;
+
+    console.log(
+      `[gemini-search] ใช้โมเดลสำรองแทนการค้นเว็บ · คำถาม="${input.question.slice(0, 60)}" · ไม่มีแหล่งที่มา`
+    );
+    return {
+      answer,
+      placeName:
+        typeof parsed?.placeName === "string" && parsed.placeName.trim()
+          ? parsed.placeName.trim()
+          : input.placeName,
+      tags: normalizeTopicTags(parsed?.tags),
+      // ไม่ได้ค้นเว็บจริง → ไม่มีลิงก์อ้างอิง (โมเดลอาจแต่งข้อมูลขึ้น)
+      sources: [],
+      query: input.question,
+    };
+  } catch (err: any) {
+    console.warn(
+      "[gemini-search] โมเดลสำรองไม่สำเร็จ:",
+      err?.message ?? err
+    );
+    return null;
+  }
+}
+
+/**
  * ค้นข้อมูลท่องเที่ยวจากเว็บ
  * -------------------------------------------------------------
- * คืน `null` เมื่อค้นไม่ได้ (ไม่มี key / โควตาหมด / เน็ตพัง / timeout)
+ * ลำดับ: Gemini + Google Search (Grounding) ก่อน → ถ้าล้ม ใช้โมเดลเกตเวย์ตอบแทน
+ * (ทางสำรองตอบจากความรู้ของโมเดล → ไม่มีลิงก์แหล่งที่มา)
+ *
+ * คืน `null` เมื่อค้นไม่ได้จริง ๆ (ไม่มี key / โควตาหมด / เน็ตพัง / timeout)
  * → ผู้เรียกต้องถือว่า "ไม่มีข้อมูลจากเว็บ" แล้วถอยไปตอบด้วยข้อมูลในระบบ
  */
 export async function searchTravelInfo(input: {
@@ -400,13 +514,24 @@ export async function searchTravelInfo(input: {
         break;
       }
       if (r.ok && !r.text.trim()) {
-        // ตอบมาแต่ไม่มีข้อความ (เช่นถูกบล็อกความปลอดภัย) → คงพฤติกรรมเดิม
+        // ตอบมาแต่ไม่มีข้อความ (เช่นถูกบล็อกความปลอดภัย) → ออกจากลูป ไปลองทางสำรอง
         console.warn("[gemini-search] Gemini ไม่ได้ส่งข้อความกลับมา");
-        return null;
+        break;
       }
     }
     if (!got) {
-      console.warn("[gemini-search] ค้นเว็บไม่สำเร็จทุกรูปแบบ");
+      console.warn(
+        "[gemini-search] ค้นเว็บไม่สำเร็จทุกรูปแบบ — ลองโมเดลสำรอง (ตอบจากความรู้ของโมเดล)"
+      );
+      const fallback = await searchViaGateway({
+        question,
+        placeName,
+        placeAddress: input.placeAddress ?? null,
+      });
+      if (fallback) {
+        // ไม่แคชผลของทางสำรอง → พอ Gemini กลับมา คำถามเดิมจะได้ค้นเว็บจริงทันที
+        return fallback;
+      }
       return null;
     }
 
@@ -436,6 +561,13 @@ export async function searchTravelInfo(input: {
     return result;
   } catch (err: any) {
     console.warn("[gemini-search] ค้นเว็บไม่สำเร็จ:", err?.message ?? err);
+    // ข้อยกเว้น (เน็ตพัง) → ลองโมเดลสำรองก่อนยอมแพ้
+    const fallback = await searchViaGateway({
+      question,
+      placeName,
+      placeAddress: input.placeAddress ?? null,
+    });
+    if (fallback) return fallback;
     return null;
   } finally {
     clearTimeout(timeout);

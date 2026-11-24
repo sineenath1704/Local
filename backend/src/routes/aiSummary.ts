@@ -29,6 +29,7 @@ import {
   type PlaceSearchOutcome,
 } from "./places";
 import { transcribeVideo, type TranscriptResult } from "../geminiTranscribe";
+import { transcribeVideoViaGateway } from "../gatewayTranscribe";
 import { DiagLog, errorDetail } from "../summaryDiag";
 import { errorBody } from "../middleware/errors";
 import { requestId } from "../middleware/requestContext";
@@ -90,6 +91,9 @@ function readScope(body: any): LocationScope | undefined {
  * clip for us. `audioType` is then set to whatever the audio really is, so
  * the prompt can tell "no speech" apart from "speech we failed to capture".
  *
+ * Gemini first, then the gateway model (MiniMax) as a fallback — Gemini stays
+ * the primary path, the fallback only runs when Gemini fails.
+ *
  * A transcription failure is NOT fatal — we fall back to a visual-only
  * summary and say so in the log, rather than wiping the user's data.
  */
@@ -108,6 +112,25 @@ async function withTranscript(
 
   const result = await transcribeVideo(input.videoUrl, diag);
   if (!result) {
+    // ── Gemini ใช้ไม่ได้ → สลับไปใช้โมเดลเกตเวย์ (MiniMax) ถอดเสียงแทน ──
+    // Gemini ยังอยู่ครบและยังเป็นตัวหลัก — ค่านี้แค่ทางสำรอง
+    const fallback = await transcribeVideoViaGateway(input.videoUrl, diag);
+    if (fallback) {
+      console.log(
+        `[summary] ถอดเสียงผ่านโมเดลสำรอง: ${fallback.transcript.length} ตัวอักษร, audioType=${fallback.audioType}`
+      );
+      return {
+        input: {
+          ...input,
+          transcript: fallback.transcript || undefined,
+          audioType: fallback.audioType,
+          onScreenText: fallback.onScreenText.length
+            ? fallback.onScreenText
+            : input.onScreenText,
+        },
+        transcript: fallback,
+      };
+    }
     console.warn("[summary] ถอดเสียงไม่สำเร็จ — สรุปจากภาพอย่างเดียว");
     return { input, transcript: null };
   }
