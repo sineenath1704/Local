@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "probe:translate": "ts-node --transpile-only scripts/translate_probe.ts",
     "probe:gem": "ts-node --transpile-only scripts/gem_probe.ts",
+    "probe:transcribe": "ts-node --transpile-only scripts/probe_transcribe.ts",
     "probe:summary": "ts-node --transpile-only scripts/summary_probe.ts",
     "probe:place": "ts-node --transpile-only scripts/place_resolve_probe.ts",
     "probe:resolve": "ts-node --transpile-only scripts/probe_resolve.ts",
