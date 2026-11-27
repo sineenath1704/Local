@@ -277,6 +277,28 @@ function ReviewRow({ review }: { review: ReviewItem }) {
 }
 
 // ---------- AI summary panel ----------
+/**
+ * เปิดพิกัดของสถานที่บน Google Maps
+ * -------------------------------------------------------------
+ * `place.location.gps` ที่แอปเก็บไว้ = **พิกัดบริบาท** ("lat,lng") ไม่ใช่ลิงก์
+ *   · backend ไม่เคยใส่ลิงก์ให้เลย — prompt ให้โมเดลเขียน `gps: null` เสมอ
+ *     และสายการ์ด (V2) ก็บอกชัดว่า "gps ไม่แตะ — Google เป็นเจ้าของ"
+ *   · ค่าพิกัดจริงมาจากตอนผู้ใช้ยืนยันสถานที่ในหน้าสร้างโพสต์
+ *     (`CreatePostScreen` เขียน `${lat},${lng}`)
+ * → `Linking.openURL("13.65,100.49")` เปิดไม่ได้ เพราะไม่มี scheme
+ * → ต้องแปลงเป็นลิงก์ของ Google Maps ก่อนเปิด (ถ้าเป็น URL อยู่แล้วก็เปิดตรง ๆ)
+ */
+function openPlaceOnMap(gps: string): void {
+  const raw = (gps ?? "").trim();
+  if (!raw) return;
+  const url = /^https?:\/\//i.test(raw)
+    ? raw
+    : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(raw)}`;
+  Linking.openURL(url).catch(() => {
+    Alert.alert("เปิดแผนที่ไม่สำเร็จ", url);
+  });
+}
+
 function AiSummaryPanel({
   summary,
   loading,
@@ -403,10 +425,11 @@ function AiSummaryPanel({
         </View>
       )}
 
-      {/* Google Maps button — opens map if GPS link exists */}
+      {/* Google Maps button — เปิดพิกัดที่ผู้ใช้ยืนยันไว้ (gps เก็บเป็นพิกัด
+          "lat,lng" ไม่ใช่ลิงก์ → ต้องแปลงเป็นลิงก์ Maps ก่อนเปิด) */}
       {summary.place?.location?.gps && (
         <TouchableOpacity
-          onPress={() => Linking.openURL(summary.place!.location.gps!)}
+          onPress={() => openPlaceOnMap(summary.place!.location.gps!)}
           activeOpacity={0.8}
           className="mt-3 bg-blue-50 border border-blue-200 rounded-2xl py-3 px-4 flex-row items-center justify-center shadow-sm"
         >
@@ -586,8 +609,8 @@ export default function CommentSheet({
       // Only take over for a deliberate vertical drag (so taps/horizontal scroll pass through).
       onMoveShouldSetPanResponder: (_e, g) => g.dy > 6 && Math.abs(g.dy) > Math.abs(g.dx),
       onPanResponderMove: (_e, g) => {
-        if (g.dy > 0) translateY.setValue(g.dy);
-      },
+  translateY.setValue(g.dy);
+},
       onPanResponderRelease: (_e, g) => {
         // Drag far enough OR flick down → close; otherwise snap back.
         if (g.dy > 110 || g.vy > 0.9) closeSheet();
