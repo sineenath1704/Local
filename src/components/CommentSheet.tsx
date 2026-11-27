@@ -584,39 +584,111 @@ export default function CommentSheet({
   // โพสต์จำลอง (ไฟล์ JSON) → ใช้ข้อมูลตัวอย่างเหมือนเดิม
   const isReal = useMemo(() => isRealVideoId(postId), [postId]);
 
-  // Fixed sheet height so it never grows/shrinks with its content (the AI tab
-  // used to push the sheet past the top; the empty state used to shrink it).
-  // Web/desktop keeps a taller sheet; phones & tablets use 40% of the screen.
-  const heightRatio = Platform.OS === "web" ? 0.5 : 0.4;
-  const sheetHeight = Math.min(Math.round(screenH * heightRatio), 500);
+  // ── ความสูงชีต ────────────────────────────────────────────────
+  // เปิดมาที่ 50% ของหน้าจอ · ลากขึ้นขยายเป็น 90% · ลากลงกลับ 50%
+  // · ลากลงอีกจาก 50% ปิดชีต · ปล่อยนิ้วแล้ว snap เข้าตำแหน่งที่ใกล้สุดเสมอ
+  // (ใช้ Animated + PanResponder ที่มีอยู่แล้ว ไม่เพิ่ม library)
+  const halfHeight = Math.round(screenH * 0.5);
+  const fullHeight = Math.round(screenH * 0.9);
+  /** ลากลงได้ถึงตรงนี้ก่อนถือว่า "ลากลงจนปิด" */
+  const minHeight = Math.round(screenH * 0.25);
+  /** ระยะที่ถือว่า "ลากลงจนปิด" (px) */
+  const CLOSE_DRAG_PX = 110;
 
-  // --- Swipe-down-to-dismiss (uses core Animated + PanResponder, no new deps) ---
-  // The <Modal animationType="slide"> owns the close animation, so closeSheet
-  // just calls onClose() ONCE (guarded) — no second manual animation, which
-  // was causing the sheet to appear to close twice.
-  const translateY = useRef(new Animated.Value(0)).current;
+  /** ความสูงที่กำลังแสดง (px) — เปลี่ยนความสูง = เปลี่ยน layout → ต้องใช้ JS driver */
+  const sheetHeightAnim = useRef(new Animated.Value(halfHeight)).current;
+  /** ตำแหน่งที่ชีต "พัก" อยู่: half = 50% · full = 90% */
+  const detentRef = useRef<"half" | "full">("half");
+  /** ความสูงตอนเริ่มลาก (คำนวณตำแหน่งใหม่จากค่าเริ่มต้น ไม่งั้นจะสะสม drift) */
+  const dragStartHeightRef = useRef(halfHeight);
+  /** ความสูงล่าสุดที่ตั้งไว้ (อ่านใน PanResponder ได้โดยไม่ต้องแตะ Animated.Value) */
+  const currentHeightRef = useRef(halfHeight);
   const closingRef = useRef(false);
-  const resetPosition = () =>
-    Animated.spring(translateY, { toValue: 0, useNativeDriver: true, bounciness: 2 }).start();
+
+  // ค่าเหล่านี้ถูกอ่านจากใน PanResponder (ซึ่งสร้างครั้งเดียว) → เก็บใน ref
+  // แล้วอัปเดตตอนขนาดจอ/พร็อพเปอร์ตี้เปลี่ยน
+  const halfHeightRef = useRef(halfHeight);
+  const fullHeightRef = useRef(fullHeight);
+  const minHeightRef = useRef(minHeight);
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    halfHeightRef.current = halfHeight;
+    fullHeightRef.current = fullHeight;
+    minHeightRef.current = minHeight;
+    onCloseRef.current = onClose;
+  }, [halfHeight, fullHeight, minHeight, onClose]);
+
+  /**
+   * ดึงชีตไปยืนที่ตำแหน่ง (half = 50% · full = 90%)
+   * ใช้ได้ทั้งจาก PanResponder และจากปุ่ม (ข้างในอ่านค่าจาก ref เสมอ)
+   */
+  const snapTo = (next: "half" | "full") => {
+    detentRef.current = next;
+    const target =
+      next === "full" ? fullHeightRef.current : halfHeightRef.current;
+    currentHeightRef.current = target;
+    Animated.spring(sheetHeightAnim, {
+      toValue: target,
+      useNativeDriver: false,
+      bounciness: 4,
+      speed: 16,
+    }).start();
+  };
   const closeSheet = () => {
     if (closingRef.current) return; // guard against double-close
     closingRef.current = true;
-    translateY.setValue(0); // reset drag offset; Modal handles the slide-out
-    onClose();
+    // Modal มี animationType="slide" เป็นคนจัดการแอนิเมชันปิดเอง
+    detentRef.current = "half";
+    currentHeightRef.current = halfHeightRef.current;
+    sheetHeightAnim.setValue(halfHeightRef.current); // ครั้งหน้าเปิดเริ่มที่ 50%
+    onCloseRef.current();
   };
   const panResponder = useRef(
     PanResponder.create({
       // Only take over for a deliberate vertical drag (so taps/horizontal scroll pass through).
-      onMoveShouldSetPanResponder: (_e, g) => g.dy > 6 && Math.abs(g.dy) > Math.abs(g.dx),
-      onPanResponderMove: (_e, g) => {
-  translateY.setValue(g.dy);
-},
-      onPanResponderRelease: (_e, g) => {
-        // Drag far enough OR flick down → close; otherwise snap back.
-        if (g.dy > 110 || g.vy > 0.9) closeSheet();
-        else resetPosition();
+      onMoveShouldSetPanResponder: (_e, g) =>
+        Math.abs(g.dy) > 6 && Math.abs(g.dy) > Math.abs(g.dx),
+      onPanResponderGrant: () => {
+        dragStartHeightRef.current = currentHeightRef.current;
       },
-      onPanResponderTerminate: () => resetPosition(),
+      onPanResponderMove: (_e, g) => {
+        // ลากขึ้น (dy ติดลบ) → สูงขึ้น · ลากลง → ย่อลง
+        const next = dragStartHeightRef.current - g.dy;
+        const clamped = Math.max(
+          minHeightRef.current,
+          Math.min(next, fullHeightRef.current)
+        );
+        currentHeightRef.current = clamped;
+        sheetHeightAnim.setValue(clamped);
+      },
+      onPanResponderRelease: (_e, g) => {
+        const current = currentHeightRef.current;
+        const half = halfHeightRef.current;
+        const full = fullHeightRef.current;
+        const mid = (half + full) / 2;
+
+        // ลากขึ้นเกินครึ่งทาง → ขยายเป็น 90%
+        if (current > mid) {
+          snapTo("full");
+          return;
+        }
+        // ลากลงจาก 90% → ย่อกลับ 50% (ยังไม่ปิด)
+        if (detentRef.current === "full") {
+          snapTo("half");
+          return;
+        }
+        // จาก 50% ลากลงเกินเกณฑ์ หรือปัดลงแรง → ปิดชีต
+        if (current < half - CLOSE_DRAG_PX || g.vy > 1.2) {
+          closeSheet();
+          return;
+        }
+        // ไม่ถึงเกณฑ์ไหน → snap กลับที่ 50%
+        snapTo("half");
+      },
+      onPanResponderTerminate: () => {
+        // ถูกระบบขัดจังหวะ (แอปสลับหน้า/โทรเข้า) → กลับที่ตำแหน่งเดิม
+        snapTo(detentRef.current === "full" ? "full" : "half");
+      },
     })
   ).current;
 
@@ -689,13 +761,25 @@ export default function CommentSheet({
     };
   }, [visible, postId, isReal]);
 
-  // Re-arm the close guard + drag position each time the sheet opens.
+  // Re-arm the close guard + reset the sheet to 50% each time it opens.
+  // (หมุนจอ/เปลี่ยนขนาดจอ → ความสูงตามตำแหน่งที่ชีตพักอยู่)
+  const wasVisibleRef = useRef(false);
   useEffect(() => {
-    if (visible) {
-      closingRef.current = false;
-      translateY.setValue(0);
+    if (!visible) {
+      wasVisibleRef.current = false;
+      return;
     }
-  }, [visible, translateY]);
+    closingRef.current = false;
+    if (!wasVisibleRef.current) {
+      // เปิดใหม่ → เริ่มที่ 50% เสมอ (แม้รอบก่อนปิดด้วยทางอื่น เช่น กดพื้นหลัง)
+      wasVisibleRef.current = true;
+      detentRef.current = "half";
+    }
+    const target =
+      detentRef.current === "full" ? fullHeightRef.current : halfHeightRef.current;
+    currentHeightRef.current = target;
+    sheetHeightAnim.setValue(target);
+  }, [visible, halfHeight, fullHeight, sheetHeightAnim]);
 
   // Lazily fetch the AI summary the first time the AI tab is opened for a post.
   // Failures are NOT latched — the user can hit "ลองใหม่" instead of being
@@ -846,9 +930,8 @@ export default function CommentSheet({
         <Animated.View
           className="rounded-t-3xl overflow-hidden"
           style={{
-            height: sheetHeight,
+            height: sheetHeightAnim,
             paddingBottom: Math.max(insets.bottom, 10),
-            transform: [{ translateY }],
             // Inline bg so it never drops out on web (nativewind + Animated.View
             // sometimes misses the className background there).
             backgroundColor: "#FFFFFF",
